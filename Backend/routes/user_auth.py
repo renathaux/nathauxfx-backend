@@ -22,6 +22,8 @@ from services.user_auth_service import (
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+LOGIN_HINT_COOKIE = "flowsignal_login_hint"
+LOGIN_HINT_MAX_AGE = 60 * 60 * 24 * 3650
 
 
 class SignupRequest(BaseModel):
@@ -48,6 +50,23 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+def _set_login_hint(response: Response) -> None:
+    response.set_cookie(
+        LOGIN_HINT_COOKIE,
+        "1",
+        max_age=LOGIN_HINT_MAX_AGE,
+        secure=True,
+        httponly=False,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_login_cookies(response: Response) -> None:
+    clear_session_cookie(response)
+    response.delete_cookie(LOGIN_HINT_COOKIE, path="/", secure=True, samesite="lax")
+
+
 def _delivery_error(exc: RuntimeError) -> HTTPException:
     code = str(exc)
     if code == "VERIFICATION_CODE_COOLDOWN":
@@ -64,7 +83,7 @@ def _verification_response(email: str, response: Response):
         verification = issue_email_verification(email)
     except RuntimeError as exc:
         if str(exc) == "VERIFICATION_CODE_COOLDOWN":
-            clear_session_cookie(response)
+            _clear_login_cookies(response)
             return {
                 "ok": True,
                 "verification_required": True,
@@ -74,7 +93,7 @@ def _verification_response(email: str, response: Response):
                 "delivery": "already_sent",
             }
         raise
-    clear_session_cookie(response)
+    _clear_login_cookies(response)
     return {
         "ok": True,
         "verification_required": True,
@@ -121,7 +140,7 @@ def login(payload: LoginRequest, response: Response):
                     masked = mask_email(str(row["email"]))
                 else:
                     raise _delivery_error(send_exc) from send_exc
-            clear_session_cookie(response)
+            _clear_login_cookies(response)
             raise HTTPException(
                 status_code=403,
                 detail={
@@ -132,6 +151,7 @@ def login(payload: LoginRequest, response: Response):
             )
         token, csrf, expires = create_session(str(row["id"]))
         set_session_cookie(response, token)
+        _set_login_hint(response)
         return {
             "ok": True,
             "user": public_user(row),
@@ -151,6 +171,7 @@ def verify_email(payload: VerifyEmailRequest, response: Response):
         user = verify_email_code(payload.email, payload.code)
         token, csrf, expires = create_session(str(user["id"]))
         set_session_cookie(response, token)
+        _set_login_hint(response)
         return {
             "ok": True,
             "verified": True,
@@ -202,7 +223,7 @@ def logout(request: Request, response: Response):
     current_user_with_csrf(request)
     token, _source = request_session_token(request)
     revoke_session(token)
-    clear_session_cookie(response)
+    _clear_login_cookies(response)
     return {"ok": True, "authenticated": False}
 
 
