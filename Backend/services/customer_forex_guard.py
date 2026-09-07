@@ -34,7 +34,9 @@ PREFIX_PATHS = (
     "/settings/",
     "/strategy/settings",
 )
-OWNER_SESSION_TTL = timedelta(hours=24)
+# Owner sessions should survive browser closes and normal deploys. Ten years is
+# effectively "until logout" for the product while still keeping a finite TTL.
+OWNER_SESSION_TTL = timedelta(days=3650)
 
 
 def _sensitive(path: str, method: str) -> bool:
