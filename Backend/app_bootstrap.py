@@ -14,6 +14,9 @@ from services.customer_forex_guard import (
     revoke_owner_session,
     validate_owner_session,
 )
+from services.ctrader_startup_restore_service import (
+    restore_single_authorized_ctrader_account,
+)
 from services.fundamental_execution_guard import validate_fundamental_entry
 from services.setup_swing_execution_guard import validate_fresh_setup_swing_identity
 from services.smc_strategy_authority import (
@@ -185,8 +188,6 @@ def protect_live_trade_after_tp1_with_email(trade):
 
     now_confirmed = api.live_sl_protection_confirmed(result)
 
-    # Mark a notification as pending only on the transition from unprotected to
-    # broker-verified protection. This avoids stale TP1 emails after a deploy.
     if now_confirmed and not was_confirmed:
         result["tp1_protection_email_pending"] = True
         result["tp1_protection_confirmed_at"] = (
@@ -194,8 +195,6 @@ def protect_live_trade_after_tp1_with_email(trade):
         )
         api.persist_live_trade_state(result)
 
-    # Persist the pending flag before SMTP. If delivery fails, the next broker
-    # sync retries the email without moving the stop loss again.
     if (
         now_confirmed
         and result.get("tp1_protection_email_pending")
@@ -231,8 +230,6 @@ def _apply_fundamental_execution_gate(result, symbol, side):
     try:
         fundamental_gate = validate_fundamental_entry(symbol, side)
     except Exception as exc:
-        # A guard implementation error must be visible but must not unexpectedly
-        # become a global trading kill switch.
         details.update({
             "fundamental_execution_connected": True,
             "fundamental_gate_state": "BYPASS_GUARD_ERROR",
@@ -423,7 +420,25 @@ def chart_smc_structure(symbol: str = "EURUSD", timeframe: str = "15m", limit: i
     return structure
 
 
+def _restore_ctrader_selection_before_market_data():
+    result = restore_single_authorized_ctrader_account(
+        api.fetch_ctrader_accounts,
+        api.set_active_ctrader_account,
+    )
+    print("CTRADER_STARTUP_ACCOUNT_RESTORE =", result)
+    return result
+
+
 def _start_forex_background_task():
+    try:
+        _restore_ctrader_selection_before_market_data()
+    except Exception as exc:
+        print("CTRADER_STARTUP_ACCOUNT_RESTORE =", {
+            "ok": False,
+            "restored": False,
+            "reason": str(exc),
+        })
+
     print("Startup OK - warming panel cache")
     api.warm_panel_cache_from_persisted_candles()
     try:
@@ -445,22 +460,15 @@ def _start_forex_background_task():
         api.ENGINE_RUNTIME_STATE["loop_thread_id"] = api.BACKGROUND_THREAD.ident
 
 
-# Replace the legacy startup hook with the Forex-only runtime while preserving
-# the same panel warmup, cTrader stream, and 24/7 strategy background thread.
 api.app.router.on_startup = [
     handler for handler in api.app.router.on_startup
     if handler is not api.start_background_task
 ]
 api.app.router.on_startup.append(_start_forex_background_task)
 
-# The chart toggle is presentation only. The server-side SMC indicator remains
-# active because strict_trader evaluates it independently on every 15m cycle.
 strict_trader.evaluate_15m_breakout = evaluate_15m_breakout_with_smc_indicator
 strict_trader.save_remembered_breakout = save_remembered_breakout_with_smc_marker
 
-# Keep existing alert behavior and the final-entry swing correction. The final
-# strategy-generated live entry must now also pass the Fundamental Insight
-# direction filter after all existing technical checks succeed.
 api.get_signal_alert_email_to = get_signal_alert_email_to_multi
 api.protect_live_trade_after_tp1 = protect_live_trade_after_tp1_with_email
 api.validate_fresh_ema_permission_locked = (
@@ -472,6 +480,7 @@ print("SMC_STRATEGY_AUTHORITY =", {
     "bos_choch_authority": True,
     "visual_toggle_controls_strategy": False,
     "fundamental_execution_filter": True,
+    "ctrader_startup_account_restore": True,
 })
 
 app = api.app
