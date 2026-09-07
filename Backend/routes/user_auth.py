@@ -16,6 +16,7 @@ from services.user_auth_service import (
     request_session_token,
     revoke_session,
     session_snapshot,
+    set_session_cookie,
     signup,
     verify_email_code,
 )
@@ -130,7 +131,7 @@ def login(payload: LoginRequest, response: Response):
                 },
             )
         token, csrf, expires = create_session(str(row["id"]))
-        clear_session_cookie(response)
+        set_session_cookie(response, token)
         return {
             "ok": True,
             "user": public_user(row),
@@ -149,7 +150,7 @@ def verify_email(payload: VerifyEmailRequest, response: Response):
     try:
         user = verify_email_code(payload.email, payload.code)
         token, csrf, expires = create_session(str(user["id"]))
-        clear_session_cookie(response)
+        set_session_cookie(response, token)
         return {
             "ok": True,
             "verified": True,
@@ -199,10 +200,9 @@ def session(request: Request):
 @router.post("/logout")
 def logout(request: Request, response: Response):
     current_user_with_csrf(request)
-    token, source = request_session_token(request)
+    token, _source = request_session_token(request)
     revoke_session(token)
-    if source == "cookie":
-        clear_session_cookie(response)
+    clear_session_cookie(response)
     return {"ok": True, "authenticated": False}
 
 
