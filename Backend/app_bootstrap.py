@@ -14,6 +14,7 @@ from services.customer_forex_guard import (
     revoke_owner_session,
     validate_owner_session,
 )
+from services.fundamental_execution_guard import validate_fundamental_entry
 from services.setup_swing_execution_guard import validate_fresh_setup_swing_identity
 from services.smc_strategy_authority import (
     AUTHORITY_SOURCE as SMC_AUTHORITY_SOURCE,
@@ -221,17 +222,75 @@ def protect_live_trade_after_tp1_with_email(trade):
     return result
 
 
+def _apply_fundamental_execution_gate(result, symbol, side):
+    """Apply macro direction only after every existing technical gate passes."""
+    if not isinstance(result, dict) or not result.get("ok"):
+        return result
+
+    details = dict(result.get("details") or {})
+    try:
+        fundamental_gate = validate_fundamental_entry(symbol, side)
+    except Exception as exc:
+        # A guard implementation error must be visible but must not unexpectedly
+        # become a global trading kill switch.
+        details.update({
+            "fundamental_execution_connected": True,
+            "fundamental_gate_state": "BYPASS_GUARD_ERROR",
+            "fundamental_error": str(exc),
+        })
+        print("LIVE_FUNDAMENTAL_FINAL_GATE =", {
+            "symbol": api.normalize_symbol(symbol),
+            "side": str(side or "").upper(),
+            "ok": True,
+            "reason": None,
+            "gate_state": "BYPASS_GUARD_ERROR",
+            "error": str(exc),
+        })
+        return {
+            "ok": True,
+            "reason": None,
+            "details": details,
+        }
+
+    if not isinstance(fundamental_gate, dict):
+        details["fundamental_gate_state"] = "BYPASS_INVALID_GUARD_RESPONSE"
+        return {
+            "ok": True,
+            "reason": None,
+            "details": details,
+        }
+
+    details.update(fundamental_gate.get("details") or {})
+    print("LIVE_FUNDAMENTAL_FINAL_GATE =", {
+        "symbol": api.normalize_symbol(symbol),
+        "side": str(side or "").upper(),
+        "ok": bool(fundamental_gate.get("ok")),
+        "reason": fundamental_gate.get("reason"),
+        "gate_state": details.get("fundamental_gate_state"),
+        "direction": details.get("fundamental_direction"),
+        "status": details.get("fundamental_status"),
+        "score": details.get("fundamental_score"),
+        "confidence": details.get("fundamental_confidence"),
+    })
+    return {
+        "ok": bool(fundamental_gate.get("ok")),
+        "reason": fundamental_gate.get("reason"),
+        "details": details,
+    }
+
+
 def validate_fresh_ema_permission_locked_with_stable_swing_identity(
     symbol,
     side,
     setup_identity=None,
 ):
-    """Recover only the known short-window swing requalification false negative.
+    """Recover the stable swing identity and then enforce fundamentals.
 
     The original final gate still owns EMA, consolidation, and all of its normal
     failure modes. If and only if it reaches the historical swing mismatch,
     verify that the exact strategy-approved pivot still exists in the same
-    250-candle SMC authority window used to create the setup.
+    250-candle SMC authority window used to create the setup. Fundamentals are
+    evaluated only after those technical checks pass.
     """
     result = _ORIGINAL_VALIDATE_FRESH_EMA_PERMISSION_LOCKED(
         symbol,
@@ -241,7 +300,7 @@ def validate_fresh_ema_permission_locked_with_stable_swing_identity(
     if not isinstance(result, dict):
         return result
     if result.get("ok"):
-        return result
+        return _apply_fundamental_execution_gate(result, symbol, side)
     if result.get("reason") != "WAIT_SETUP_SWING_CHANGED_BEFORE_EXECUTION":
         return result
 
@@ -274,11 +333,15 @@ def validate_fresh_ema_permission_locked_with_stable_swing_identity(
                 "setup_identity": setup_identity,
                 "details": swing_check.get("details"),
             })
-            return {
-                "ok": True,
-                "reason": None,
-                "details": details,
-            }
+            return _apply_fundamental_execution_gate(
+                {
+                    "ok": True,
+                    "reason": None,
+                    "details": details,
+                },
+                symbol,
+                side,
+            )
     except Exception as exc:
         details["stable_setup_swing_recheck_error"] = str(exc)
 
@@ -395,9 +458,9 @@ api.app.router.on_startup.append(_start_forex_background_task)
 strict_trader.evaluate_15m_breakout = evaluate_15m_breakout_with_smc_indicator
 strict_trader.save_remembered_breakout = save_remembered_breakout_with_smc_marker
 
-# Keep existing alert behavior and the final-entry swing correction. These
-# cannot bypass EMA, consolidation, risk, duplicate, broker-position,
-# setup-fingerprint, or market-data gates.
+# Keep existing alert behavior and the final-entry swing correction. The final
+# strategy-generated live entry must now also pass the Fundamental Insight
+# direction filter after all existing technical checks succeed.
 api.get_signal_alert_email_to = get_signal_alert_email_to_multi
 api.protect_live_trade_after_tp1 = protect_live_trade_after_tp1_with_email
 api.validate_fresh_ema_permission_locked = (
@@ -408,6 +471,7 @@ print("SMC_STRATEGY_AUTHORITY =", {
     "source": SMC_AUTHORITY_SOURCE,
     "bos_choch_authority": True,
     "visual_toggle_controls_strategy": False,
+    "fundamental_execution_filter": True,
 })
 
 app = api.app
