@@ -148,6 +148,48 @@ def _persisted_owner_session_valid(token: str) -> bool:
         return False
 
 
+def validate_owner_session(token: str, legacy_sessions: dict) -> bool:
+    """Validate and, when needed, rehydrate one owner token."""
+    token = str(token or "").strip()
+    if not token:
+        return False
+    session = legacy_sessions.get(token)
+    role = (
+        str(session.get("role") or "").lower()
+        if isinstance(session, dict)
+        else ""
+    )
+    if role == "admin":
+        _persist_owner_session(token)
+        return True
+    if not _persisted_owner_session_valid(token):
+        return False
+    legacy_sessions[token] = {
+        "email": "persisted-owner-session",
+        "role": "admin",
+        "auth_method": "persisted_owner_session",
+    }
+    return True
+
+
+def revoke_owner_session(token: str, legacy_sessions: dict) -> bool:
+    """Revoke an owner token both in memory and in durable storage."""
+    token = str(token or "").strip()
+    if not token:
+        return True
+    legacy_sessions.pop(token, None)
+    try:
+        with database_engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM flowsignal_owner_sessions WHERE token_hash = :token_hash"),
+                {"token_hash": _token_hash(token)},
+            )
+        return True
+    except Exception as exc:
+        print("OWNER_SESSION_REVOKE_WARNING =", type(exc).__name__)
+        return False
+
+
 def install_owner_forex_mutation_guard(app, legacy_sessions: dict) -> dict:
     """Wrap sensitive legacy routes after route registration.
 
@@ -188,21 +230,8 @@ def install_owner_forex_mutation_guard(app, legacy_sessions: dict) -> dict:
                     return
 
                 session = legacy_sessions.get(token)
-                role = (
-                    str(session.get("role") or "").lower()
-                    if isinstance(session, dict)
-                    else ""
-                )
-
-                if role == "admin":
-                    _persist_owner_session(token)
-                elif _persisted_owner_session_valid(token):
-                    # Rehydrate the legacy in-memory map after a Render deploy.
-                    legacy_sessions[token] = {
-                        "email": "persisted-owner-session",
-                        "role": "admin",
-                        "auth_method": "persisted_owner_session",
-                    }
+                if validate_owner_session(token, legacy_sessions):
+                    pass
                 elif isinstance(session, dict):
                     response = JSONResponse(
                         {
