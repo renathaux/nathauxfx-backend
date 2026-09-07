@@ -5,11 +5,15 @@ import re
 import smtplib
 import threading
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 import api
 from strategies import strict_trader
-from services.customer_forex_guard import persist_owner_session
+from services.customer_forex_guard import (
+    persist_owner_session,
+    revoke_owner_session,
+    validate_owner_session,
+)
 from services.setup_swing_execution_guard import validate_fresh_setup_swing_identity
 from services.smc_strategy_authority import (
     AUTHORITY_SOURCE as SMC_AUTHORITY_SOURCE,
@@ -50,6 +54,34 @@ async def persist_owner_session_immediately_after_login(request, call_next):
                 continue
             persist_owner_session(token)
     return response
+
+
+def _owner_bearer_token(request: Request) -> str:
+    raw = str(request.headers.get("authorization") or "").strip()
+    if not raw.lower().startswith("bearer "):
+        return ""
+    return raw.split(" ", 1)[1].strip()
+
+
+@api.app.get("/owner/session")
+def owner_session_status(request: Request):
+    token = _owner_bearer_token(request)
+    authenticated = validate_owner_session(token, api.SESSIONS)
+    return {
+        "ok": True,
+        "authenticated": bool(authenticated),
+        "role": "admin" if authenticated else None,
+    }
+
+
+@api.app.post("/owner/logout")
+def owner_logout(request: Request):
+    token = _owner_bearer_token(request)
+    revoked = revoke_owner_session(token, api.SESSIONS)
+    return {
+        "ok": bool(revoked),
+        "authenticated": False,
+    }
 
 
 def _split_recipients(value):
