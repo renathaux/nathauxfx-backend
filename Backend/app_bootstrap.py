@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
+import copy
 import os
 import re
 import smtplib
@@ -8,6 +9,7 @@ import threading
 from fastapi import HTTPException, Request
 
 import api
+from strategies import shared as strategy_shared
 from strategies import strict_trader
 from services.customer_forex_guard import (
     persist_owner_session,
@@ -18,6 +20,11 @@ from services.ctrader_startup_restore_service import (
     restore_single_authorized_ctrader_account,
 )
 from services.fundamental_execution_guard import validate_fundamental_entry
+from services.paper_live_entry_service import (
+    PAPER_ENTRY_MODEL,
+    build_paper_entry_result,
+    clear_paper_entry_watch,
+)
 from services.setup_swing_execution_guard import validate_fresh_setup_swing_identity
 from services.smc_strategy_authority import (
     AUTHORITY_SOURCE as SMC_AUTHORITY_SOURCE,
@@ -33,6 +40,7 @@ _ORIGINAL_VALIDATE_FRESH_EMA_PERMISSION_LOCKED = (
     api.validate_fresh_ema_permission_locked
 )
 _ORIGINAL_SAVE_REMEMBERED_BREAKOUT = strict_trader.save_remembered_breakout
+_ORIGINAL_UPDATE_PAPER_TRADE = strategy_shared.update_paper_trade
 
 
 @api.app.middleware("http")
@@ -349,6 +357,228 @@ def validate_fresh_ema_permission_locked_with_stable_swing_identity(
     }
 
 
+def _paper_candles(frame):
+    converter = getattr(strategy_shared, "_df_to_candles", None)
+    if not callable(converter) or frame is None:
+        return []
+    try:
+        return converter(frame, limit=500)
+    except Exception:
+        return []
+
+
+def paper_live_strategy_final_gate(
+    candidate,
+    symbol,
+    side,
+    *,
+    data_5m=None,
+    data_15m=None,
+):
+    """Mirror LIVE's strategy-time gates without requiring a real broker order."""
+    normalized = api.normalize_symbol(symbol)
+    details = {
+        "symbol": normalized,
+        "side": str(side or "").upper(),
+        "paper_entry_model": PAPER_ENTRY_MODEL,
+        "same_live_strategy_gates": True,
+    }
+    panel_context = {
+        normalized: candidate,
+        "candles": {
+            normalized: {
+                "5m": _paper_candles(data_5m),
+                "15m": _paper_candles(data_15m),
+                "1h": [],
+            }
+        },
+    }
+
+    try:
+        news_state = api.evaluate_news_entry_state(
+            panel_context,
+            normalized,
+            side=side,
+            audit=True,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": "WAIT_NEWS_STATUS_UNAVAILABLE",
+            "details": {**details, "news_error": str(exc)},
+        }
+
+    details["news_gate"] = copy.deepcopy(news_state)
+    if news_state.get("allow_news_entry"):
+        return {
+            "ok": False,
+            "reason": "WAIT_PAPER_LIVE_NEWS_ENTRY_MODE",
+            "details": details,
+        }
+    if not news_state.get("allow_normal_entry", True):
+        return {
+            "ok": False,
+            "reason": (
+                news_state.get("blocking_reason")
+                or news_state.get("authoritative_status")
+                or "NEWS BLOCK"
+            ),
+            "details": details,
+        }
+    if not api.normal_plan_is_fresh_after_news(candidate, news_state):
+        return {
+            "ok": False,
+            "reason": "WAIT_FRESH_NORMAL_SETUP_AFTER_NEWS",
+            "details": details,
+        }
+
+    fresh_gate = api.validate_fresh_ema_permission_locked(
+        normalized,
+        side,
+        candidate.get("setup_identity"),
+    )
+    details["fresh_live_gate"] = copy.deepcopy(fresh_gate)
+    if not isinstance(fresh_gate, dict) or not fresh_gate.get("ok"):
+        return {
+            "ok": False,
+            "reason": (
+                (fresh_gate or {}).get("reason")
+                or "WAIT_EMA_CHANGED_BEFORE_EXECUTION"
+            ),
+            "details": details,
+        }
+
+    market_health = api.check_live_market_data_health(normalized)
+    details["market_health"] = copy.deepcopy(market_health)
+    if not market_health.get("ok"):
+        return {
+            "ok": False,
+            "reason": "WAIT_STALE_MARKET_FEED",
+            "details": details,
+        }
+
+    rr = api.validate_live_trade_risk_reward(
+        normalized,
+        side,
+        candidate.get("entry_price"),
+        candidate.get("stop_loss"),
+        candidate.get("tp2"),
+    )
+    details["risk_reward"] = copy.deepcopy(rr)
+    if not rr.get("ok"):
+        return {
+            "ok": False,
+            "reason": rr.get("reason") or "WAIT_INVALID_RR",
+            "details": details,
+        }
+
+    return {"ok": True, "reason": None, "details": details}
+
+
+def update_paper_trade_with_live_5m_entry(
+    symbol,
+    result,
+    current_price,
+    current_low=None,
+    current_high=None,
+):
+    """Keep PAPER on LIVE V1 but use the requested 5m BOS + second-close entry."""
+    normalized = api.normalize_symbol(symbol)
+    before_ids = {
+        trade.get("trade_id")
+        for trade in strategy_shared.PAPER_ACTIVE_TRADES
+        if isinstance(trade, dict)
+        and api.normalize_symbol(trade.get("symbol")) == normalized
+        and trade.get("trade_id")
+    }
+    try:
+        data_5m = api.get_ctrader_market_data(
+            normalized,
+            "5m",
+            limit=250,
+            force_refresh=False,
+        )
+        data_15m = api.get_ctrader_market_data(
+            normalized,
+            "15m",
+            limit=250,
+            force_refresh=False,
+        )
+        paper_result = build_paper_entry_result(
+            normalized,
+            result,
+            data_5m,
+            data_15m,
+            strict_trader_module=strict_trader,
+            final_gate=paper_live_strategy_final_gate,
+        )
+    except Exception as exc:
+        print("PAPER_5M_ENTRY_BUILD_ERROR =", {
+            "symbol": normalized,
+            "error": str(exc),
+        })
+        paper_result = copy.deepcopy(result) if isinstance(result, dict) else {}
+        paper_result.update({
+            "signal": "WAIT",
+            "final_signal": "WAIT",
+            "paper_entry_model": PAPER_ENTRY_MODEL,
+            "paper_entry_ready": False,
+            "paper_entry_reason": "WAIT_PAPER_ENTRY_ENGINE_ERROR",
+        })
+
+    outcome = _ORIGINAL_UPDATE_PAPER_TRADE(
+        normalized,
+        paper_result,
+        current_price,
+        current_low,
+        current_high,
+    )
+
+    opened = next(
+        (
+            trade
+            for trade in reversed(strategy_shared.PAPER_ACTIVE_TRADES)
+            if isinstance(trade, dict)
+            and api.normalize_symbol(trade.get("symbol")) == normalized
+            and str(trade.get("status") or "").upper() == "OPEN"
+            and trade.get("trade_id") not in before_ids
+        ),
+        None,
+    )
+    if opened is not None:
+        opened.update({
+            "entry_model": PAPER_ENTRY_MODEL,
+            "paper_entry_trigger": copy.deepcopy(
+                paper_result.get("paper_entry_details") or {}
+            ),
+            "paper_live_final_gate": copy.deepcopy(
+                paper_result.get("paper_live_final_gate") or {}
+            ),
+            "five_m_closed_candle_time": paper_result.get(
+                "five_m_closed_candle_time"
+            ),
+            "live_strategy_setup_type": (
+                (paper_result.get("paper_entry_details") or {})
+                .get("fifteen_m_watch", {})
+                .get("source_setup_type")
+            ),
+        })
+        strategy_shared.update_open_paper_history(normalized, opened)
+        strategy_shared.save_paper_backup()
+        clear_paper_entry_watch(normalized, "paper trade opened")
+        print("PAPER_LIVE_STRATEGY_ENTRY_OPENED =", {
+            "symbol": normalized,
+            "side": opened.get("side"),
+            "entry_model": PAPER_ENTRY_MODEL,
+            "entry": opened.get("entry"),
+            "sl": opened.get("sl"),
+            "tp1": opened.get("tp1"),
+            "tp2": opened.get("tp2"),
+        })
+
+    return outcome
+
+
 def evaluate_15m_breakout_with_smc_indicator(
     data_15m,
     symbol,
@@ -474,6 +704,7 @@ api.protect_live_trade_after_tp1 = protect_live_trade_after_tp1_with_email
 api.validate_fresh_ema_permission_locked = (
     validate_fresh_ema_permission_locked_with_stable_swing_identity
 )
+strategy_shared.update_paper_trade = update_paper_trade_with_live_5m_entry
 
 print("SMC_STRATEGY_AUTHORITY =", {
     "source": SMC_AUTHORITY_SOURCE,
@@ -481,6 +712,8 @@ print("SMC_STRATEGY_AUTHORITY =", {
     "visual_toggle_controls_strategy": False,
     "fundamental_execution_filter": True,
     "ctrader_startup_account_restore": True,
+    "paper_same_live_strategy": True,
+    "paper_entry_model": PAPER_ENTRY_MODEL,
 })
 
 app = api.app
