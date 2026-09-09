@@ -10,12 +10,81 @@ cTrader can also revise a just-closed 15m trendbar for a few minutes after the
 nominal close. The authoritative stream therefore waits one 5m confirmation
 slot before accepting a 15m provider candle. This keeps immutable candles truly
 final without changing BOS/CHoCH, risk, or execution rules.
+
+The connector may append a synthetic current candle for display and strategy
+visibility. That synthetic row must never become the durable provider cache:
+once a synthetic row survives into a later bucket it can look closed and would
+pollute the immutable indicator stream. The cache guard below preserves only
+the last provider-fetched frame while still returning the synthetic copy to
+legacy callers.
 """
 from datetime import datetime, timezone
 from functools import wraps
 
 
 CTRADER_15M_SETTLE_SECONDS = 5 * 60
+
+
+def _install_ctrader_provider_cache_guard():
+    """Keep cTrader's shared cache provider-only while callers see live candles.
+
+    ``get_ctrader_market_data`` intentionally returns a copy with the current
+    live-tick candle appended. On a cache hit the legacy implementation also
+    writes that returned copy back into ``CTRADER_CANDLE_CACHE``. Preserve the
+    provider snapshot whenever no new provider fetch occurred so a synthetic
+    candle can never age into the authoritative closed-candle stream.
+    """
+    try:
+        import ctrader_connector as _ctrader
+    except Exception:
+        return False
+
+    if getattr(_ctrader, "_PROVIDER_ONLY_CANDLE_CACHE_GUARD_INSTALLED", False):
+        return True
+
+    original_get = _ctrader.get_ctrader_market_data
+
+    @wraps(original_get)
+    def get_ctrader_market_data(symbol, timeframe, *args, **kwargs):
+        cache_key = _ctrader.get_ctrader_candle_cache_key(symbol, timeframe)
+        cached_before = _ctrader.CTRADER_CANDLE_CACHE.get(cache_key)
+        provider_snapshot = None
+        fetched_at_before = None
+        if isinstance(cached_before, dict):
+            before_data = cached_before.get("data")
+            if before_data is not None:
+                try:
+                    provider_snapshot = before_data.copy(deep=True)
+                except TypeError:
+                    provider_snapshot = before_data.copy()
+            fetched_at_before = cached_before.get("fetched_at")
+
+        result = original_get(symbol, timeframe, *args, **kwargs)
+
+        cached_after = _ctrader.CTRADER_CANDLE_CACHE.get(cache_key)
+        if isinstance(cached_after, dict) and provider_snapshot is not None:
+            # A changed fetched_at means a real provider refresh replaced the
+            # cache and must be kept. If it is unchanged, any data mutation came
+            # from append_current_forming_candle/cache fallback and is synthetic.
+            if cached_after.get("fetched_at") == fetched_at_before:
+                cached_after["data"] = provider_snapshot
+
+        return result
+
+    _ctrader.get_ctrader_market_data = get_ctrader_market_data
+    _ctrader._PROVIDER_ONLY_CANDLE_CACHE_GUARD_INSTALLED = True
+    _ctrader._PROVIDER_ONLY_CANDLE_CACHE_ORIGINAL_GET = original_get
+
+    # api.py imports the connector function by value before app_bootstrap runs.
+    # Update that already-bound alias too once api is fully importable.
+    try:
+        import api as _api
+        if getattr(_api, "get_ctrader_market_data", None) is original_get:
+            _api.get_ctrader_market_data = get_ctrader_market_data
+    except Exception:
+        pass
+
+    return True
 
 
 def _install_ctrader_sparse_trendbar_policy():
@@ -67,6 +136,9 @@ def _install_ctrader_sparse_trendbar_policy():
 
     @wraps(original_initialize)
     def initialize_indicator_stream(frame, symbol, timeframe, point_size, *args, **kwargs):
+        # The first startup fetch is force-refreshed provider data. Install the
+        # cache guard before any later cache hit can persist a synthetic row.
+        _install_ctrader_provider_cache_guard()
         is_ctrader = _ctrader_sparse_frame_allowed(frame, symbol, timeframe)
         if "allow_sparse_trendbars" not in kwargs:
             kwargs["allow_sparse_trendbars"] = is_ctrader
@@ -86,6 +158,7 @@ def _install_ctrader_sparse_trendbar_policy():
 
     @wraps(original_get)
     def get_authoritative_structure(frame, symbol, timeframe, point_size, *args, **kwargs):
+        _install_ctrader_provider_cache_guard()
         is_ctrader = _ctrader_sparse_frame_allowed(frame, symbol, timeframe)
         if "allow_sparse_trendbars" not in kwargs:
             kwargs["allow_sparse_trendbars"] = is_ctrader
