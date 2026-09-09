@@ -9,6 +9,7 @@ import threading
 from fastapi import HTTPException, Request
 
 import api
+from indicators.smc import analyze_structure
 from strategies import shared as strategy_shared
 from strategies import strict_trader
 from services.customer_forex_guard import (
