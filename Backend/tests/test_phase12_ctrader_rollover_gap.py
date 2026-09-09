@@ -45,7 +45,9 @@ def _ctrader_frame(start="2026-09-03T14:00:00Z", periods=8):
 
 def test_ctrader_sparse_no_tick_bars_are_accepted_without_synthetic_ohlc():
     Session, engine = _session_factory()
-    data = _ctrader_frame().drop(_ctrader_frame().index[[2, 3]])
+    base = _ctrader_frame()
+    missing = base.index[[2, 3]]
+    data = base.drop(missing)
 
     result = stream.initialize_indicator_stream(
         data,
@@ -68,8 +70,8 @@ def test_ctrader_sparse_no_tick_bars_are_accepted_without_synthetic_ohlc():
             else pd.Timestamp(row.candle_timestamp).tz_convert("UTC")
             for row in session.query(IndicatorCandle).all()
         }
-        assert data.index[2] not in stored
-        assert data.index[3] not in stored
+        assert missing[0] not in stored
+        assert missing[1] not in stored
         assert session.query(IndicatorCandle).count() == len(data)
     finally:
         session.close()
@@ -78,7 +80,8 @@ def test_ctrader_sparse_no_tick_bars_are_accepted_without_synthetic_ohlc():
 
 def test_non_ctrader_frame_keeps_strict_gap_blocking():
     Session, engine = _session_factory()
-    data = _ctrader_frame().drop(_ctrader_frame().index[[2, 3]]).drop(columns=["Volume"])
+    base = _ctrader_frame()
+    data = base.drop(base.index[[2, 3]]).drop(columns=["Volume"])
 
     with pytest.raises(stream.IndicatorStreamUnavailable, match="missing closed candles"):
         stream.initialize_indicator_stream(
