@@ -2659,6 +2659,7 @@ def build_ctrader_market_order_payload(
     digits=5,
     lot_size=100000,
     risk=None,
+    client_order_id=None,
 ):
     normalized_action = str(action or "").upper()
     normalized_symbol = normalize_symbol(symbol)
@@ -2734,9 +2735,9 @@ def build_ctrader_market_order_payload(
         "orderType": "MARKET",
         "tradeSide": trade_side,
         "volume": payload_volume,
-        "label": "NathauxFX",
-        "comment": f"NathauxFX auto trade {symbol}",
-        "clientOrderId": f"flowsignal-{uuid.uuid4()}",
+        "label": str(client_order_id or "NathauxFX")[:100],
+        "comment": f"NathauxFX {str(client_order_id or symbol)[:80]}",
+        "clientOrderId": str(client_order_id or f"flowsignal-{uuid.uuid4()}"),
     }
     payload["_volume_check"] = volume_check
 
@@ -2798,7 +2799,8 @@ def place_market_order(
     tp2=None,
     mode=None,
     volume_units=None,
-    risk=None
+    risk=None,
+    client_order_id=None,
 ):
     normalized_action = str(action or side or "").upper()
     normalized_symbol = normalize_symbol(symbol)
@@ -2852,6 +2854,7 @@ def place_market_order(
                 or get_symbol_risk_fallback(normalized_symbol)["lot_size"]
             ),
             risk=risk,
+            client_order_id=client_order_id,
         )
         volume_check = order_payload.pop("_volume_check", {})
 

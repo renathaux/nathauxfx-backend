@@ -112,6 +112,17 @@ from services.execution_risk_service import (
     validate_pre_submit as validate_executable_risk,
     validate_sl_amendment as validate_application_sl_amendment,
 )
+from services.indicator_event_stream_service import (
+    get_event_lifecycles,
+    update_event_lifecycle,
+)
+from services.trade_submission_service import (
+    claim_submission,
+    complete_submission,
+    mark_request_started,
+    recover_unsent_claim,
+    require_reconciliation,
+)
 from db import database_status as get_database_status, engine as database_engine
 from paths import DATA_DIR
 from risk_management.account_balance import (
@@ -1171,6 +1182,21 @@ def get_signal_setup_id(plan, side=None):
             or confirmation.get("confirmation_close_time")
         ),
     }
+    indicator_event_id = (
+        explicit_identity.get("indicator_event_id")
+        or plan.get("source_indicator_event_id")
+        or breakout.get("indicator_event_id")
+    )
+    m5_confirmation_id = (
+        explicit_identity.get("m5_confirmation_id")
+        or plan.get("m5_confirmation_id")
+        or confirmation.get("confirmation_id")
+    )
+    if indicator_event_id or m5_confirmation_id:
+        setup_parts.update({
+            "indicator_event_id": indicator_event_id,
+            "m5_confirmation_id": m5_confirmation_id,
+        })
     if any(value in [None, ""] for value in setup_parts.values()):
         # Legacy plans are still compared for UI lifecycle cleanup only. Live
         # execution separately requires the complete strict setup identity,
@@ -6980,6 +7006,24 @@ def get_plan_execution_metadata(plan, side=None):
     )
     return {
         "signal_setup_id": get_signal_setup_id(plan, side),
+        "source_indicator_event_id": (
+            plan.get("source_indicator_event_id")
+            or breakout.get("indicator_event_id")
+        ),
+        "indicator_event_identity": copy.deepcopy(
+            plan.get("indicator_event_identity")
+            or breakout.get("indicator_event_identity")
+            or {}
+        ),
+        "m5_confirmation_id": (
+            plan.get("m5_confirmation_id")
+            or confirmation.get("confirmation_id")
+        ),
+        "m5_confirmation_identity": copy.deepcopy(
+            plan.get("m5_confirmation_identity")
+            or confirmation.get("confirmation_identity")
+            or {}
+        ),
         "fifteen_m_break_time": (
             plan.get("fifteen_m_break_time")
             or breakout.get("break_time")
@@ -7864,6 +7908,10 @@ def prepare_ctrader_trade(payload, volume=0.01):
         "five_m_confirmation_close_time",
         "trend_15m",
         "setup_identity",
+        "source_indicator_event_id",
+        "indicator_event_identity",
+        "m5_confirmation_id",
+        "m5_confirmation_identity",
         "news_event_id",
         "news_event",
         "news_confirmation",
@@ -9727,6 +9775,23 @@ def validate_auto_entry_state_locked(
     ):
         return {"ok": False, "reason": "broker position exists", "details": details}
 
+    source_event_id = trade_payload.get("source_indicator_event_id")
+    if source_event_id:
+        lifecycle = (
+            get_event_lifecycles([source_event_id]).get(source_event_id, {}).get("LIVE")
+            or {}
+        )
+        details["indicator_event_lifecycle"] = lifecycle
+        if lifecycle.get("status") in {
+            "CONSUMED", "EXPIRED", "INVALIDATED", "SUBMITTING",
+            "RECONCILIATION_REQUIRED",
+        }:
+            return {
+                "ok": False,
+                "reason": f"indicator event unavailable: {lifecycle.get('status')}",
+                "details": details,
+            }
+
     if not trade_payload.get("signal_setup_id"):
         return {"ok": False, "reason": "missing setup fingerprint", "details": details}
 
@@ -9740,6 +9805,8 @@ def validate_auto_entry_state_locked(
         "bos_level",
         "confirmation_timestamp",
     }
+    if trade_payload.get("source_indicator_event_id"):
+        required_identity_fields.update({"indicator_event_id", "m5_confirmation_id"})
     if any(setup_identity.get(field) in [None, ""] for field in required_identity_fields):
         return {"ok": False, "reason": "missing setup swing identity", "details": details}
     expected_setup_id = get_signal_setup_id(trade_payload, side)
@@ -11010,18 +11077,56 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
             "risk_recalculation_result": pre_submit_risk,
         },
     )
-    result = place_market_order_with_inflight_cleanup(
-        symbol,
-        action=side,
-        entry=trade_payload["entry"],
-        sl=trade_payload["sl"],
-        tp1=trade_payload["tp1"],
-        tp2=trade_payload["tp2"],
-        volume=trade_payload["volume"],
-        volume_units=trade_payload.get("volume_units"),
-        risk=trade_payload.get("risk"),
-        mode=trade_payload["mode"]
-    )
+    submission_key = None
+    if trade_payload.get("source_indicator_event_id"):
+        submission_claim = claim_submission(
+            trade_payload.get("source_indicator_event_id"),
+            "LIVE",
+            LIVE_ACCOUNT_STATE.get("account_id") or LIVE_ACCOUNT_STATE.get("active_account_id"),
+            symbol,
+            trade_payload.get("signal_setup_id"),
+            trade_payload,
+        )
+        if not submission_claim.get("ok"):
+            return reject_live_execution_block(
+                symbol, side, trade_payload,
+                submission_claim.get("reason") or "durable submission claim failed",
+                "LIVE EXECUTION BLOCKED: durable submission claim failed",
+                details=submission_claim,
+            )
+        submission_key = submission_claim["idempotency_key"]
+        trade_payload["submission_idempotency_key"] = submission_key
+    if submission_key and not mark_request_started(submission_key):
+        recover_unsent_claim(submission_key)
+        return reject_live_execution_block(
+            symbol, side, trade_payload,
+            "durable broker request marker failed",
+            "LIVE EXECUTION BLOCKED: durable broker request marker failed",
+        )
+    try:
+        result = place_market_order_with_inflight_cleanup(
+            symbol,
+            action=side,
+            entry=trade_payload["entry"],
+            sl=trade_payload["sl"],
+            tp1=trade_payload["tp1"],
+            tp2=trade_payload["tp2"],
+            volume=trade_payload["volume"],
+            volume_units=trade_payload.get("volume_units"),
+            risk=trade_payload.get("risk"),
+            mode=trade_payload["mode"],
+            client_order_id=submission_key,
+        )
+    except Exception as exc:
+        if submission_key:
+            require_reconciliation(submission_key, exc)
+        raise
+    if submission_key:
+        if not complete_submission(submission_key, result):
+            require_reconciliation(
+                submission_key,
+                "broker response received but durable completion failed",
+            )
     record_execution_response_safely(symbol, result)
     # Observe the actual fill without changing, retrying, closing, resizing, or
     # widening the V1 order.  Any risk drift is explicit and durable.
@@ -11253,6 +11358,14 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
         "opened_at": time.time(),
         "result": "RUNNING",
         "signal_setup_id": get_signal_setup_id(plan, side),
+        "source_indicator_event_id": trade_payload.get("source_indicator_event_id"),
+        "indicator_event_identity": copy.deepcopy(
+            trade_payload.get("indicator_event_identity") or {}
+        ),
+        "m5_confirmation_id": trade_payload.get("m5_confirmation_id"),
+        "m5_confirmation_identity": copy.deepcopy(
+            trade_payload.get("m5_confirmation_identity") or {}
+        ),
         "symbol_metadata": copy.deepcopy(risk_size.get("symbol_metadata") or {}),
         "broker_result": result,
         "hit_tp1": False,
@@ -11296,6 +11409,14 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
         stage="after_order_success",
     ))
     ensure_live_trade_identity(LIVE_ACTIVE_ORDERS[symbol], symbol)
+    update_event_lifecycle(
+        trade_payload.get("source_indicator_event_id"),
+        "LIVE",
+        "CONSUMED",
+        m5_confirmation_id=trade_payload.get("m5_confirmation_id"),
+        m5_confirmation_identity=trade_payload.get("m5_confirmation_identity"),
+        signal_setup_id=trade_payload.get("signal_setup_id"),
+    )
     ui_signal_state = f"{side} RUNNING" if side in ["BUY", "SELL"] else "TRADE RUNNING"
     LIVE_ACTIVE_ORDERS[symbol]["ui_signal_state"] = ui_signal_state
     log_live_trade_audit("order_opened", LIVE_ACTIVE_ORDERS[symbol], reason="broker order accepted")

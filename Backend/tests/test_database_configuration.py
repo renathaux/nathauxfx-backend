@@ -51,6 +51,11 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "fundamental_factor_inputs",
             "currency_strength_snapshots",
             "fundamental_insight_snapshots",
+            "indicator_candles",
+            "indicator_events",
+            "indicator_stream_state",
+            "indicator_event_lifecycle",
+            "trade_submission_attempts",
         }
         self.assertEqual(set(Base.metadata.tables), expected)
         legacy_tables = expected - {
@@ -72,6 +77,11 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "currency_strength_snapshots",
             "fundamental_insight_snapshots",
             "strategy_setting_audit",
+            "indicator_candles",
+            "indicator_events",
+            "indicator_stream_state",
+            "indicator_event_lifecycle",
+            "trade_submission_attempts",
         }
         self.assertTrue(
             legacy_tables.issubset(set(inspect(db.engine).get_table_names()))
@@ -141,6 +151,11 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "currency_strength_snapshots",
             "fundamental_insight_snapshots",
             "strategy_setting_audit",
+            "indicator_candles",
+            "indicator_events",
+            "indicator_stream_state",
+            "indicator_event_lifecycle",
+            "trade_submission_attempts",
         }
         self.assertTrue(source_tables.issubset(tables))
 

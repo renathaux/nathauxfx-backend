@@ -5,11 +5,13 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from services.indicator_event_stream_service import update_event_lifecycle
+
 from indicators.smc import analyze_structure
 from services.fundamental_execution_guard import validate_fundamental_entry
 
 
-PAPER_ENTRY_MODEL = "PAPER_5M_SWING_BOS_TWO_CLOSE"
+PAPER_ENTRY_MODEL = "PAPER_LIVE_INDICATOR_EVENT_V1"
 PAPER_ENTRY_WAIT_REASON = "WAIT_PAPER_5M_SWING_BOS_TWO_CLOSE"
 BOS_MIN_BODY_RATIO = 0.65
 BOS_MAX_CLOSE_SIDE_WICK_RATIO = 0.20
@@ -373,7 +375,7 @@ def _paper_final_gates(
     return {"ok": True, "reason": None, "details": details}
 
 
-def build_paper_entry_result(
+def _build_legacy_paper_entry_result(
     symbol,
     live_plan,
     data_5m,
@@ -600,4 +602,141 @@ def build_paper_entry_result(
         "tp2": candidate["tp2"],
         "uses_15m_swing": False,
     })
+    return candidate
+
+
+def build_paper_entry_result(
+    symbol,
+    live_plan,
+    data_5m,
+    data_15m=None,
+    *,
+    strict_trader_module,
+    final_gate=None,
+):
+    """Use LIVE's authoritative indicator setup for PAPER qualification."""
+    normalized = _normalize_symbol(symbol)
+    source = copy.deepcopy(live_plan) if isinstance(live_plan, dict) else {}
+    breakout = source.get("fifteen_m_swing_break") or {}
+    event_id = (
+        source.get("source_indicator_event_id")
+        or breakout.get("indicator_event_id")
+    )
+    event_identity = (
+        source.get("indicator_event_identity")
+        or breakout.get("indicator_event_identity")
+    )
+    confirmation = source.get("confirmation_5m") or {}
+    confirmation_id = (
+        source.get("m5_confirmation_id")
+        or confirmation.get("confirmation_id")
+    )
+
+    if not event_id:
+        result = _wait_result("WAIT_AUTHORITATIVE_INDICATOR_EVENT")
+        result.update({
+            "symbol": normalized,
+            "setup_status": "WAITING",
+            "source_live_reason": source.get("block_reason") or source.get("blocked_reason"),
+        })
+        return result
+
+    side = str(source.get("signal") or "WAIT").upper()
+    if side not in {"BUY", "SELL"} or not source.get("strategy_setup_complete"):
+        reason = (
+            source.get("block_reason")
+            or source.get("blocked_reason")
+            or source.get("blocked_by")
+            or "WAIT_LIVE_SETUP_QUALIFICATION"
+        )
+        result = _wait_result(reason)
+        result.update({
+            "symbol": normalized,
+            "source_indicator_event_id": event_id,
+            "indicator_event_identity": copy.deepcopy(event_identity or {}),
+            "m5_confirmation_id": confirmation_id,
+            "m5_confirmation_identity": copy.deepcopy(
+                source.get("m5_confirmation_identity")
+                or confirmation.get("confirmation_identity")
+                or {}
+            ),
+            "setup_identity": copy.deepcopy(source.get("setup_identity") or {}),
+            "setup_status": source.get("setup_status") or "BLOCKED",
+            "paper_entry_model": PAPER_ENTRY_MODEL,
+            "paper_entry_ready": False,
+            "paper_entry_reason": reason,
+            "paper_entry_details": {"live_plan_reason": reason},
+        })
+        update_event_lifecycle(
+            event_id,
+            "PAPER",
+            result["setup_status"],
+            blocking_reason=reason,
+            m5_confirmation_id=confirmation_id,
+            m5_confirmation_identity=result.get("m5_confirmation_identity"),
+            signal_setup_id=result.get("signal_setup_id"),
+        )
+        return result
+
+    candidate = source
+    candidate.update({
+        "paper_entry_model": PAPER_ENTRY_MODEL,
+        "paper_entry_ready": True,
+        "paper_entry_reason": None,
+        "source_indicator_event_id": event_id,
+        "indicator_event_identity": copy.deepcopy(event_identity or {}),
+        "m5_confirmation_id": confirmation_id,
+        "m5_confirmation_identity": copy.deepcopy(
+            source.get("m5_confirmation_identity")
+            or confirmation.get("confirmation_identity")
+            or {}
+        ),
+        "paper_entry_details": {
+            "source_indicator_event_id": event_id,
+            "m5_confirmation_id": confirmation_id,
+            "qualification_source": "same_as_live",
+        },
+    })
+
+    gate_function = final_gate or _paper_final_gates
+    if final_gate:
+        gate = gate_function(
+            candidate,
+            normalized,
+            side,
+            data_5m=data_5m,
+            data_15m=data_15m,
+        )
+    else:
+        gate = gate_function(
+            candidate,
+            normalized,
+            side,
+            data_5m=data_5m,
+            data_15m=data_15m,
+            bos_close_time=source.get("fifteen_m_break_close_time"),
+            second_close_time=source.get("five_m_closed_candle_time"),
+        )
+    candidate["paper_live_final_gate"] = copy.deepcopy(gate)
+    if not gate.get("ok"):
+        reason = gate.get("reason") or "WAIT_PAPER_FINAL_GATE"
+        candidate.update({
+            "signal": "WAIT",
+            "final_signal": "WAIT",
+            "signal_after_filters": "WAIT",
+            "strategy_setup_complete": False,
+            "paper_entry_ready": False,
+            "paper_entry_reason": reason,
+            "setup_status": "BLOCKED",
+            "setup_blocking_reason": reason,
+        })
+    update_event_lifecycle(
+        event_id,
+        "PAPER",
+        "ELIGIBLE" if candidate.get("paper_entry_ready") else "BLOCKED",
+        blocking_reason=candidate.get("paper_entry_reason"),
+        m5_confirmation_id=confirmation_id,
+        m5_confirmation_identity=candidate.get("m5_confirmation_identity"),
+        signal_setup_id=candidate.get("signal_setup_id"),
+    )
     return candidate
