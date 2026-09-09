@@ -4,9 +4,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from db import SessionLocal
 from models import ExecutionProtocolState, IndicatorEventLifecycle, TradeSubmissionAttempt
@@ -16,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 
 BLOCKING_ATTEMPT_STATUSES = {
-    "SUBMITTING", "RECONCILIATION_REQUIRED", "ACCEPTED", "REJECTED",
+    "SUBMITTING", "RECONCILIATION_REQUIRED", "ACCEPTED",
+    "DEFINITELY_REJECTED", "ACCEPTED_PROTECTION_FAILED",
 }
 EXECUTION_PROTOCOL_VERSION = "indicator-event-execution-v2"
 DEFAULT_OWNER_ID = "OWNER"
@@ -26,6 +28,13 @@ DEFINITELY_REJECTED = "DEFINITELY_REJECTED"
 FAILED_BEFORE_SEND = "FAILED_BEFORE_SEND"
 AMBIGUOUS = "AMBIGUOUS"
 ACCEPTED_PROTECTION_FAILED = "ACCEPTED_PROTECTION_FAILED"
+MAX_SAFE_DB_RETRIES = 2
+
+
+def _retryable_postgres_transaction_error(exc):
+    original = getattr(exc, "orig", None)
+    code = getattr(original, "pgcode", None) or getattr(original, "sqlstate", None)
+    return str(code or "") in {"40P01", "40001"}
 
 
 def _json(value):
@@ -52,6 +61,22 @@ def broker_client_order_id(internal_key):
     return "fsc1_" + hashlib.sha256(str(internal_key).encode("utf-8")).hexdigest()[:40]
 
 
+def broker_order_references(internal_key):
+    """Return deterministic cTrader-safe references for one internal identity."""
+    internal = str(internal_key)
+    client_id = broker_client_order_id(internal)
+    values = {
+        "client_order_id": client_id,
+        "label": internal,
+        "comment": f"FS:{client_id}",
+    }
+    if len(values["client_order_id"]) > 50:
+        raise ValueError("cTrader clientOrderId exceeds 50 characters")
+    if len(values["label"]) > 100:
+        raise ValueError("cTrader label exceeds 100 characters")
+    return values
+
+
 def verify_execution_protocol(*, session_factory=None, session=None):
     factory = session_factory or SessionLocal
     owns_session = session is None
@@ -66,13 +91,14 @@ def verify_execution_protocol(*, session_factory=None, session=None):
             current.close()
 
 
-def claim_submission(event_id, mode, account_id, symbol, signal_setup_id, payload, *, owner_id=DEFAULT_OWNER_ID, direction=None, session_factory=None):
+def claim_submission(event_id, mode, account_id, symbol, signal_setup_id, payload, *, owner_id=DEFAULT_OWNER_ID, direction=None, session_factory=None, _db_retry_count=0):
     direction = str(direction or (payload or {}).get("action") or (payload or {}).get("signal") or "").upper()
     if not all([event_id, owner_id, account_id, symbol, signal_setup_id, direction]):
         return {"ok": False, "reason": "missing durable submission identity"}
     factory = session_factory or SessionLocal
     identity, key = submission_identity(event_id, mode, owner_id, account_id, symbol, signal_setup_id)
-    client_id = broker_client_order_id(key)
+    broker_references = broker_order_references(key)
+    client_id = broker_references["client_order_id"]
     now = datetime.now(timezone.utc)
     session = factory()
     try:
@@ -104,15 +130,16 @@ def claim_submission(event_id, mode, account_id, symbol, signal_setup_id, payloa
             return {"ok": False, "reason": "event claim lost", "idempotency_key": key}
         existing = session.query(TradeSubmissionAttempt).filter_by(idempotency_key=key).with_for_update().one_or_none()
         if existing is not None:
-            if existing.attempt_status != "FAILED_BEFORE_SEND" or existing.request_started_at is not None:
+            if existing.attempt_status != "FAILED_BEFORE_SEND":
                 session.rollback()
                 return {"ok": False, "reason": "submission already claimed", "status": existing.attempt_status, "idempotency_key": key}
             existing.attempt_status = "SUBMITTING"
             existing.claimed_at = now
+            existing.request_started_at = None
             existing.updated_at = now
             existing.last_error = None
             session.commit()
-            return {"ok": True, "idempotency_key": key, "broker_request_id": key, "broker_client_order_id": client_id, "attempt_id": existing.id}
+            return {"ok": True, "idempotency_key": key, "broker_request_id": key, "broker_client_order_id": client_id, "broker_label": broker_references["label"], "broker_comment": broker_references["comment"], "attempt_id": existing.id}
         attempt = TradeSubmissionAttempt(
             event_id=str(event_id), mode=str(mode).upper(), account_id=str(account_id),
             owner_id=str(owner_id), direction=direction,
@@ -124,10 +151,23 @@ def claim_submission(event_id, mode, account_id, symbol, signal_setup_id, payloa
         )
         session.add(attempt)
         session.commit()
-        return {"ok": True, "idempotency_key": key, "broker_request_id": key, "broker_client_order_id": client_id, "attempt_id": attempt.id}
+        return {"ok": True, "idempotency_key": key, "broker_request_id": key, "broker_client_order_id": client_id, "broker_label": broker_references["label"], "broker_comment": broker_references["comment"], "attempt_id": attempt.id}
     except IntegrityError:
         session.rollback()
         return {"ok": False, "reason": "submission already claimed", "idempotency_key": key}
+    except OperationalError as exc:
+        session.rollback()
+        if (
+            _db_retry_count < MAX_SAFE_DB_RETRIES
+            and _retryable_postgres_transaction_error(exc)
+        ):
+            time.sleep(0.01 * (2 ** _db_retry_count))
+            return claim_submission(
+                event_id, mode, account_id, symbol, signal_setup_id, payload,
+                owner_id=owner_id, direction=direction, session_factory=factory,
+                _db_retry_count=_db_retry_count + 1,
+            )
+        return {"ok": False, "reason": f"submission claim failed: {exc}", "idempotency_key": key}
     except Exception as exc:
         session.rollback()
         return {"ok": False, "reason": f"submission claim failed: {exc}", "idempotency_key": key}
@@ -146,7 +186,7 @@ def complete_submission(key, result, *, session_factory=None):
     if category == ACCEPTED_PROTECTION_FAILED:
         return _transition_attempt(key, {"SUBMITTING", "RECONCILIATION_REQUIRED"}, "ACCEPTED_PROTECTION_FAILED", result=result, lifecycle_status="CONSUMED", reconciliation_status="PROTECTION_FAILED", session_factory=session_factory)
     if category == DEFINITELY_REJECTED:
-        return _transition_attempt(key, {"SUBMITTING"}, "REJECTED", result=result, lifecycle_status="BLOCKED", session_factory=session_factory)
+        return _transition_attempt(key, {"SUBMITTING"}, "DEFINITELY_REJECTED", result=result, lifecycle_status="BLOCKED", session_factory=session_factory)
     if category == FAILED_BEFORE_SEND:
         return _transition_attempt(key, {"SUBMITTING"}, "FAILED_BEFORE_SEND", result=result, lifecycle_status="ELIGIBLE", reconciliation_status="NOT_REQUIRED", session_factory=session_factory)
     return require_reconciliation(key, (result or {}).get("reason") or "ambiguous broker result", result=result, session_factory=session_factory)
@@ -161,7 +201,7 @@ def require_reconciliation(key, error, *, result=None, session_factory=None):
     )
 
 
-def recover_unsent_claim(key, *, session_factory=None):
+def recover_unsent_claim(key, *, session_factory=None, _db_retry_count=0):
     """Release only a claim proven never to have entered broker dispatch."""
     factory = session_factory or SessionLocal
     session = factory()
@@ -200,6 +240,15 @@ def recover_unsent_claim(key, *, session_factory=None):
             logger.error("Failed closed while recovering unsent claim %s", key)
             session.rollback(); return False
         session.commit(); return True
+    except OperationalError as exc:
+        session.rollback()
+        if _db_retry_count < MAX_SAFE_DB_RETRIES and _retryable_postgres_transaction_error(exc):
+            time.sleep(0.01 * (2 ** _db_retry_count))
+            return recover_unsent_claim(
+                key, session_factory=factory, _db_retry_count=_db_retry_count + 1
+            )
+        logger.exception("Failed to recover unsent submission claim %s", key)
+        return False
     except Exception:
         logger.exception("Failed to recover unsent submission claim %s", key)
         session.rollback(); return False
@@ -216,7 +265,7 @@ def reconcile_known_broker_order(key, broker_record, *, session_factory=None):
     )
 
 
-def reconcile_incomplete_submissions(broker_records=None, *, record_provider=None, session_factory=None):
+def reconcile_incomplete_submissions(broker_records=None, *, record_provider=None, session_factory=None, _db_retry_count=0):
     """Recover unsent claims and fail closed for any possibly-sent request."""
     factory = session_factory or SessionLocal
     session = factory()
@@ -232,12 +281,29 @@ def reconcile_incomplete_submissions(broker_records=None, *, record_provider=Non
             "direction": row.direction, "claimed_at": row.claimed_at,
             "client_order_id": row.broker_client_order_id,
         } for row in rows]
+    except OperationalError as exc:
+        if _db_retry_count < MAX_SAFE_DB_RETRIES and _retryable_postgres_transaction_error(exc):
+            time.sleep(0.01 * (2 ** _db_retry_count))
+            return reconcile_incomplete_submissions(
+                broker_records,
+                record_provider=record_provider,
+                session_factory=factory,
+                _db_retry_count=_db_retry_count + 1,
+            )
+        raise
     finally:
         session.close()
     matched = []
     recovered = []
     unresolved = []
     account_results = {}
+    account_claim_origins = {}
+    for item in pending:
+        account_id = item["account_id"]
+        claimed_at = item.get("claimed_at")
+        previous = account_claim_origins.get(account_id)
+        if previous is None or (claimed_at is not None and claimed_at < previous):
+            account_claim_origins[account_id] = claimed_at
     for item in pending:
         key = item["key"]
         request_started_at = item["request_started_at"]
@@ -251,7 +317,9 @@ def reconcile_incomplete_submissions(broker_records=None, *, record_provider=Non
             account_id = item["account_id"]
             if account_id not in account_results:
                 try:
-                    account_results[account_id] = record_provider(account_id, item["claimed_at"])
+                    account_results[account_id] = record_provider(
+                        account_id, account_claim_origins.get(account_id)
+                    )
                 except Exception as exc:
                     account_results[account_id] = {"ok": False, "complete": False, "reason": str(exc), "records": []}
             response = account_results[account_id]
@@ -292,8 +360,10 @@ def _record_matches_attempt(record, attempt):
     references = _broker_reference_values(record)
     internal_key = str(attempt["key"])
     client_id = str(attempt.get("client_order_id") or "")
-    reference_match = internal_key in references or client_id in references or any(
-        internal_key in value for value in references if value.startswith("NathauxFX ")
+    reference_match = (
+        internal_key in references
+        or client_id in references
+        or f"FS:{client_id}" in references
     )
     if not reference_match:
         return False
@@ -306,10 +376,28 @@ def _record_matches_attempt(record, attempt):
         return False
     if not any(record.get(field) not in (None, "") for field in ("order_id", "orderId", "position_id", "positionId", "deal_id", "dealId")):
         return False
+    record_time = record.get("timestamp")
+    claimed_at = attempt.get("claimed_at")
+    if record_time not in (None, "") and claimed_at is not None:
+        try:
+            if isinstance(record_time, (int, float)):
+                divisor = 1000.0 if float(record_time) > 10_000_000_000 else 1.0
+                observed = datetime.fromtimestamp(float(record_time) / divisor, tz=timezone.utc)
+            else:
+                observed = datetime.fromisoformat(str(record_time).replace("Z", "+00:00"))
+                if observed.tzinfo is None:
+                    observed = observed.replace(tzinfo=timezone.utc)
+            claim_time = claimed_at
+            if claim_time.tzinfo is None:
+                claim_time = claim_time.replace(tzinfo=timezone.utc)
+            if observed < claim_time.replace(microsecond=0):
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
     return True
 
 
-def _transition_attempt(key, allowed, status, *, result=None, error=None, request_started=False, lifecycle_status=None, reconciliation_status=None, session_factory=None):
+def _transition_attempt(key, allowed, status, *, result=None, error=None, request_started=False, lifecycle_status=None, reconciliation_status=None, session_factory=None, _db_retry_count=0):
     factory = session_factory or SessionLocal
     session = factory()
     try:
@@ -365,6 +453,18 @@ def _transition_attempt(key, allowed, status, *, result=None, error=None, reques
                 logger.error("Failed closed while transitioning lifecycle for submission %s", key)
                 session.rollback(); return False
         session.commit(); return True
+    except OperationalError as exc:
+        session.rollback()
+        if _db_retry_count < MAX_SAFE_DB_RETRIES and _retryable_postgres_transaction_error(exc):
+            time.sleep(0.01 * (2 ** _db_retry_count))
+            return _transition_attempt(
+                key, allowed, status, result=result, error=error,
+                request_started=request_started, lifecycle_status=lifecycle_status,
+                reconciliation_status=reconciliation_status,
+                session_factory=factory, _db_retry_count=_db_retry_count + 1,
+            )
+        logger.exception("Failed submission transition for %s", key)
+        return False
     except Exception:
         logger.exception("Failed submission transition for %s", key)
         session.rollback(); return False

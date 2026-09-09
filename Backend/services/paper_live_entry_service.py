@@ -675,6 +675,8 @@ def build_paper_entry_result(
             m5_confirmation_id=confirmation_id,
             m5_confirmation_identity=result.get("m5_confirmation_identity"),
             signal_setup_id=result.get("signal_setup_id"),
+            owner_id="OWNER",
+            account_id="PAPER",
         )
         return result
 
@@ -738,5 +740,7 @@ def build_paper_entry_result(
         m5_confirmation_id=confirmation_id,
         m5_confirmation_identity=candidate.get("m5_confirmation_identity"),
         signal_setup_id=candidate.get("signal_setup_id"),
+        owner_id="OWNER",
+        account_id="PAPER",
     )
     return candidate

@@ -28,6 +28,7 @@ from ctrader_connector import (
     disconnect_account,
     exchange_ctrader_authorization_code,
     fetch_ctrader_accounts,
+    fetch_ctrader_reconciliation_records,
     forget_ctrader_account,
     get_connection_state,
     get_ctrader_connection_snapshot,
@@ -9777,8 +9778,17 @@ def validate_auto_entry_state_locked(
 
     source_event_id = trade_payload.get("source_indicator_event_id")
     if source_event_id:
+        lifecycle_account_id = str(
+            LIVE_ACCOUNT_STATE.get("account_id")
+            or LIVE_ACCOUNT_STATE.get("active_account_id")
+            or ""
+        )
         lifecycle = (
-            get_event_lifecycles([source_event_id]).get(source_event_id, {}).get("LIVE")
+            get_event_lifecycles(
+                [source_event_id],
+                owner_id="OWNER",
+                account_id=lifecycle_account_id,
+            ).get(source_event_id, {}).get("LIVE")
             or {}
         )
         details["indicator_event_lifecycle"] = lifecycle
@@ -11078,7 +11088,27 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
         },
     )
     submission_key = None
+    submission_claim = None
     if trade_payload.get("source_indicator_event_id"):
+        submission_account_id = (
+            LIVE_ACCOUNT_STATE.get("account_id")
+            or LIVE_ACCOUNT_STATE.get("active_account_id")
+        )
+        if not update_event_lifecycle(
+            trade_payload.get("source_indicator_event_id"),
+            "LIVE",
+            "ELIGIBLE",
+            m5_confirmation_id=trade_payload.get("m5_confirmation_id"),
+            m5_confirmation_identity=trade_payload.get("m5_confirmation_identity"),
+            signal_setup_id=trade_payload.get("signal_setup_id"),
+            owner_id="OWNER",
+            account_id=submission_account_id,
+        ):
+            return reject_live_execution_block(
+                symbol, side, trade_payload,
+                "account-scoped indicator lifecycle is not eligible",
+                "LIVE EXECUTION BLOCKED: account-scoped lifecycle unavailable",
+            )
         submission_claim = claim_submission(
             trade_payload.get("source_indicator_event_id"),
             "LIVE",
@@ -11115,7 +11145,9 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
             volume_units=trade_payload.get("volume_units"),
             risk=trade_payload.get("risk"),
             mode=trade_payload["mode"],
-            client_order_id=submission_key,
+            client_order_id=(submission_claim or {}).get("broker_client_order_id"),
+            broker_label=(submission_claim or {}).get("broker_label"),
+            broker_comment=(submission_claim or {}).get("broker_comment"),
         )
     except Exception as exc:
         if submission_key:
@@ -11210,6 +11242,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
 
     if not result.get("ok", False):
         reason = result.get("reason") or result.get("message") or "Order rejected"
+        broker_category = str(result.get("broker_result") or "AMBIGUOUS").upper()
 
         if result.get("critical_unprotected_position"):
             emergency_close_result = None
@@ -11224,7 +11257,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
             })
             sync_live_positions()
 
-        if is_not_enough_money_result(result):
+        if broker_category == "DEFINITELY_REJECTED" and is_not_enough_money_result(result):
             reason = (
                 f"cTrader says not enough funds for calculated {trade_payload.get('risk_percent', get_configured_live_risk_percent())}% risk size "
                 f"({trade_payload.get('lot_size')} lot)"
@@ -11265,30 +11298,47 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
                 symbol=symbol,
                 signal=trade_payload.get("signal"),
                 action=side,
-                status="ORDER_REJECTED",
+                status={
+                    "DEFINITELY_REJECTED": "ORDER_REJECTED",
+                    "FAILED_BEFORE_SEND": "FAILED_BEFORE_SEND",
+                    "ACCEPTED_PROTECTION_FAILED": "ACCEPTED_PROTECTION_FAILED",
+                }.get(broker_category, "RECONCILIATION_REQUIRED"),
                 reason=reason,
                 details=rejection_details
             )
-            log_auto_trade_blocked_reason(
-                symbol=symbol,
-                signal=trade_payload.get("signal"),
-                stage="broker_order_rejected",
-                reason=reason,
-                details=result
-            )
+            if broker_category in {"DEFINITELY_REJECTED", "FAILED_BEFORE_SEND"}:
+                log_auto_trade_blocked_reason(
+                    symbol=symbol,
+                    signal=trade_payload.get("signal"),
+                    stage=(
+                        "broker_order_rejected"
+                        if broker_category == "DEFINITELY_REJECTED"
+                        else "broker_failed_before_send"
+                    ),
+                    reason=reason,
+                    details=result
+                )
 
         log_live_xauusd_execution_debug(
             symbol,
             plan=plan,
             trade_payload=trade_payload,
             risk_size=risk_size,
-            stage="broker_order_rejected",
-            blocked_by="broker_order_rejected",
+            stage={
+                "DEFINITELY_REJECTED": "broker_order_rejected",
+                "FAILED_BEFORE_SEND": "broker_failed_before_send",
+                "ACCEPTED_PROTECTION_FAILED": "broker_accepted_protection_failed",
+            }.get(broker_category, "broker_outcome_ambiguous"),
+            blocked_by=(
+                "broker_order_rejected"
+                if broker_category == "DEFINITELY_REJECTED"
+                else None
+            ),
             blocked_reason=reason,
             existing_position=None,
             payload_valid=True,
             order_sent=True,
-            order_accepted=False,
+            order_accepted=(broker_category == "ACCEPTED_PROTECTION_FAILED"),
             result=result,
         )
         try:
@@ -11296,7 +11346,12 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
                 "ok": False,
                 "message": reason,
                 "reason": reason,
-                "broker_rejection_reason": reason,
+                "broker_result": broker_category,
+                **(
+                    {"broker_rejection_reason": reason}
+                    if broker_category == "DEFINITELY_REJECTED"
+                    else {}
+                ),
                 "live_risk_debug": live_risk_debug,
                 "result": result,
             }
@@ -11416,6 +11471,11 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
         m5_confirmation_id=trade_payload.get("m5_confirmation_id"),
         m5_confirmation_identity=trade_payload.get("m5_confirmation_identity"),
         signal_setup_id=trade_payload.get("signal_setup_id"),
+        owner_id="OWNER",
+        account_id=(
+            LIVE_ACCOUNT_STATE.get("account_id")
+            or LIVE_ACCOUNT_STATE.get("active_account_id")
+        ),
     )
     ui_signal_state = f"{side} RUNNING" if side in ["BUY", "SELL"] else "TRADE RUNNING"
     LIVE_ACTIVE_ORDERS[symbol]["ui_signal_state"] = ui_signal_state

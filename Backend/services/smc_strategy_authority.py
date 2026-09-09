@@ -13,6 +13,7 @@ from services.indicator_event_stream_service import (
     IndicatorStreamUnavailable,
     get_event_lifecycles,
     get_authoritative_structure,
+    read_authoritative_structure,
 )
 
 
@@ -472,8 +473,8 @@ def build_chart_structure(frame, symbol, timeframe, *, strict_trader_module, dis
         if frame is not None
         else frame
     )
-    analysis = get_authoritative_structure(
-        frame,
+    analysis = read_authoritative_structure(
+        bounded_frame,
         symbol,
         timeframe,
         strict_trader_module.point_size(symbol),
@@ -495,7 +496,7 @@ def build_chart_structure(frame, symbol, timeframe, *, strict_trader_module, dis
         "closed_candle_count": len(bounded_frame) if bounded_frame is not None else 0,
         "authority_candle_limit": AUTHORITY_CANDLE_LIMIT,
         "source": AUTHORITY_SOURCE,
-        "observation_only": False,
+        "observation_only": True,
         "affects_strategy": str(timeframe).lower() == "15m",
         "strategy_authority": str(timeframe).lower() == "15m",
     }

@@ -222,6 +222,7 @@ def get_authoritative_structure(
                 IndicatorStreamState.symbol == normalized_symbol,
                 IndicatorStreamState.timeframe == normalized_timeframe,
             ).with_for_update().one_or_none()
+            creating_stream = state is None
             if state is None:
                 if not initialize:
                     raise IndicatorStreamUnavailable("indicator stream is not initialized")
@@ -369,13 +370,19 @@ def get_authoritative_structure(
                     identity=_json_copy(identity),
                     payload=payload,
                     configuration_version=CONFIGURATION_VERSION,
-                    is_historical=bool(initialize or (state.activation_watermark and event_time <= _utc(state.activation_watermark))),
+                    is_historical=bool(
+                        creating_stream
+                        or (
+                            state.activation_watermark
+                            and event_time <= _utc(state.activation_watermark)
+                        )
+                    ),
                     created_at=now,
                 ))
                 persisted_ids.add(event_id)
 
             last_candle = _db_datetime(canonical.index[-1])
-            if initialize:
+            if creating_stream:
                 if state.origin_candle is None:
                     state.origin_candle = _db_datetime(canonical.index[0])
                 state.activation_watermark = last_candle
@@ -418,6 +425,84 @@ def get_authoritative_structure(
             raise IndicatorStreamUnavailable(str(exc)) from exc
         finally:
             session.close()
+
+
+def read_authoritative_structure(
+    frame,
+    symbol,
+    timeframe,
+    point_size,
+    *,
+    analyzer=legacy_analyze_structure,
+    session_factory=None,
+):
+    """Read persisted events without changing stream state or candle history.
+
+    The supplied frame is used only for the chart's visible swings/current
+    structure.  Canonical events always come from the durable event table.
+    """
+    normalized_symbol = _normal_symbol(symbol)
+    normalized_timeframe = _normal_timeframe(timeframe)
+    if normalized_timeframe not in SUPPORTED_TIMEFRAMES:
+        raise IndicatorStreamUnavailable("unsupported indicator timeframe")
+
+    visible = _canonical_input(frame)
+    factory = session_factory or SessionLocal
+    session = factory()
+    try:
+        state = session.query(IndicatorStreamState).filter(
+            IndicatorStreamState.symbol == normalized_symbol,
+            IndicatorStreamState.timeframe == normalized_timeframe,
+        ).one_or_none()
+        if state is None:
+            raise IndicatorStreamUnavailable("indicator stream is not initialized")
+        if state.configuration_version != CONFIGURATION_VERSION:
+            raise IndicatorStreamUnavailable(
+                "indicator stream configuration version changed"
+            )
+        if state.status != "READY":
+            reason = state.reconciliation_reason or f"indicator stream is {state.status}"
+            raise IndicatorStreamUnavailable(reason)
+
+        analysis = analyzer(
+            visible,
+            timeframe=normalized_timeframe,
+            point_size=float(point_size),
+        )
+        event_rows = session.query(IndicatorEvent).filter(
+            IndicatorEvent.symbol == normalized_symbol,
+            IndicatorEvent.timeframe == normalized_timeframe,
+            IndicatorEvent.configuration_version == CONFIGURATION_VERSION,
+        ).order_by(
+            IndicatorEvent.candle_timestamp.asc(),
+            IndicatorEvent.event_id.asc(),
+        ).all()
+        events = [_event_payload(row) for row in event_rows]
+        result = copy.deepcopy(analysis or {})
+        result["events"] = events
+        result["source"] = "authoritative_indicator_event_stream"
+        result["configuration_version"] = CONFIGURATION_VERSION
+        result["canonical_candle_count"] = session.query(IndicatorCandle).filter(
+            IndicatorCandle.symbol == normalized_symbol,
+            IndicatorCandle.timeframe == normalized_timeframe,
+        ).count()
+        result["stream_last_candle"] = (
+            _utc(state.last_processed_candle).isoformat()
+            if state.last_processed_candle else None
+        )
+        result["event_count"] = len(events)
+        result["stream_status"] = state.status
+        result["activation_watermark"] = (
+            _utc(state.activation_watermark).isoformat()
+            if state.activation_watermark else None
+        )
+        return result
+    except IndicatorStreamUnavailable:
+        raise
+    except Exception as exc:
+        raise IndicatorStreamUnavailable(str(exc)) from exc
+    finally:
+        session.close()
 
 
 def update_event_lifecycle(

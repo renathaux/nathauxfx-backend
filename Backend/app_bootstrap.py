@@ -31,7 +31,10 @@ from services.paper_live_entry_service import (
     clear_paper_entry_watch,
 )
 from services.setup_swing_execution_guard import validate_fresh_setup_swing_identity
-from services.trade_submission_service import reconcile_incomplete_submissions
+from services.trade_submission_service import (
+    reconcile_incomplete_submissions,
+    verify_execution_protocol,
+)
 from services.smc_strategy_authority import (
     AUTHORITY_SOURCE as SMC_AUTHORITY_SOURCE,
     build_chart_structure,
@@ -592,6 +595,8 @@ def update_paper_trade_with_live_5m_entry(
             m5_confirmation_id=paper_result.get("m5_confirmation_id"),
             m5_confirmation_identity=paper_result.get("m5_confirmation_identity"),
             signal_setup_id=paper_result.get("signal_setup_id"),
+            owner_id="OWNER",
+            account_id="PAPER",
         )
         print("PAPER_LIVE_STRATEGY_ENTRY_OPENED =", {
             "symbol": normalized,
@@ -705,9 +710,23 @@ def _start_forex_background_task():
             "reason": str(exc),
         })
 
+    if not verify_execution_protocol():
+        protocol_failure = {
+            "ok": False,
+            "ready": False,
+            "reason": "execution protocol fence absent or incompatible",
+        }
+        api.ENGINE_RUNTIME_STATE["execution_protocol"] = protocol_failure
+        print("EXECUTION_PROTOCOL_BLOCKED =", protocol_failure)
+        return
+    api.ENGINE_RUNTIME_STATE["execution_protocol"] = {
+        "ok": True,
+        "ready": True,
+    }
+
     try:
         submission_reconciliation = reconcile_incomplete_submissions(
-            api.get_open_positions() or []
+            record_provider=api.fetch_ctrader_reconciliation_records,
         )
     except Exception as exc:
         submission_reconciliation = {"ok": False, "reason": str(exc)}

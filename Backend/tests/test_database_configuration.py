@@ -56,6 +56,7 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "indicator_stream_state",
             "indicator_event_lifecycle",
             "trade_submission_attempts",
+            "execution_protocol_state",
         }
         self.assertEqual(set(Base.metadata.tables), expected)
         legacy_tables = expected - {
@@ -82,6 +83,7 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "indicator_stream_state",
             "indicator_event_lifecycle",
             "trade_submission_attempts",
+            "execution_protocol_state",
         }
         self.assertTrue(
             legacy_tables.issubset(set(inspect(db.engine).get_table_names()))
@@ -156,6 +158,7 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "indicator_stream_state",
             "indicator_event_lifecycle",
             "trade_submission_attempts",
+            "execution_protocol_state",
         }
         self.assertTrue(source_tables.issubset(tables))
 

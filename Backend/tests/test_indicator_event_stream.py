@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from db import Base
 from models import (
+    ExecutionProtocolState,
     IndicatorCandle, IndicatorEvent, IndicatorEventLifecycle,
     IndicatorStreamState, TradeSubmissionAttempt,
 )
@@ -242,7 +243,9 @@ def test_chart_and_strategy_use_identical_persisted_event():
     identity, event_id = stream.build_event_identity(raw, "EURUSD", "15m", 0.00001)
     raw.update({"event_id": event_id, "event_identity": identity, "tradable": True})
     stable = analysis([raw])
-    with patch.object(authority, "get_authoritative_structure", return_value=stable):
+    with patch.object(authority, "read_authoritative_structure", return_value=stable), patch.object(
+        authority, "get_authoritative_structure", return_value=stable
+    ):
         chart = authority.build_chart_structure(
             data, "EURUSD", "15m", strict_trader_module=StubTrader
         )
@@ -341,7 +344,7 @@ def test_paper_waits_when_live_has_no_authoritative_event():
     assert result["paper_entry_reason"] == "WAIT_AUTHORITATIVE_INDICATOR_EVENT"
 
 
-def _claim_fixture():
+def _claim_fixture(account_id="account-1"):
     path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
     engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
@@ -352,7 +355,18 @@ def _claim_fixture():
         session_factory=Session,
     )
     event_id = created["events"][0]["event_id"]
-    assert stream.update_event_lifecycle(event_id, "LIVE", "ELIGIBLE", session_factory=Session)
+    session = Session()
+    session.add(ExecutionProtocolState(
+        singleton_id=1,
+        protocol_version=submissions.EXECUTION_PROTOCOL_VERSION,
+        updated_at=datetime.now(timezone.utc),
+    ))
+    session.commit()
+    session.close()
+    assert stream.update_event_lifecycle(
+        event_id, "LIVE", "ELIGIBLE", owner_id="OWNER",
+        account_id=account_id, session_factory=Session,
+    )
     return engine, Session, event_id
 
 
@@ -362,7 +376,7 @@ def test_two_workers_get_exactly_one_durable_submission_claim():
     def claim():
         result = submissions.claim_submission(
             event_id, "LIVE", "account-1", "EURUSD", "setup-1",
-            {"entry": 1.1}, session_factory=Session,
+            {"entry": 1.1, "action": "BUY"}, session_factory=Session,
         )
         if result.get("ok"):
             broker_requests.append(result["idempotency_key"])
@@ -373,28 +387,28 @@ def test_two_workers_get_exactly_one_durable_submission_claim():
     assert len(broker_requests) == 1
     session = Session()
     assert session.query(TradeSubmissionAttempt).count() == 1
-    assert session.query(IndicatorEventLifecycle).filter_by(event_id=event_id, mode="LIVE").one().status == "SUBMITTING"
+    assert session.query(IndicatorEventLifecycle).filter_by(event_id=event_id, mode="LIVE", owner_id="OWNER", account_id="account-1").one().status == "SUBMITTING"
     session.close(); engine.dispose()
 
 
 def test_inflight_and_terminal_lifecycle_cannot_be_reopened():
     engine, Session, event_id = _claim_fixture()
     claim = submissions.claim_submission(
-        event_id, "LIVE", "account-1", "EURUSD", "setup-1", {}, session_factory=Session
+        event_id, "LIVE", "account-1", "EURUSD", "setup-1", {"action": "BUY"}, session_factory=Session
     )
     assert claim["ok"]
-    assert not stream.update_event_lifecycle(event_id, "LIVE", "BLOCKED", session_factory=Session)
-    assert submissions.complete_submission(claim["idempotency_key"], {"ok": True, "order_id": "o1"}, session_factory=Session)
-    assert not stream.update_event_lifecycle(event_id, "LIVE", "ELIGIBLE", session_factory=Session)
+    assert not stream.update_event_lifecycle(event_id, "LIVE", "BLOCKED", owner_id="OWNER", account_id="account-1", session_factory=Session)
+    assert submissions.complete_submission(claim["idempotency_key"], {"ok": True, "broker_result": "ACCEPTED", "order_id": "o1"}, session_factory=Session)
+    assert not stream.update_event_lifecycle(event_id, "LIVE", "ELIGIBLE", owner_id="OWNER", account_id="account-1", session_factory=Session)
     engine.dispose()
 
 
 @pytest.mark.parametrize("terminal", ["EXPIRED", "INVALIDATED"])
 def test_expired_and_invalidated_events_cannot_be_claimed(terminal):
     engine, Session, event_id = _claim_fixture()
-    assert stream.update_event_lifecycle(event_id, "LIVE", terminal, session_factory=Session)
+    assert stream.update_event_lifecycle(event_id, "LIVE", terminal, owner_id="OWNER", account_id="account-1", session_factory=Session)
     result = submissions.claim_submission(
-        event_id, "LIVE", "account-1", "EURUSD", "setup-1", {}, session_factory=Session
+        event_id, "LIVE", "account-1", "EURUSD", "setup-1", {"action": "BUY"}, session_factory=Session
     )
     assert not result["ok"]
     assert result["status"] == terminal
@@ -419,14 +433,14 @@ def test_backfill_events_are_historical_and_not_strategy_candidates():
 
 
 def test_unsent_crash_recovers_but_ambiguous_send_never_retries():
-    engine, Session, event_id = _claim_fixture()
-    claim = submissions.claim_submission(event_id, "LIVE", "a", "EURUSD", "s", {}, session_factory=Session)
+    engine, Session, event_id = _claim_fixture("a")
+    claim = submissions.claim_submission(event_id, "LIVE", "a", "EURUSD", "s", {"action": "BUY"}, session_factory=Session)
     assert submissions.recover_unsent_claim(claim["idempotency_key"], session_factory=Session)
-    retry = submissions.claim_submission(event_id, "LIVE", "a", "EURUSD", "s", {}, session_factory=Session)
+    retry = submissions.claim_submission(event_id, "LIVE", "a", "EURUSD", "s", {"action": "BUY"}, session_factory=Session)
     assert retry["ok"]
     assert submissions.mark_request_started(retry["idempotency_key"], session_factory=Session)
     assert submissions.require_reconciliation(retry["idempotency_key"], "timeout", session_factory=Session)
-    assert not submissions.claim_submission(event_id, "LIVE", "a", "EURUSD", "s", {}, session_factory=Session)["ok"]
+    assert not submissions.claim_submission(event_id, "LIVE", "a", "EURUSD", "s", {"action": "BUY"}, session_factory=Session)["ok"]
     unresolved = submissions.reconcile_incomplete_submissions([], session_factory=Session)
     assert unresolved["ok"] is False
     assert unresolved["unresolved"] == [retry["idempotency_key"]]
@@ -435,11 +449,15 @@ def test_unsent_crash_recovers_but_ambiguous_send_never_retries():
 
 
 def test_startup_reconciliation_matches_stable_broker_reference_without_retry():
-    engine, Session, event_id = _claim_fixture()
-    claim = submissions.claim_submission(event_id, "LIVE", "a", "EURUSD", "s", {}, session_factory=Session)
+    engine, Session, event_id = _claim_fixture("a")
+    claim = submissions.claim_submission(event_id, "LIVE", "a", "EURUSD", "s", {"action": "BUY"}, session_factory=Session)
     assert submissions.mark_request_started(claim["idempotency_key"], session_factory=Session)
     result = submissions.reconcile_incomplete_submissions(
-        [{"position_id": "p1", "raw": {"tradeData": {"label": claim["idempotency_key"]}}}],
+        [{
+            "position_id": "p1", "account_id": "a", "symbol": "EURUSD",
+            "direction": "BUY",
+            "raw": {"tradeData": {"label": claim["idempotency_key"]}},
+        }],
         session_factory=Session,
     )
     assert result == {
@@ -448,7 +466,7 @@ def test_startup_reconciliation_matches_stable_broker_reference_without_retry():
         "matched_broker_orders": [claim["idempotency_key"]],
         "unresolved": [],
     }
-    assert not submissions.claim_submission(event_id, "LIVE", "a", "EURUSD", "s", {}, session_factory=Session)["ok"]
+    assert not submissions.claim_submission(event_id, "LIVE", "a", "EURUSD", "s", {"action": "BUY"}, session_factory=Session)["ok"]
     session = Session()
     assert session.query(TradeSubmissionAttempt).one().attempt_status == "ACCEPTED"
     assert session.query(IndicatorEventLifecycle).one().status == "CONSUMED"
@@ -529,6 +547,8 @@ def test_two_initializers_converge_on_one_ready_stream():
 
 def test_startup_does_not_start_trading_when_stream_initialization_fails():
     with patch.object(app_bootstrap, "_restore_ctrader_selection_before_market_data"), patch.object(
+        app_bootstrap, "verify_execution_protocol", return_value=True
+    ), patch.object(
         app_bootstrap, "reconcile_incomplete_submissions", return_value={"ok": True}
     ), patch.object(api, "get_open_positions", return_value=[]), patch.object(
         api, "get_ctrader_market_data", return_value=frame()
