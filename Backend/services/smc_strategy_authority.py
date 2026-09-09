@@ -6,7 +6,15 @@ only changes presentation.
 """
 from __future__ import annotations
 
+import copy
+
 from indicators.smc import analyze_structure
+from services.indicator_event_stream_service import (
+    IndicatorStreamUnavailable,
+    get_event_lifecycles,
+    get_authoritative_structure,
+    read_authoritative_structure,
+)
 
 
 AUTHORITY_SOURCE = "backend_smc_indicator"
@@ -279,11 +287,19 @@ def evaluate_indicator_breakout(
         normalized_symbol,
         configured.get("bos_buffer_points", strict_trader_module.BOS_MIN_BUFFER_POINTS),
     )
-    analysis = analyze_structure(
-        authority_frame,
-        timeframe="15m",
-        point_size=strict_trader_module.point_size(normalized_symbol),
-    )
+    try:
+        analysis = get_authoritative_structure(
+            data_15m,
+            normalized_symbol,
+            "15m",
+            strict_trader_module.point_size(normalized_symbol),
+            analyzer=analyze_structure,
+        )
+    except IndicatorStreamUnavailable as exc:
+        result = _base_result(candle_count=len(authority_frame))
+        result["reason"] = "WAIT_INDICATOR_EVENT_STREAM_UNAVAILABLE"
+        result["indicator_stream_error"] = str(exc)
+        return result
     result = _base_result(analysis, candle_count=len(authority_frame))
     result["bos_buffer"] = required_buffer
 
@@ -294,7 +310,9 @@ def evaluate_indicator_breakout(
         event
         for event in (analysis.get("events") or [])
         if isinstance(event, dict)
-        and int(event.get("break_index", -1)) == last_index
+        and strict_trader_module.utc_timestamp(event.get("timestamp"))
+        == strict_trader_module.utc_timestamp(authority_frame.index[-1])
+        and event.get("tradable") is True
         and str(event.get("direction") or "").upper() in {"BULLISH", "BEARISH"}
     ]
 
@@ -310,6 +328,8 @@ def evaluate_indicator_breakout(
         minimum_swing = strict_trader_module.minimum_swing_size(normalized_symbol)
 
         result["indicator_event"] = event
+        result["indicator_event_id"] = event.get("event_id")
+        result["indicator_event_identity"] = event.get("event_identity")
         result["indicator_event_type"] = str(event.get("event_type") or "BOS").upper()
         result["indicator_structural_leg_size"] = swing_size
         result["minimum_structural_leg_size"] = minimum_swing
@@ -357,6 +377,8 @@ def evaluate_indicator_breakout(
             "valid": True,
             "valid_reason": valid_reason,
             "indicator_source": AUTHORITY_SOURCE,
+            "indicator_event_id": event.get("event_id"),
+            "indicator_event_identity": event.get("event_identity"),
             "indicator_event_invalidation_swing": invalidation,
         }
         break_time = event.get("timestamp")
@@ -375,6 +397,9 @@ def evaluate_indicator_breakout(
             "indicator_authority": True,
             "indicator_source": AUTHORITY_SOURCE,
             "indicator_event": event,
+            "indicator_event_id": event.get("event_id"),
+            "indicator_event_identity": event.get("event_identity"),
+            "setup_status": "WAITING_FOR_FILTERS",
             "strategy_structure_qualification": (
                 "INTERNAL_TWO_BOS_CONFIRMATION"
                 if internal_confirmation and internal_confirmation.get("qualified")
@@ -442,17 +467,28 @@ def mark_indicator_breakout_watch(
     return result
 
 
-def build_chart_structure(frame, symbol, timeframe, *, strict_trader_module):
+def build_chart_structure(frame, symbol, timeframe, *, strict_trader_module, display_limit=250):
     bounded_frame = (
         frame.tail(AUTHORITY_CANDLE_LIMIT).copy()
         if frame is not None
         else frame
     )
-    analysis = analyze_structure(
+    analysis = read_authoritative_structure(
         bounded_frame,
-        timeframe=timeframe,
-        point_size=strict_trader_module.point_size(symbol),
+        symbol,
+        timeframe,
+        strict_trader_module.point_size(symbol),
+        analyzer=analyze_structure,
     )
+    analysis["events"] = (analysis.get("events") or [])[-max(10, int(display_limit)):]
+    lifecycles = get_event_lifecycles(
+        [event.get("event_id") for event in analysis["events"]]
+    )
+    for event in analysis["events"]:
+        event["setup_lifecycle"] = copy.deepcopy(
+            lifecycles.get(event.get("event_id")) or {}
+        )
+    analysis["display_limit"] = int(display_limit)
     return {
         **analysis,
         "symbol": strict_trader_module.shared.normalize_symbol(symbol),
@@ -460,7 +496,7 @@ def build_chart_structure(frame, symbol, timeframe, *, strict_trader_module):
         "closed_candle_count": len(bounded_frame) if bounded_frame is not None else 0,
         "authority_candle_limit": AUTHORITY_CANDLE_LIMIT,
         "source": AUTHORITY_SOURCE,
-        "observation_only": False,
+        "observation_only": True,
         "affects_strategy": str(timeframe).lower() == "15m",
         "strategy_authority": str(timeframe).lower() == "15m",
     }

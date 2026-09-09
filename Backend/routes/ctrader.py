@@ -361,15 +361,15 @@ def _closed_only(frame, timeframe):
     ]
 
 
-@router.get("/chart/smc-structure")
 def chart_smc_structure(
     symbol: str = Query(default="EURUSD"),
     timeframe: str = Query(default="15m"),
     limit: int = Query(default=250, ge=50, le=500),
 ):
-    """Read-only, closed-candle SMC structure for the visual chart overlay.
+    """Legacy chart calculation helper; it is intentionally not a public route.
 
-    This endpoint never places, modifies, closes, or authorizes broker orders.
+    The public route is registered by app_bootstrap and reads persisted events.
+    This helper never places, modifies, closes, or authorizes broker orders.
     It deliberately removes the forming candle before calculating swings,
     BOS, and CHoCH so the visual indicator cannot repaint from live ticks.
     """

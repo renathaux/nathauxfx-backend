@@ -3402,6 +3402,13 @@ def remove_active_paper_trade(trade):
     refresh_paper_trade_summary(trade.get("symbol"))
 
 def get_paper_signal_key(symbol, side, result):
+    setup_id = result.get("signal_setup_id")
+    event_id = result.get("source_indicator_event_id")
+    confirmation_id = result.get("m5_confirmation_id")
+    if setup_id:
+        return f"{symbol}:{side}:setup:{setup_id}"
+    if event_id and confirmation_id:
+        return f"{symbol}:{side}:event:{event_id}:confirmation:{confirmation_id}"
     signal_time = (
         result.get("five_m_closed_candle_time")
         or result.get("setup_candle_time")
@@ -3877,6 +3884,15 @@ def update_paper_trade(
             "hit_tp1": False,
             "profit_protected": False,
             "protected_sl_price": None,
+            "signal_setup_id": result.get("signal_setup_id"),
+            "source_indicator_event_id": result.get("source_indicator_event_id"),
+            "indicator_event_identity": copy.deepcopy(
+                result.get("indicator_event_identity") or {}
+            ),
+            "m5_confirmation_id": result.get("m5_confirmation_id"),
+            "m5_confirmation_identity": copy.deepcopy(
+                result.get("m5_confirmation_identity") or {}
+            ),
         }
 
         PAPER_ACTIVE_TRADES.append(new_trade)

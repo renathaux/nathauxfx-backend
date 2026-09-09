@@ -11,6 +11,7 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
 )
 from db import Base
 
@@ -31,6 +32,135 @@ class RuntimeSetting(Base):
     setting_value = Column(String(100), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
     updated_by = Column(String(255), nullable=False)
+
+
+class IndicatorCandle(Base):
+    """Immutable closed candles used to replay the authoritative SMC stream."""
+
+    __tablename__ = "indicator_candles"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol", "timeframe", "candle_timestamp",
+            name="uq_indicator_candle_stream_time",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    timeframe = Column(String(10), nullable=False, index=True)
+    candle_timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    open_price = Column(Float, nullable=False)
+    high_price = Column(Float, nullable=False)
+    low_price = Column(Float, nullable=False)
+    close_price = Column(Float, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class IndicatorEvent(Base):
+    """Immutable identity and payload for one confirmed indicator event."""
+
+    __tablename__ = "indicator_events"
+
+    event_id = Column(String(80), primary_key=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    timeframe = Column(String(10), nullable=False, index=True)
+    candle_timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    classification = Column(String(10), nullable=False)
+    direction = Column(String(10), nullable=False)
+    broken_level = Column(Float, nullable=False)
+    opposite_swing = Column(JSON, nullable=True)
+    identity = Column(JSON, nullable=False)
+    payload = Column(JSON, nullable=False)
+    configuration_version = Column(String(50), nullable=False)
+    is_historical = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class IndicatorStreamState(Base):
+    """Replay watermark for one symbol/timeframe/configuration stream."""
+
+    __tablename__ = "indicator_stream_state"
+
+    symbol = Column(String(20), primary_key=True)
+    timeframe = Column(String(10), primary_key=True)
+    configuration_version = Column(String(50), nullable=False)
+    status = Column(String(30), nullable=False, default="INITIALIZING")
+    origin_candle = Column(DateTime(timezone=True), nullable=True)
+    activation_watermark = Column(DateTime(timezone=True), nullable=True)
+    last_processed_candle = Column(DateTime(timezone=True), nullable=True)
+    reconciliation_reason = Column(Text, nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class IndicatorEventLifecycle(Base):
+    """Mutable setup/execution status kept outside immutable event identity."""
+
+    __tablename__ = "indicator_event_lifecycle"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id", "mode", "owner_id", "account_id",
+            name="uq_indicator_event_lifecycle_scope",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(String(80), ForeignKey("indicator_events.event_id"), nullable=False, index=True)
+    mode = Column(String(10), nullable=False)
+    owner_id = Column(String(100), nullable=False, default="SYSTEM")
+    account_id = Column(String(100), nullable=False, default="SHARED")
+    status = Column(String(40), nullable=False)
+    blocking_reason = Column(String(255), nullable=True)
+    m5_confirmation_id = Column(String(80), nullable=True)
+    m5_confirmation_identity = Column(JSON, nullable=True)
+    signal_setup_id = Column(String(80), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class TradeSubmissionAttempt(Base):
+    """Durable exactly-once claim and broker reconciliation record."""
+
+    __tablename__ = "trade_submission_attempts"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_trade_submission_idempotency"),
+        UniqueConstraint(
+            "event_id", "mode", "owner_id", "account_id", "symbol", "signal_setup_id",
+            name="uq_trade_submission_setup_account",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(String(80), ForeignKey("indicator_events.event_id"), nullable=False, index=True)
+    mode = Column(String(10), nullable=False)
+    owner_id = Column(String(100), nullable=False)
+    account_id = Column(String(100), nullable=False)
+    symbol = Column(String(20), nullable=False)
+    direction = Column(String(10), nullable=False)
+    signal_setup_id = Column(String(80), nullable=False)
+    idempotency_key = Column(String(80), nullable=False)
+    attempt_status = Column(String(40), nullable=False)
+    claimed_at = Column(DateTime(timezone=True), nullable=False)
+    request_started_at = Column(DateTime(timezone=True), nullable=True)
+    broker_request_id = Column(String(100), nullable=True)
+    broker_client_order_id = Column(String(50), nullable=False)
+    request_payload_fingerprint = Column(String(80), nullable=False)
+    broker_order_id = Column(String(100), nullable=True)
+    broker_position_id = Column(String(100), nullable=True)
+    broker_response = Column(JSON, nullable=True)
+    last_error = Column(Text, nullable=True)
+    reconciliation_status = Column(String(40), nullable=False, default="NOT_REQUIRED")
+    reconciled_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class ExecutionProtocolState(Base):
+    """Durable compatibility fence checked before any automatic execution."""
+
+    __tablename__ = "execution_protocol_state"
+
+    singleton_id = Column(Integer, primary_key=True)
+    protocol_version = Column(String(50), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
 class StrategySettingAudit(Base):

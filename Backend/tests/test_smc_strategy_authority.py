@@ -46,6 +46,11 @@ class _StrictTraderStub:
         return (timestamp + pd.Timedelta(minutes=minutes)).isoformat()
 
     @staticmethod
+    def utc_timestamp(value):
+        timestamp = pd.Timestamp(value)
+        return timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp.tz_convert("UTC")
+
+    @staticmethod
     def clear_opposite_watch(symbol, side, reason):
         return False
 
@@ -79,6 +84,7 @@ def _analysis(frame, *, event_type="CHOCH", invalidation_price=1.0980, break_clo
         "events": [
             {
                 "event_type": event_type,
+                "tradable": True,
                 "direction": "BULLISH",
                 "timestamp": event_time,
                 "close": break_close,
@@ -103,17 +109,17 @@ def _two_small_bos_analysis(frame, direction="BULLISH", *, confirm_pattern=True)
     last_index = len(frame) - 1
     if direction == "BULLISH":
         previous_level = 1.1000
-        previous_invalidation = 1.0995
+        previous_invalidation = 1.0998
         current_level = 1.1006
-        current_invalidation = 1.0998 if confirm_pattern else 1.0994
+        current_invalidation = 1.0999 if confirm_pattern else 1.0997
         invalidation_type = "LOW"
         break_close = 1.1008
         bias = "BULLISH"
     else:
         previous_level = 1.1010
-        previous_invalidation = 1.1015
+        previous_invalidation = 1.1012
         current_level = 1.1004
-        current_invalidation = 1.1011 if confirm_pattern else 1.1016
+        current_invalidation = 1.1011 if confirm_pattern else 1.1013
         invalidation_type = "HIGH"
         break_close = 1.1002
         bias = "BEARISH"
@@ -123,6 +129,7 @@ def _two_small_bos_analysis(frame, direction="BULLISH", *, confirm_pattern=True)
         "events": [
             {
                 "event_type": "BOS",
+                "tradable": True,
                 "direction": direction,
                 "timestamp": frame.index[-4].isoformat(),
                 "close": previous_level,
@@ -139,6 +146,7 @@ def _two_small_bos_analysis(frame, direction="BULLISH", *, confirm_pattern=True)
             },
             {
                 "event_type": "BOS",
+                "tradable": True,
                 "direction": direction,
                 "timestamp": frame.index[-1].isoformat(),
                 "close": break_close,
@@ -166,7 +174,7 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
 
     def test_indicator_choch_owns_direction_and_classification(self):
         frame = _frame()
-        with patch.object(authority, "analyze_structure", return_value=_analysis(frame, event_type="CHOCH")):
+        with patch.object(authority, "get_authoritative_structure", return_value=_analysis(frame, event_type="CHOCH")):
             result = authority.evaluate_indicator_breakout(
                 frame,
                 "EURUSD",
@@ -181,7 +189,7 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
 
     def test_indicator_bos_classification_is_preserved(self):
         frame = _frame()
-        with patch.object(authority, "analyze_structure", return_value=_analysis(frame, event_type="BOS")):
+        with patch.object(authority, "get_authoritative_structure", return_value=_analysis(frame, event_type="BOS")):
             result = authority.evaluate_indicator_breakout(
                 frame,
                 "EURUSD",
@@ -194,7 +202,7 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
     def test_single_small_internal_bos_still_waits(self):
         frame = _frame()
         analysis = _analysis(frame, event_type="BOS", invalidation_price=1.0995)
-        with patch.object(authority, "analyze_structure", return_value=analysis):
+        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
             result = authority.evaluate_indicator_breakout(
                 frame,
                 "EURUSD",
@@ -207,7 +215,7 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
     def test_second_small_bullish_bos_with_hh_hl_can_enter_strategy(self):
         frame = _frame()
         analysis = _two_small_bos_analysis(frame, "BULLISH")
-        with patch.object(authority, "analyze_structure", return_value=analysis):
+        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
             result = authority.evaluate_indicator_breakout(
                 frame,
                 "EURUSD",
@@ -223,7 +231,7 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
     def test_second_small_bearish_bos_with_lh_ll_can_enter_strategy(self):
         frame = _frame()
         analysis = _two_small_bos_analysis(frame, "BEARISH")
-        with patch.object(authority, "analyze_structure", return_value=analysis):
+        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
             result = authority.evaluate_indicator_breakout(
                 frame,
                 "EURUSD",
@@ -238,7 +246,7 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
     def test_second_small_bos_without_hh_hl_still_waits(self):
         frame = _frame()
         analysis = _two_small_bos_analysis(frame, "BULLISH", confirm_pattern=False)
-        with patch.object(authority, "analyze_structure", return_value=analysis):
+        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
             result = authority.evaluate_indicator_breakout(
                 frame,
                 "EURUSD",
@@ -253,7 +261,7 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
         frame = _frame()
         analysis = _two_small_bos_analysis(frame, "BULLISH")
         analysis["events"][0]["event_type"] = "CHOCH"
-        with patch.object(authority, "analyze_structure", return_value=analysis):
+        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
             result = authority.evaluate_indicator_breakout(
                 frame,
                 "EURUSD",
@@ -266,7 +274,7 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
     def test_existing_bos_buffer_still_blocks_weak_close(self):
         frame = _frame()
         analysis = _analysis(frame, break_close=1.10005)
-        with patch.object(authority, "analyze_structure", return_value=analysis):
+        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
             result = authority.evaluate_indicator_breakout(
                 frame,
                 "EURUSD",
@@ -280,7 +288,8 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
         frame = _frame()
         analysis = _analysis(frame)
         analysis["events"][0]["break_index"] = len(frame) - 2
-        with patch.object(authority, "analyze_structure", return_value=analysis):
+        analysis["events"][0]["timestamp"] = frame.index[-2].isoformat()
+        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
             result = authority.evaluate_indicator_breakout(
                 frame,
                 "EURUSD",

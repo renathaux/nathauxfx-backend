@@ -20,7 +20,7 @@ class XauusdRiskGuardTests(unittest.TestCase):
             "confirmation_index": 7, "source": "CURRENT_LEG",
         }
 
-    def test_buy_stop_is_five_pips_below_event_owned_15m_swing(self):
+    def test_buy_stop_is_500_quote_points_below_event_owned_15m_swing(self):
         result = _event_owned_15m_stop(
             self.frame(), "BUY", 4649.0, 100,
             event_invalidation_swing=self.swing("LOW", 4648.0),
@@ -28,23 +28,23 @@ class XauusdRiskGuardTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["sl_structure_source"], "event_owned_15m_smc_swing")
         self.assertAlmostEqual(result["swing"]["price"], 4648.0)
-        self.assertAlmostEqual(result["stop_loss"], 4647.5)
-        self.assertAlmostEqual(result["buffer_pips"], 5.0)
-        self.assertAlmostEqual(result["distance"], 1.5)
-        self.assertAlmostEqual(result["distance_points"], 150.0)
+        self.assertAlmostEqual(result["stop_loss"], 4643.0)
+        self.assertAlmostEqual(result["buffer_pips"], 50.0)
+        self.assertAlmostEqual(result["distance"], 6.0)
+        self.assertAlmostEqual(result["distance_points"], 600.0)
 
-    def test_sell_stop_is_five_pips_above_event_owned_15m_swing(self):
+    def test_sell_stop_is_500_quote_points_above_event_owned_15m_swing(self):
         result = _event_owned_15m_stop(
             self.frame(), "SELL", 4640.0, 100,
             event_invalidation_swing=self.swing("HIGH", 4650.0),
             setup_break_time="2026-08-17T02:00:00+00:00")
         self.assertTrue(result["ok"])
         self.assertAlmostEqual(result["swing"]["price"], 4650.0)
-        self.assertAlmostEqual(result["stop_loss"], 4650.5)
+        self.assertAlmostEqual(result["stop_loss"], 4655.0)
 
     def test_minimum_distance_does_not_manufacture_a_stop(self):
         result = _event_owned_15m_stop(
-            self.frame(), "BUY", 4658.0, 100,
+            self.frame(), "BUY", 4658.0, 600,
             event_invalidation_swing=self.swing("LOW", 4657.8),
             setup_break_time="2026-08-17T02:00:00+00:00")
         self.assertFalse(result["ok"])
@@ -65,7 +65,7 @@ class XauusdRiskGuardTests(unittest.TestCase):
             event_invalidation_swing=self.swing("LOW", 4638.95),
             setup_break_time="2026-08-17T02:00:00+00:00")
         self.assertTrue(result["ok"])
-        self.assertEqual(result["stop_loss"], 4638.45)
+        self.assertEqual(result["stop_loss"], 4633.95)
 
     def test_confirmation_after_break_is_rejected(self):
         result = _event_owned_15m_stop(

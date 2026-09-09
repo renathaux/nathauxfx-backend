@@ -20,12 +20,21 @@ from services.ctrader_startup_restore_service import (
     restore_single_authorized_ctrader_account,
 )
 from services.fundamental_execution_guard import validate_fundamental_entry
+from services.indicator_event_stream_service import (
+    IndicatorStreamUnavailable,
+    initialize_indicator_stream,
+    update_event_lifecycle,
+)
 from services.paper_live_entry_service import (
     PAPER_ENTRY_MODEL,
     build_paper_entry_result,
     clear_paper_entry_watch,
 )
 from services.setup_swing_execution_guard import validate_fresh_setup_swing_identity
+from services.trade_submission_service import (
+    reconcile_incomplete_submissions,
+    verify_execution_protocol,
+)
 from services.smc_strategy_authority import (
     AUTHORITY_SOURCE as SMC_AUTHORITY_SOURCE,
     build_chart_structure,
@@ -512,6 +521,10 @@ def update_paper_trade_with_live_5m_entry(
             strict_trader_module=strict_trader,
             final_gate=paper_live_strategy_final_gate,
         )
+        paper_result["signal_setup_id"] = api.get_signal_setup_id(
+            paper_result,
+            paper_result.get("signal"),
+        )
     except Exception as exc:
         print("PAPER_5M_ENTRY_BUILD_ERROR =", {
             "symbol": normalized,
@@ -562,10 +575,29 @@ def update_paper_trade_with_live_5m_entry(
                 .get("fifteen_m_watch", {})
                 .get("source_setup_type")
             ),
+            "signal_setup_id": paper_result.get("signal_setup_id"),
+            "source_indicator_event_id": paper_result.get("source_indicator_event_id"),
+            "indicator_event_identity": copy.deepcopy(
+                paper_result.get("indicator_event_identity") or {}
+            ),
+            "m5_confirmation_id": paper_result.get("m5_confirmation_id"),
+            "m5_confirmation_identity": copy.deepcopy(
+                paper_result.get("m5_confirmation_identity") or {}
+            ),
         })
         strategy_shared.update_open_paper_history(normalized, opened)
         strategy_shared.save_paper_backup()
         clear_paper_entry_watch(normalized, "paper trade opened")
+        update_event_lifecycle(
+            paper_result.get("source_indicator_event_id"),
+            "PAPER",
+            "CONSUMED",
+            m5_confirmation_id=paper_result.get("m5_confirmation_id"),
+            m5_confirmation_identity=paper_result.get("m5_confirmation_identity"),
+            signal_setup_id=paper_result.get("signal_setup_id"),
+            owner_id="OWNER",
+            account_id="PAPER",
+        )
         print("PAPER_LIVE_STRATEGY_ENTRY_OPENED =", {
             "symbol": normalized,
             "side": opened.get("side"),
@@ -630,7 +662,9 @@ def chart_smc_structure(symbol: str = "EURUSD", timeframe: str = "15m", limit: i
     market_data = api.get_ctrader_market_data(
         normalized_symbol,
         canonical_timeframe,
-        limit=requested_limit,
+        # Trading and display share one canonical replay origin. The response
+        # is trimmed later; chart zoom/limit must never seed strategy state.
+        limit=5000,
         force_refresh=False,
     )
     closed = strict_trader.closed_frame(
@@ -639,12 +673,19 @@ def chart_smc_structure(symbol: str = "EURUSD", timeframe: str = "15m", limit: i
     )
     if closed is None or closed.empty:
         raise HTTPException(status_code=503, detail="Closed SMC candles unavailable")
-    structure = build_chart_structure(
-        closed,
-        normalized_symbol,
-        canonical_timeframe,
-        strict_trader_module=strict_trader,
-    )
+    try:
+        structure = build_chart_structure(
+            closed,
+            normalized_symbol,
+            canonical_timeframe,
+            strict_trader_module=strict_trader,
+            display_limit=requested_limit,
+        )
+    except IndicatorStreamUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Authoritative indicator stream unavailable: {exc}",
+        ) from exc
     structure["display_enabled_independent"] = True
     structure["backend_uses_indicator_when_display_off"] = True
     return structure
@@ -669,6 +710,57 @@ def _start_forex_background_task():
             "reason": str(exc),
         })
 
+    if not verify_execution_protocol():
+        protocol_failure = {
+            "ok": False,
+            "ready": False,
+            "reason": "execution protocol fence absent or incompatible",
+        }
+        api.ENGINE_RUNTIME_STATE["execution_protocol"] = protocol_failure
+        print("EXECUTION_PROTOCOL_BLOCKED =", protocol_failure)
+        return
+    api.ENGINE_RUNTIME_STATE["execution_protocol"] = {
+        "ok": True,
+        "ready": True,
+    }
+
+    try:
+        submission_reconciliation = reconcile_incomplete_submissions(
+            record_provider=api.fetch_ctrader_reconciliation_records,
+        )
+    except Exception as exc:
+        submission_reconciliation = {"ok": False, "reason": str(exc)}
+    if not submission_reconciliation.get("ok"):
+        api.ENGINE_RUNTIME_STATE["submission_reconciliation"] = submission_reconciliation
+        print("SUBMISSION_RECONCILIATION_BLOCKED =", submission_reconciliation)
+        return
+
+    initialized = []
+    for startup_symbol in ("EURUSD", "XAUUSD"):
+        for startup_timeframe, startup_minutes in (("5m", 5), ("15m", 15), ("1h", 60)):
+            try:
+                startup_market_data = api.get_ctrader_market_data(
+                    startup_symbol, startup_timeframe, limit=5000, force_refresh=True,
+                )
+                startup_closed = strict_trader.closed_frame(startup_market_data, startup_minutes)
+                if startup_closed is None or startup_closed.empty:
+                    raise IndicatorStreamUnavailable("closed startup history unavailable")
+                initialized.append(initialize_indicator_stream(
+                    startup_closed,
+                    startup_symbol,
+                    startup_timeframe,
+                    strict_trader.point_size(startup_symbol),
+                    analyzer=analyze_structure,
+                ))
+            except Exception as exc:
+                api.ENGINE_RUNTIME_STATE["indicator_stream_startup"] = {
+                    "ready": False, "reason": str(exc), "symbols_ready": len(initialized),
+                }
+                print("INDICATOR_STREAM_STARTUP_BLOCKED =", api.ENGINE_RUNTIME_STATE["indicator_stream_startup"])
+                return
+    api.ENGINE_RUNTIME_STATE["indicator_stream_startup"] = {
+        "ready": True, "streams_ready": len(initialized),
+    }
     print("Startup OK - warming panel cache")
     api.warm_panel_cache_from_persisted_candles()
     try:

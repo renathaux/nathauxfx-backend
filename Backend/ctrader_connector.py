@@ -254,6 +254,8 @@ PAYLOAD_SPOT_EVENT = 2131
 PAYLOAD_ORDER_ERROR_EVENT = 2132
 PAYLOAD_DEAL_LIST_REQ = 2133
 PAYLOAD_DEAL_LIST_RES = 2134
+PAYLOAD_ORDER_LIST_REQ = 2175
+PAYLOAD_ORDER_LIST_RES = 2176
 PAYLOAD_GET_TRENDBARS_REQ = 2137
 PAYLOAD_GET_TRENDBARS_RES = 2138
 PAYLOAD_ERROR_RES = 2142
@@ -2646,6 +2648,21 @@ def log_volume_safety_debug(volume_check):
         "blocked_reason": volume_check.get("blocked_reason"),
     })
 
+
+def classify_ctrader_failure(order_dispatched):
+    """Classify unknown exceptions solely by whether the order was dispatched."""
+    return "AMBIGUOUS" if order_dispatched else "FAILED_BEFORE_SEND"
+
+
+def _validate_ctrader_order_reference_lengths(client_order_id, label, comment):
+    if client_order_id is not None and len(str(client_order_id)) > 50:
+        raise ValueError("cTrader clientOrderId exceeds 50 characters")
+    if label is not None and len(str(label)) > 100:
+        raise ValueError("cTrader label exceeds 100 characters")
+    if comment is not None and len(str(comment)) > 100:
+        raise ValueError("cTrader comment exceeds 100 characters")
+
+
 def build_ctrader_market_order_payload(
     account_id,
     symbol_id,
@@ -2659,6 +2676,9 @@ def build_ctrader_market_order_payload(
     digits=5,
     lot_size=100000,
     risk=None,
+    client_order_id=None,
+    broker_label=None,
+    broker_comment=None,
 ):
     normalized_action = str(action or "").upper()
     normalized_symbol = normalize_symbol(symbol)
@@ -2728,15 +2748,24 @@ def build_ctrader_market_order_payload(
             f"{volume_check}"
         )
 
+    resolved_client_order_id = str(
+        client_order_id or f"flowsignal-{uuid.uuid4()}"
+    )
+    resolved_label = str(broker_label or resolved_client_order_id)
+    resolved_comment = str(broker_comment or f"FS:{resolved_client_order_id}")
+    _validate_ctrader_order_reference_lengths(
+        resolved_client_order_id, resolved_label, resolved_comment
+    )
+
     payload = {
         "ctidTraderAccountId": int(account_id),
         "symbolId": int(symbol_id),
         "orderType": "MARKET",
         "tradeSide": trade_side,
         "volume": payload_volume,
-        "label": "NathauxFX",
-        "comment": f"NathauxFX auto trade {symbol}",
-        "clientOrderId": f"flowsignal-{uuid.uuid4()}",
+        "label": resolved_label,
+        "comment": resolved_comment,
+        "clientOrderId": resolved_client_order_id,
     }
     payload["_volume_check"] = volume_check
 
@@ -2798,7 +2827,10 @@ def place_market_order(
     tp2=None,
     mode=None,
     volume_units=None,
-    risk=None
+    risk=None,
+    client_order_id=None,
+    broker_label=None,
+    broker_comment=None,
 ):
     normalized_action = str(action or side or "").upper()
     normalized_symbol = normalize_symbol(symbol)
@@ -2806,6 +2838,24 @@ def place_market_order(
     broker_take_profit = tp2 if tp2 is not None else selected_tp1
 
     print(f"CTRADER MARKET ORDER REQUEST -> {normalized_symbol} {normalized_action}")
+
+    try:
+        _validate_ctrader_order_reference_lengths(
+            client_order_id, broker_label, broker_comment
+        )
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "broker": "ctrader",
+            "mode": mode or CONNECTED.get("mode", "demo"),
+            "symbol": normalized_symbol,
+            "action": normalized_action,
+            "side": normalized_action,
+            "reason": str(exc),
+            "status": "FAILED_BEFORE_SEND",
+            "broker_result": "FAILED_BEFORE_SEND",
+            "broker_order_sent": False,
+        }
 
     config = get_ctrader_config()
     order_payload = None
@@ -2820,15 +2870,19 @@ def place_market_order(
             "action": normalized_action,
             "side": normalized_action,
             "reason": "Missing or invalid cTrader config",
-            "status": "REJECTED",
+            "status": "FAILED_BEFORE_SEND",
+            "broker_result": "FAILED_BEFORE_SEND",
+            "broker_order_sent": False,
         }
 
     account_id = int(config["account_id"])
     host, port = CTRADER_JSON_ENDPOINTS[config["env"]]
-    sock = open_ctrader_json_socket(host, port)
+    sock = None
+    order_dispatched = False
     order_payload = None
 
     try:
+        sock = open_ctrader_json_socket(host, port)
         authorize_ctrader_socket(sock, config, account_id)
         symbol_details = fetch_ctrader_symbol_details(sock, account_id)
         symbol_info = resolve_ctrader_symbol(symbol_details, normalized_symbol)
@@ -2852,6 +2906,9 @@ def place_market_order(
                 or get_symbol_risk_fallback(normalized_symbol)["lot_size"]
             ),
             risk=risk,
+            client_order_id=client_order_id,
+            broker_label=broker_label,
+            broker_comment=broker_comment,
         )
         volume_check = order_payload.pop("_volume_check", {})
 
@@ -2883,6 +2940,9 @@ def place_market_order(
         print("CTRADER_ORDER_PAYLOAD_VOLUME_CHECK:", volume_check)
         log_volume_safety_debug(volume_check)
 
+        # Once this flag is set, every unknown failure is ambiguous and must
+        # be reconciled. It must never be converted into a retryable failure.
+        order_dispatched = True
         response = send_ctrader_request(
             sock,
             PAYLOAD_NEW_ORDER_REQ,
@@ -2910,6 +2970,8 @@ def place_market_order(
                 "side": normalized_action,
                 "reason": payload.get("errorCode"),
                 "status": "REJECTED",
+                "broker_result": "DEFINITELY_REJECTED",
+                "broker_order_sent": True,
                 "raw": payload,
                 "volume_safety": volume_check,
             }
@@ -2917,11 +2979,66 @@ def place_market_order(
         order = payload.get("order") or {}
         position = payload.get("position") or {}
         deal = payload.get("deal") or {}
+        execution_type = str(payload.get("executionType") or "").upper()
+        order_status = str(order.get("orderStatus") or "").upper()
+        confirmed_rejection = (
+            execution_type in {"7", "ORDER_REJECTED"}
+            or order_status in {"3", "ORDER_STATUS_REJECTED", "REJECTED"}
+        )
+        if confirmed_rejection and not position and not deal:
+            return {
+                "ok": False,
+                "broker": "ctrader",
+                "mode": config["env"],
+                "symbol": normalized_symbol,
+                "action": normalized_action,
+                "side": normalized_action,
+                "reason": payload.get("errorCode") or "cTrader confirmed order rejection",
+                "status": "REJECTED",
+                "broker_result": "DEFINITELY_REJECTED",
+                "broker_order_sent": True,
+                "order_id": order.get("orderId") or payload.get("orderId"),
+                "raw": payload,
+            }
         accepted_position_id = (
             position.get("positionId")
             or deal.get("positionId")
             or payload.get("positionId")
         )
+        accepted_order_id = (
+            order.get("orderId") or deal.get("orderId") or payload.get("orderId")
+        )
+        accepted_deal_id = deal.get("dealId") or payload.get("dealId")
+        if not any((accepted_position_id, accepted_order_id, accepted_deal_id)):
+            return {
+                "ok": False,
+                "broker": "ctrader",
+                "mode": config["env"],
+                "symbol": normalized_symbol,
+                "action": normalized_action,
+                "side": normalized_action,
+                "reason": "Malformed cTrader execution response without broker identity",
+                "status": "UNKNOWN",
+                "broker_result": "AMBIGUOUS",
+                "broker_order_sent": True,
+                "raw": payload,
+            }
+        if not accepted_position_id:
+            return {
+                "ok": False,
+                "broker": "ctrader",
+                "mode": config["env"],
+                "symbol": normalized_symbol,
+                "action": normalized_action,
+                "side": normalized_action,
+                "reason": "cTrader acknowledged an order without a confirmed position",
+                "status": "UNKNOWN",
+                "broker_result": "AMBIGUOUS",
+                "broker_order_sent": True,
+                "order_id": accepted_order_id,
+                "deal_id": accepted_deal_id,
+                "raw": payload,
+            }
         broker_sl_confirmed = False
         broker_tp_confirmed = False
         broker_sl_after_send = first_present(
@@ -3070,7 +3187,8 @@ def place_market_order(
                 "volume_units": order_payload.get("volume"),
                 "risk": risk,
                 "reason": reason,
-                "status": "REJECTED",
+                "status": "ACCEPTED_PROTECTION_FAILED",
+                "broker_result": "ACCEPTED_PROTECTION_FAILED",
                 "broker_order_sent": True,
                 "critical_unprotected_position": True,
                 "broker_sl_confirmed": broker_sl_confirmed,
@@ -3158,6 +3276,7 @@ def place_market_order(
             "risk": risk,
             "reason": None,
             "status": "SENT",
+            "broker_result": "ACCEPTED",
             "broker_order_sent": True,
             "order_id": (
                 order.get("orderId")
@@ -3192,8 +3311,25 @@ def place_market_order(
             "action": normalized_action,
             "side": normalized_action,
             "reason": str(e),
-            "status": "REJECTED",
+            "status": "UNKNOWN" if order_dispatched else "FAILED_BEFORE_SEND",
+            "broker_result": classify_ctrader_failure(order_dispatched),
+            "broker_order_sent": bool(order_dispatched),
             "volume_safety": volume_check if isinstance(volume_check, dict) else None,
+        }
+    except BaseException as e:
+        if e.__class__.__name__ != "CancelledError":
+            raise
+        return {
+            "ok": False,
+            "broker": "ctrader",
+            "mode": config["env"],
+            "symbol": normalized_symbol,
+            "action": normalized_action,
+            "side": normalized_action,
+            "reason": str(e) or "cTrader request cancelled",
+            "status": "UNKNOWN" if order_dispatched else "FAILED_BEFORE_SEND",
+            "broker_result": classify_ctrader_failure(order_dispatched),
+            "broker_order_sent": bool(order_dispatched),
         }
     finally:
         try:
@@ -3827,6 +3963,152 @@ def fetch_ctrader_closed_deals(config, from_timestamp, to_timestamp, max_rows=10
     finally:
         try:
             sock.close()
+        except Exception:
+            pass
+
+
+def _ctrader_reconciliation_record(raw, record_type, account_id, symbol_map):
+    """Normalize read-only position/order/deal evidence for durable matching."""
+    if not isinstance(raw, dict):
+        return None
+    trade_data = raw.get("tradeData") or raw
+    symbol_id = trade_data.get("symbolId") or raw.get("symbolId")
+    symbol = symbol_map.get(str(symbol_id)) or raw.get("symbol") or raw.get("symbolName")
+    side = normalize_trade_side(trade_data.get("tradeSide") or raw.get("tradeSide"))
+    return {
+        "record_type": record_type,
+        "account_id": str(account_id),
+        "symbol": normalize_symbol(symbol),
+        "direction": side,
+        "position_id": raw.get("positionId"),
+        "order_id": raw.get("orderId"),
+        "deal_id": raw.get("dealId"),
+        "timestamp": (
+            trade_data.get("openTimestamp")
+            or raw.get("createTimestamp")
+            or raw.get("executionTimestamp")
+            or raw.get("utcLastUpdateTimestamp")
+        ),
+        "raw": raw,
+    }
+
+
+def fetch_ctrader_reconciliation_records(account_id, claimed_at=None):
+    """Read open positions plus historical orders/deals for exactly one account.
+
+    This function sends only account/authentication and read-only list requests.
+    Any partial response or exception is reported as incomplete, never as proof
+    that an order does not exist.
+    """
+    config = get_ctrader_config()
+    if not config:
+        return {
+            "ok": False,
+            "complete": False,
+            "reason": "Missing or invalid cTrader config",
+            "records": [],
+        }
+    requested_account = str(account_id)
+    account_env = None
+    if requested_account == str(config.get("account_id")):
+        account_env = config.get("env")
+    else:
+        settings = load_ctrader_account_settings()
+        account_env = next((
+            get_ctrader_env_for_account_item(item)
+            for item in settings.get("accounts", [])
+            if str(item.get("account_id") or item.get("ctidTraderAccountId"))
+            == requested_account
+        ), None)
+    if account_env not in CTRADER_JSON_ENDPOINTS:
+        return {
+            "ok": False,
+            "complete": False,
+            "reason": "cTrader account environment is unavailable",
+            "records": [],
+        }
+    scoped_config = {
+        **config,
+        "account_id": requested_account,
+        "env": account_env,
+    }
+    host, port = CTRADER_JSON_ENDPOINTS[scoped_config["env"]]
+    sock = None
+    try:
+        numeric_account_id = int(account_id)
+        sock = open_ctrader_json_socket(host, port)
+        authorize_ctrader_socket(sock, scoped_config, numeric_account_id)
+        symbol_map = fetch_ctrader_symbol_map(sock, numeric_account_id)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        if claimed_at is None:
+            from_ms = now_ms - (60 * 24 * 60 * 60 * 1000)
+        else:
+            parsed_claim = claimed_at
+            if not isinstance(parsed_claim, datetime):
+                parsed_claim = datetime.fromisoformat(str(parsed_claim).replace("Z", "+00:00"))
+            if parsed_claim.tzinfo is None:
+                parsed_claim = parsed_claim.replace(tzinfo=timezone.utc)
+            from_ms = int(parsed_claim.timestamp() * 1000) - (5 * 60 * 1000)
+
+        reconcile = send_ctrader_request(
+            sock,
+            PAYLOAD_RECONCILE_REQ,
+            {"ctidTraderAccountId": numeric_account_id, "returnProtectionOrders": False},
+            PAYLOAD_RECONCILE_RES,
+        ).get("payload", {})
+        orders_payload = send_ctrader_request(
+            sock,
+            PAYLOAD_ORDER_LIST_REQ,
+            {
+                "ctidTraderAccountId": numeric_account_id,
+                "fromTimestamp": from_ms,
+                "toTimestamp": now_ms,
+            },
+            PAYLOAD_ORDER_LIST_RES,
+        ).get("payload", {})
+        deals_payload = send_ctrader_request(
+            sock,
+            PAYLOAD_DEAL_LIST_REQ,
+            {
+                "ctidTraderAccountId": numeric_account_id,
+                "fromTimestamp": from_ms,
+                "toTimestamp": now_ms,
+                "maxRows": 1000,
+            },
+            PAYLOAD_DEAL_LIST_RES,
+        ).get("payload", {})
+        if orders_payload.get("hasMore") or deals_payload.get("hasMore"):
+            return {
+                "ok": False,
+                "complete": False,
+                "reason": "cTrader reconciliation history was truncated",
+                "records": [],
+            }
+
+        records = []
+        for record_type, rows in (
+            ("position", reconcile.get("position") or []),
+            ("order", orders_payload.get("order") or []),
+            ("deal", deals_payload.get("deal") or []),
+        ):
+            for raw in rows:
+                normalized = _ctrader_reconciliation_record(
+                    raw, record_type, numeric_account_id, symbol_map
+                )
+                if normalized:
+                    records.append(normalized)
+        return {"ok": True, "complete": True, "records": records}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "complete": False,
+            "reason": str(exc),
+            "records": [],
+        }
+    finally:
+        try:
+            if sock is not None:
+                sock.close()
         except Exception:
             pass
 

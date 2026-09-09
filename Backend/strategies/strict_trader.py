@@ -1,3 +1,5 @@
+import hashlib
+import json
 import math
 from datetime import datetime, timezone
 
@@ -8,6 +10,7 @@ from services.strategy_settings_service import (
     get_cached_execution_settings,
     get_configured_rr_window,
 )
+from services.indicator_event_stream_service import update_event_lifecycle
 
 
 MIN_SWING_POINTS = 100
@@ -24,6 +27,27 @@ STAGE_PASSED = "PASSED"
 STAGE_FAILED = "FAILED"
 STAGE_BLOCKED = "BLOCKED"
 BLOCKED_BREAKOUT_STATUS = "BLOCKED_BY_CONSOLIDATION"
+
+
+def record_indicator_setup_status(
+    event_id,
+    status,
+    reason=None,
+    *,
+    confirmation=None,
+    signal_setup_id=None,
+    mode="LIVE",
+):
+    confirmation = confirmation if isinstance(confirmation, dict) else {}
+    return update_event_lifecycle(
+        event_id,
+        mode,
+        status,
+        blocking_reason=reason,
+        m5_confirmation_id=confirmation.get("confirmation_id"),
+        m5_confirmation_identity=confirmation.get("confirmation_identity"),
+        signal_setup_id=signal_setup_id,
+    )
 
 
 def point_size(symbol):
@@ -528,6 +552,8 @@ def save_remembered_breakout(
     break_type=None,
     invalidation_level=None,
     status="PENDING",
+    indicator_event_id=None,
+    indicator_event_identity=None,
 ):
     close_timestamp = utc_timestamp(
         break_close_time or candle_close_time(break_time, 15)
@@ -577,6 +603,8 @@ def save_remembered_breakout(
         "maximum_closed_15m_candles": REMEMBERED_BREAKOUT_MAX_15M_CANDLES,
         "status": normalized_status,
         "reason": reason,
+        "indicator_event_id": indicator_event_id,
+        "indicator_event_identity": indicator_event_identity,
     }
     shared.save_fifteen_m_swing_watch()
 
@@ -595,6 +623,9 @@ def remembered_breakout(symbol, side, current_close_time=None, current_close=Non
         and expires_at is not None
         and current_timestamp > expires_at
     ):
+        record_indicator_setup_status(
+            watch.get("indicator_event_id"), "EXPIRED", "remembered breakout expired"
+        )
         clear_breakout_watch(symbol, side, "remembered breakout expired")
         return None
     try:
@@ -612,6 +643,9 @@ def remembered_breakout(symbol, side, current_close_time=None, current_close=Non
         )
     )
     if invalidated:
+        record_indicator_setup_status(
+            watch.get("indicator_event_id"), "INVALIDATED", "remembered breakout structure invalidated"
+        )
         clear_breakout_watch(symbol, side, "remembered breakout structure invalidated")
         return None
     try:
@@ -632,6 +666,8 @@ def remembered_breakout(symbol, side, current_close_time=None, current_close=Non
             "remembered": True,
             "watch_status": watch_status,
             "watch": watch,
+            "indicator_event_id": watch.get("indicator_event_id"),
+            "indicator_event_identity": watch.get("indicator_event_identity"),
         }
     except (TypeError, ValueError):
         return None
@@ -814,6 +850,7 @@ def confirm_5m(
     break_close_time=None,
     not_before=None,
     required_buffer=0.0,
+    indicator_event_id=None,
 ):
     base = {
         "side": "WAIT",
@@ -821,6 +858,7 @@ def confirm_5m(
         "closed_candle_time": None,
         "confirmation_close_time": None,
         "reason": "WAIT_5M_CONFIRMATION",
+        "source_indicator_event_id": indicator_event_id,
     }
     if side not in ["BUY", "SELL"] or level is None or not break_time:
         return base
@@ -881,6 +919,21 @@ def confirm_5m(
             )
         )
         if passed:
+            confirmation_identity = {
+                "source_indicator_event_id": indicator_event_id,
+                "timeframe": "5m",
+                "direction": side,
+                "candle_timestamp": ts.isoformat(),
+                "confirmation_close_time": confirmation_close.isoformat(),
+                "close": close_price,
+            }
+            confirmation_id = "m5_" + hashlib.sha256(
+                json.dumps(
+                    confirmation_identity,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
             return {
                 "side": side,
                 "close_confirmed": True,
@@ -893,6 +946,9 @@ def confirm_5m(
                 "setup_level": float(level),
                 "bos_buffer": threshold_buffer,
                 "reason": "5M_CLOSE_CONFIRMED",
+                "confirmation_id": confirmation_id,
+                "confirmation_identity": confirmation_identity,
+                "source_indicator_event_id": indicator_event_id,
             }
         if direction_matches and (
             (side == "BUY" and close_price > float(level))
@@ -1312,6 +1368,34 @@ def wait_result(symbol, reason, extra=None):
     if extra:
         payload.update(extra)
 
+    breakout_for_identity = payload.get("fifteen_m_swing_break")
+    if isinstance(breakout_for_identity, dict):
+        event_id = breakout_for_identity.get("indicator_event_id")
+        event_identity = breakout_for_identity.get("indicator_event_identity")
+        if event_id:
+            payload["source_indicator_event_id"] = event_id
+            payload["indicator_event_identity"] = event_identity
+            upper_reason = str(reason or "").upper()
+            if "EXPIRED" in upper_reason:
+                payload["setup_status"] = "EXPIRED"
+            elif "INVALID" in upper_reason or "CHANGED" in upper_reason:
+                payload["setup_status"] = "INVALIDATED"
+            elif "5M_CONFIRMATION" in upper_reason:
+                payload["setup_status"] = "WAITING"
+            else:
+                payload["setup_status"] = "BLOCKED"
+            payload["setup_blocking_reason"] = reason
+            record_indicator_setup_status(
+                event_id,
+                payload["setup_status"],
+                reason,
+                confirmation=(
+                    payload.get("confirmation_5m")
+                    if isinstance(payload.get("confirmation_5m"), dict)
+                    else None
+                ),
+            )
+
     stages = payload.get("strategy_stage_states")
     if not isinstance(stages, dict):
         stages = strategy_stage_states()
@@ -1629,6 +1713,7 @@ def get_mtf_signal(data_5m, data_15m, data_1h, symbol):
         break_close_time=breakout.get("break_close_time"),
         not_before=prior_close,
         required_buffer=breakout.get("bos_buffer"),
+        indicator_event_id=breakout.get("indicator_event_id"),
     )
     setup_meta = {
         **breakout_meta,
@@ -1658,6 +1743,8 @@ def get_mtf_signal(data_5m, data_15m, data_1h, symbol):
                     if consolidation_blocked
                     else "PENDING"
                 ),
+                indicator_event_id=breakout.get("indicator_event_id"),
+                indicator_event_identity=breakout.get("indicator_event_identity"),
             )
         stages = strategy_stage_states(
             swing_detection=STAGE_PASSED,
@@ -1840,6 +1927,11 @@ def get_mtf_signal(data_5m, data_15m, data_1h, symbol):
         "risk_reward_ratio": levels["risk_reward_ratio"],
         "trend_15m": trend,
         "fifteen_m_swing_break": breakout,
+        "source_indicator_event_id": breakout.get("indicator_event_id"),
+        "indicator_event_identity": breakout.get("indicator_event_identity"),
+        "m5_confirmation_id": five_m.get("confirmation_id"),
+        "m5_confirmation_identity": five_m.get("confirmation_identity"),
+        "setup_status": "ELIGIBLE",
         "fifteen_m_swing_break_confirmed": True,
         "fifteen_m_swing_level": breakout["level"],
         "fifteen_m_break_classification": breakout.get("break_type"),
@@ -1922,7 +2014,14 @@ def get_mtf_signal(data_5m, data_15m, data_1h, symbol):
         "bos_candle_timestamp": breakout.get("break_time"),
         "bos_level": breakout.get("level"),
         "confirmation_timestamp": five_m.get("confirmation_close_time"),
+        "indicator_event_id": breakout.get("indicator_event_id"),
+        "m5_confirmation_id": five_m.get("confirmation_id"),
     }
+    record_indicator_setup_status(
+        breakout.get("indicator_event_id"),
+        "ELIGIBLE",
+        confirmation=five_m,
+    )
     diagnostics = dict(result["signal_diagnostics"])
     result["entry_strategy_debug"] = diagnostics.copy()
     result["strategy_debug"] = diagnostics.copy()
