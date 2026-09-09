@@ -380,3 +380,70 @@ def test_real_provider_refresh_replaces_cache_and_is_not_rolled_back(monkeypatch
     assert list(cached_after.index) == list(refreshed_provider.index)
     assert float(cached_after.iloc[-1]["Close"]) == 4397.2
     assert ctrader.CTRADER_CANDLE_CACHE[cache_key]["fetched_at"] == new_fetched_at
+
+
+def test_authoritative_15m_uses_provider_snapshot_not_aged_synthetic_return(monkeypatch):
+    provider = _provider_cache_frame(
+        ["2026-09-09T21:15:00Z", "2026-09-09T21:30:00Z"],
+        [1.1631, 1.1633],
+    )
+    synthetic_time = pd.Timestamp("2026-09-09T21:45:00Z")
+    returned = provider.copy(deep=True)
+    returned.loc[synthetic_time] = {
+        "Open": 1.1633,
+        "High": 1.1637,
+        "Low": 1.1632,
+        "Close": 1.1636,
+        "Volume": 0,
+    }
+    cache_key = ctrader.get_ctrader_candle_cache_key("EURUSD", "15m")
+    monkeypatch.setitem(
+        ctrader.CTRADER_CANDLE_CACHE,
+        cache_key,
+        {
+            "data": provider.copy(deep=True),
+            "fetched_at": datetime(2026, 9, 9, 21, 50, tzinfo=timezone.utc),
+            "source": "ctrader",
+            "symbol": "EURUSD",
+            "timeframe": "15m",
+        },
+    )
+    monkeypatch.setattr(
+        stream,
+        "_ctrader_now",
+        lambda: pd.Timestamp("2026-09-09T22:10:00Z"),
+    )
+
+    mature = stream._ctrader_mature_frame(returned, "EURUSD", "15m")
+    assert list(mature.index) == list(provider.index)
+    assert synthetic_time not in mature.index
+
+    real_close = 1.16342
+    refreshed_provider = provider.copy(deep=True)
+    refreshed_provider.loc[synthetic_time] = {
+        "Open": 1.1633,
+        "High": 1.1635,
+        "Low": 1.1631,
+        "Close": real_close,
+        "Volume": 25,
+    }
+    monkeypatch.setitem(
+        ctrader.CTRADER_CANDLE_CACHE,
+        cache_key,
+        {
+            "data": refreshed_provider.copy(deep=True),
+            "fetched_at": datetime(2026, 9, 9, 22, 5, tzinfo=timezone.utc),
+            "source": "ctrader",
+            "symbol": "EURUSD",
+            "timeframe": "15m",
+        },
+    )
+
+    mature_after_refresh = stream._ctrader_mature_frame(
+        returned,
+        "EURUSD",
+        "15m",
+    )
+    assert synthetic_time in mature_after_refresh.index
+    assert float(mature_after_refresh.loc[synthetic_time, "Close"]) == pytest.approx(real_close)
+    assert float(mature_after_refresh.loc[synthetic_time, "Close"]) != pytest.approx(1.1636)
