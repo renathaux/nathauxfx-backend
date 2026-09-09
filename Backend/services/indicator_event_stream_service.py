@@ -55,11 +55,26 @@ def _event_signature(event, symbol, timeframe, point_size):
     return event_id, identity
 
 
-def initialize_indicator_stream(frame, symbol, timeframe, point_size, *, analyzer=legacy_analyze_structure, session_factory=None):
+def initialize_indicator_stream(
+    frame,
+    symbol,
+    timeframe,
+    point_size,
+    *,
+    analyzer=legacy_analyze_structure,
+    session_factory=None,
+    allow_sparse_trendbars=False,
+):
     """Deterministically backfill a stream and activate only future candles."""
     return get_authoritative_structure(
-        frame, symbol, timeframe, point_size, analyzer=analyzer,
-        session_factory=session_factory, initialize=True,
+        frame,
+        symbol,
+        timeframe,
+        point_size,
+        analyzer=analyzer,
+        session_factory=session_factory,
+        initialize=True,
+        allow_sparse_trendbars=allow_sparse_trendbars,
     )
 
 
@@ -76,10 +91,6 @@ def _normal_timeframe(value):
 def _expected_market_candle(symbol, timestamp):
     """Known UTC weekly/daily venue closures; unknown holidays fail closed."""
     value = _utc(timestamp)
-    if symbol == "EURUSD":
-        new_york = value.tz_convert("America/New_York")
-        if new_york.dayofweek < 5 and (new_york.hour, new_york.minute) in {(16, 55), (17, 0)}:
-            return False
     if value.dayofweek == 5:
         return False
     if value.dayofweek == 4 and value.hour >= 21:
@@ -205,11 +216,15 @@ def get_authoritative_structure(
     analyzer=legacy_analyze_structure,
     session_factory=None,
     initialize=False,
+    allow_sparse_trendbars=False,
 ):
     """Merge closed candles and return the immutable event stream.
 
     Existing candles and events are never rewritten. New events are calculated
-    by replaying all stored candles from the same durable origin.
+    by replaying all stored candles from the same durable origin. By default,
+    unexplained interval gaps fail closed. ``allow_sparse_trendbars`` is only
+    for providers such as cTrader that do not create a time bar when no tick
+    arrived during that period; it never synthesizes replacement OHLC bars.
     """
     normalized_symbol = _normal_symbol(symbol)
     normalized_timeframe = _normal_timeframe(timeframe)
@@ -320,13 +335,19 @@ def get_authoritative_structure(
                     session.commit()
                     raise IndicatorStreamUnavailable(state.reconciliation_reason)
 
-            # Every unexplained interval gap is unsafe. Only recognizable venue
-            # closure boundaries are exempt; unknown holidays fail closed.
+            # Strict callers still fail closed on unexplained interval gaps.
+            # cTrader callers may explicitly allow sparse trendbars because the
+            # broker creates a bar only when at least one tick exists. Missing
+            # timestamps are left absent rather than filled with synthetic OHLC.
             interval = pd.Timedelta(minutes=SUPPORTED_TIMEFRAMES[normalized_timeframe])
             gap_origin = watermark or (
                 _utc(canonical.index[0]) - interval if initialize else None
             )
-            if gap_origin is not None and _utc(canonical.index[-1]) > gap_origin:
+            if (
+                not allow_sparse_trendbars
+                and gap_origin is not None
+                and _utc(canonical.index[-1]) > gap_origin
+            ):
                 missing = []
                 ordered = [gap_origin] + [
                     _utc(value) for value in canonical.index if _utc(value) > gap_origin
@@ -410,6 +431,7 @@ def get_authoritative_structure(
             result["stream_last_candle"] = _utc(canonical.index[-1]).isoformat()
             result["event_count"] = len(events)
             result["stream_status"] = state.status
+            result["allow_sparse_trendbars"] = bool(allow_sparse_trendbars)
             result["activation_watermark"] = _utc(state.activation_watermark).isoformat() if state.activation_watermark else None
             return result
         except IndicatorStreamUnavailable:
@@ -420,8 +442,14 @@ def get_authoritative_structure(
             if initialize:
                 time.sleep(0.02)
                 return get_authoritative_structure(
-                    frame, symbol, timeframe, point_size, analyzer=analyzer,
-                    session_factory=factory, initialize=False,
+                    frame,
+                    symbol,
+                    timeframe,
+                    point_size,
+                    analyzer=analyzer,
+                    session_factory=factory,
+                    initialize=False,
+                    allow_sparse_trendbars=allow_sparse_trendbars,
                 )
             raise IndicatorStreamUnavailable(str(exc)) from exc
         except Exception as exc:
