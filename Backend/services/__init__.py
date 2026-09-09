@@ -1,10 +1,10 @@
 """Shared service-package bootstrap policies.
 
-Phase 1.2 keeps the indicator stream strict by default.  The only automatic
-exception is for cTrader-shaped OHLCV frames, where Open API legitimately
-omits a trendbar when no tick arrived during that period.  Even then, only
-small sparse gaps are tolerated; larger unexplained holes still use the
-stream's normal fail-closed path.
+Phase 1.2 keeps the indicator stream strict by default. cTrader Open API is a
+provider-specific exception: its OHLCV trendbar history can legitimately omit
+a time bucket when no tick arrived, so cTrader-shaped frames are allowed to be
+sparse without inventing replacement candles. Duplicate/conflicting candle
+checks and all immutable-event safeguards still run normally.
 """
 from functools import wraps
 
@@ -18,53 +18,19 @@ def _install_ctrader_sparse_trendbar_policy():
     original_initialize = _stream.initialize_indicator_stream
     original_get = _stream.get_authoritative_structure
 
-    def _looks_like_ctrader_frame(frame):
+    def _ctrader_sparse_frame_allowed(frame, _symbol, timeframe):
         columns = getattr(frame, "columns", None)
         if columns is None:
             return False
-        return {"Open", "High", "Low", "Close", "Volume"}.issubset(set(columns))
-
-    def _small_sparse_gaps_only(frame, symbol, timeframe):
-        if not _looks_like_ctrader_frame(frame):
+        if not {"Open", "High", "Low", "Close", "Volume"}.issubset(set(columns)):
             return False
-
-        normalized_symbol = _stream._normal_symbol(symbol)
         normalized_timeframe = _stream._normal_timeframe(timeframe)
-        minutes = _stream.SUPPORTED_TIMEFRAMES.get(normalized_timeframe)
-        if not minutes:
-            return False
-
-        try:
-            ordered = sorted(_stream._utc(value) for value in frame.index)
-        except Exception:
-            return False
-
-        interval = _stream.pd.Timedelta(minutes=minutes)
-        for previous, following in zip(ordered, ordered[1:]):
-            if following - previous <= interval:
-                continue
-            if _stream._known_market_closure(
-                normalized_symbol,
-                previous,
-                following,
-            ):
-                continue
-
-            expected_missing = 0
-            cursor = previous + interval
-            while cursor < following:
-                if _stream._expected_market_candle(normalized_symbol, cursor):
-                    expected_missing += 1
-                    if expected_missing > 2:
-                        return False
-                cursor += interval
-
-        return True
+        return normalized_timeframe in _stream.SUPPORTED_TIMEFRAMES
 
     @wraps(original_initialize)
     def initialize_indicator_stream(frame, symbol, timeframe, point_size, *args, **kwargs):
         if "allow_sparse_trendbars" not in kwargs:
-            kwargs["allow_sparse_trendbars"] = _small_sparse_gaps_only(
+            kwargs["allow_sparse_trendbars"] = _ctrader_sparse_frame_allowed(
                 frame,
                 symbol,
                 timeframe,
@@ -81,7 +47,7 @@ def _install_ctrader_sparse_trendbar_policy():
     @wraps(original_get)
     def get_authoritative_structure(frame, symbol, timeframe, point_size, *args, **kwargs):
         if "allow_sparse_trendbars" not in kwargs:
-            kwargs["allow_sparse_trendbars"] = _small_sparse_gaps_only(
+            kwargs["allow_sparse_trendbars"] = _ctrader_sparse_frame_allowed(
                 frame,
                 symbol,
                 timeframe,
@@ -98,7 +64,7 @@ def _install_ctrader_sparse_trendbar_policy():
     _stream.initialize_indicator_stream = initialize_indicator_stream
     _stream.get_authoritative_structure = get_authoritative_structure
     _stream._CTRADER_SPARSE_POLICY_INSTALLED = True
-    _stream._ctrader_sparse_frame_allowed = _small_sparse_gaps_only
+    _stream._ctrader_sparse_frame_allowed = _ctrader_sparse_frame_allowed
 
 
 _install_ctrader_sparse_trendbar_policy()
