@@ -76,6 +76,10 @@ def _normal_timeframe(value):
 def _expected_market_candle(symbol, timestamp):
     """Known UTC weekly/daily venue closures; unknown holidays fail closed."""
     value = _utc(timestamp)
+    if symbol == "EURUSD":
+        new_york = value.tz_convert("America/New_York")
+        if new_york.dayofweek < 5 and (new_york.hour, new_york.minute) in {(16, 55), (17, 0)}:
+            return False
     if value.dayofweek == 5:
         return False
     if value.dayofweek == 4 and value.hour >= 21:
