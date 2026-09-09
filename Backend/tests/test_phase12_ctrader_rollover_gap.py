@@ -103,12 +103,45 @@ def test_non_ctrader_frame_keeps_strict_gap_blocking():
         engine.dispose()
 
 
-def test_ctrader_sparse_policy_still_blocks_large_unexplained_holes():
+def test_ctrader_provider_sparse_policy_accepts_large_no_tick_holes_without_synthesis():
     Session, engine = _session_factory()
     base = _ctrader_frame(periods=12)
-    data = base.drop(base.index[[2, 3, 4, 5]])
+    missing = base.index[[2, 3, 4, 5]]
+    data = base.drop(missing)
 
-    assert stream._ctrader_sparse_frame_allowed(data, "EURUSD", "5m") is False
+    assert stream._ctrader_sparse_frame_allowed(data, "EURUSD", "5m") is True
+    result = stream.initialize_indicator_stream(
+        data,
+        "EURUSD",
+        "5m",
+        0.00001,
+        analyzer=_analysis,
+        session_factory=Session,
+    )
+    assert result["stream_status"] == "READY"
+    assert result["allow_sparse_trendbars"] is True
+    assert result["canonical_candle_count"] == len(data)
+
+    session = Session()
+    try:
+        stored = {
+            pd.Timestamp(row.candle_timestamp, tz="UTC")
+            if pd.Timestamp(row.candle_timestamp).tzinfo is None
+            else pd.Timestamp(row.candle_timestamp).tz_convert("UTC")
+            for row in session.query(IndicatorCandle).all()
+        }
+        assert all(value not in stored for value in missing)
+        assert session.query(IndicatorCandle).count() == len(data)
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_explicit_strict_mode_still_blocks_ctrader_shaped_gap():
+    Session, engine = _session_factory()
+    base = _ctrader_frame()
+    data = base.drop(base.index[[2, 3]])
+
     with pytest.raises(stream.IndicatorStreamUnavailable, match="missing closed candles"):
         stream.initialize_indicator_stream(
             data,
@@ -117,6 +150,7 @@ def test_ctrader_sparse_policy_still_blocks_large_unexplained_holes():
             0.00001,
             analyzer=_analysis,
             session_factory=Session,
+            allow_sparse_trendbars=False,
         )
     engine.dispose()
 
