@@ -11,6 +11,11 @@ trade submission, PAPER/LIVE entry, or strategy watch modules. All replay state
 and simulated positions live in local Python objects for the duration of one
 request. The API never fetches candles from cTrader.
 
+Both `/strategy-lab/strategies` and `/strategy-lab/replay` require the existing
+FlowSignal administrator session, including the established owner-session
+compatibility path. There is no Strategy Lab-specific secret. Authentication
+aside, replay candle access issues SELECT queries only.
+
 ## Time model
 
 - M15 decisions use only candles whose close is at or before the simulated time.
@@ -24,9 +29,11 @@ request. The API never fetches candles from cTrader.
 
 Every response reports these in `diagnostics.unsupported_or_approximated`:
 
-- the durable two-sub-minimum-BOS exception is represented by a chronological
-  same-direction approximation;
 - historical spread, slippage, and tick ordering are unavailable;
-- TP2 uses the production 2R fallback without mutable broker context.
+- runtime broker position state is represented by isolated simulated trades.
+
+The exact internal two-BOS qualification is replayed in memory. TP2 uses the
+nearest qualifying opposing valid M15 swing and applies the production 2R
+fallback only when no swing satisfies the configured RR window.
 
 These constraints are disclosed rather than silently guessed.
