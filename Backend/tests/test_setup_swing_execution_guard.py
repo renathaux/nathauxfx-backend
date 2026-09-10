@@ -1,8 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
-from services.setup_swing_execution_guard import validate_fresh_setup_swing_identity
+from services import setup_swing_execution_guard as guard
 from strategies import strict_trader
 
 
@@ -31,36 +32,118 @@ class StableSetupSwingExecutionGuardTests(unittest.TestCase):
             index=index,
         )
 
-    def test_short_window_does_not_reject_already_qualified_exact_pivot(self):
+    def _today_eurusd_event(self):
+        return {
+            "event_id": "smc1_today_eurusd_choch",
+            "symbol": "EURUSD",
+            "timeframe": "15m",
+            "candle_timestamp": "2026-09-10T11:45:00+00:00",
+            "classification": "CHOCH",
+            "direction": "BEARISH",
+            "broken_level": 1.16218,
+            "is_historical": False,
+            "payload": {
+                "event_type": "CHOCH",
+                "direction": "BEARISH",
+                "timestamp": "2026-09-10T11:45:00+00:00",
+                "broken_level": 1.16218,
+                # The real source pivot can be much older than the short
+                # execution-time candle window.
+                "broken_swing_timestamp": "2026-09-09T10:00:00+00:00",
+            },
+        }
+
+    def _today_setup_identity(self, **overrides):
+        identity = {
+            "symbol": "EURUSD",
+            "direction": "SELL",
+            "swing_type": "LOW",
+            "swing_timestamp": "2026-09-09T10:00:00+00:00",
+            "swing_price": 1.16218,
+            "bos_candle_timestamp": "2026-09-10T11:45:00+00:00",
+            "bos_level": 1.16218,
+            "confirmation_timestamp": "2026-09-10T12:05:00+00:00",
+            "indicator_event_id": "smc1_today_eurusd_choch",
+            "m5_confirmation_id": "m5_today_confirm",
+        }
+        identity.update(overrides)
+        return identity
+
+    def test_authoritative_event_keeps_old_source_pivot_valid_outside_fresh_window(self):
+        # This fresh execution window starts on Sep 10, so the Sep 9 source
+        # pivot is intentionally absent. The immutable event remains authority.
+        closed_15m = pd.DataFrame(
+            {
+                "Open": [1.1625] * 8,
+                "High": [1.1630] * 8,
+                "Low": [1.1590] * 8,
+                "Close": [1.1600] * 8,
+            },
+            index=pd.date_range(
+                "2026-09-10T10:30:00Z", periods=8, freq="15min"
+            ),
+        )
+        with patch.object(
+            guard,
+            "get_indicator_event",
+            return_value=self._today_eurusd_event(),
+        ):
+            result = guard.validate_fresh_setup_swing_identity(
+                closed_15m,
+                "EURUSD",
+                self._today_setup_identity(),
+                strict_trader,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["reason"])
+        self.assertTrue(result["details"]["fresh_setup_swing_matched"])
+        self.assertEqual(
+            result["details"]["fresh_setup_swing_match_method"],
+            "authoritative_indicator_event_identity",
+        )
+
+    def test_authoritative_event_identity_mismatch_still_blocks_execution(self):
+        with patch.object(
+            guard,
+            "get_indicator_event",
+            return_value=self._today_eurusd_event(),
+        ):
+            result = guard.validate_fresh_setup_swing_identity(
+                self._full_history(),
+                "EURUSD",
+                self._today_setup_identity(swing_price=1.16350),
+                strict_trader,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], guard.SWING_CHANGED_REASON)
+        self.assertFalse(result["details"]["fresh_setup_swing_matched"])
+        self.assertFalse(
+            result["details"]["authoritative_indicator_event_checks"][
+                "swing_price"
+            ]
+        )
+
+    def test_missing_authoritative_source_event_fails_closed(self):
+        with patch.object(guard, "get_indicator_event", return_value=None):
+            result = guard.validate_fresh_setup_swing_identity(
+                self._full_history(),
+                "EURUSD",
+                self._today_setup_identity(),
+                strict_trader,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], guard.SWING_CHANGED_REASON)
+        self.assertFalse(result["details"]["authoritative_indicator_event_found"])
+
+    def test_legacy_setup_without_event_id_still_uses_current_pivot_fallback(self):
         full = self._full_history()
         target_time = full.index[5].isoformat()
-        full_valid = strict_trader.detect_valid_swings(full, "EURUSD")
-        self.assertTrue(
-            any(
-                swing.get("type") == "HIGH"
-                and swing.get("time") == target_time
-                and abs(float(swing.get("price")) - 1.1020) < 1e-12
-                for swing in full_valid
-            )
-        )
-
-        # Simulate the final execution gate's shorter fresh window. The prior
-        # LOW that qualified the HIGH has fallen outside the window, so legacy
-        # detect_valid_swings re-qualification loses the already-valid pivot.
         truncated = full.iloc[3:].copy()
-        truncated_valid = strict_trader.detect_valid_swings(
-            truncated,
-            "EURUSD",
-        )
-        self.assertFalse(
-            any(
-                swing.get("type") == "HIGH"
-                and swing.get("time") == target_time
-                for swing in truncated_valid
-            )
-        )
 
-        result = validate_fresh_setup_swing_identity(
+        result = guard.validate_fresh_setup_swing_identity(
             truncated,
             "EURUSD",
             {
@@ -74,36 +157,13 @@ class StableSetupSwingExecutionGuardTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertIsNone(result["reason"])
         self.assertTrue(result["details"]["fresh_setup_swing_matched"])
-        self.assertEqual(
+        self.assertIn(
             result["details"]["fresh_setup_swing_match_method"],
-            "raw_pivot_identity",
-        )
-        self.assertFalse(
-            result["details"]["fresh_setup_matched_swing"][
-                "fresh_window_valid_flag"
-            ]
-        )
-
-    def test_changed_pivot_price_still_blocks_execution(self):
-        truncated = self._full_history().iloc[3:].copy()
-        target_time = truncated.index[2].isoformat()
-        result = validate_fresh_setup_swing_identity(
-            truncated,
-            "EURUSD",
             {
-                "swing_type": "HIGH",
-                "swing_timestamp": target_time,
-                "swing_price": 1.1015,
+                "smc_indicator_confirmed_pivot_identity",
+                "legacy_raw_pivot_identity",
             },
-            strict_trader,
         )
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(
-            result["reason"],
-            "WAIT_SETUP_SWING_CHANGED_BEFORE_EXECUTION",
-        )
-        self.assertFalse(result["details"]["fresh_setup_swing_matched"])
 
 
 if __name__ == "__main__":
