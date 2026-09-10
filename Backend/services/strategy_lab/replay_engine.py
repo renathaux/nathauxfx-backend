@@ -7,7 +7,7 @@ import pandas as pd
 
 from services.strategy_settings_service import defaults, get_strategy_settings
 
-from .baseline_v1 import build_trade, candidates, resolve_trade
+from .baseline_v1 import candidates, evaluate_event, resolve_trade
 from .data_source import load_candles
 from .metrics import summarize_r
 
@@ -43,27 +43,53 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
         "rejected_by_structure", "rejected_by_m15_buffer", "rejected_by_ema",
         "rejected_by_consolidation", "rejected_by_m5_confirmation_expired",
         "rejected_by_risk_rr", "skipped_active_trade",
+        "skipped_previous_position_close_freshness",
     )}
-    events, trades, active = [], [], None
-    for event, timestamp, prefix, side, leg, structure_ok in candidates(frame15, frame5, start, end, settings):
+    events, trades, trace, active, previous_close = [], [], [], None, None
+    for event, timestamp, prefix, side, leg, structure_ok, exception in candidates(frame15, frame5, start, end, settings):
         events.append(event)
+        event_trace = {
+            "event_time": timestamp.isoformat(), "event_type": event["event_type"],
+            "direction": event["direction"],
+            "structural_leg_points": None if leg is None else leg / 0.00001,
+            "structure_qualified": bool(structure_ok),
+            "structure_qualification": (
+                "external_100_point_leg" if leg is not None and leg >= .001
+                else exception.get("reason")
+            ),
+            "buffered_m15": None, "ema_allowed": None,
+            "consolidation_allowed": None, "m5_confirmation_time": None,
+            "risk_result": None, "entry": None, "sl": None, "tp1": None,
+            "tp2": None, "rr": None, "skipped_active_position": False,
+            "skipped_previous_close_freshness": False, "final_action": None,
+        }
         if not structure_ok:
             counts["rejected_by_structure"] += 1
+            event_trace["final_action"] = "REJECT_STRUCTURE"
+            trace.append(event_trace)
             continue
-        trade, rejection = build_trade(event, timestamp, prefix, frame5, side, leg, settings, end)
+        event_close = timestamp + pd.Timedelta(minutes=15)
+        active_exit = pd.Timestamp(active["exit_timestamp"]) if active and active.get("exit_timestamp") else None
+        if active and (active_exit is None or active_exit > event_close):
+            counts["skipped_active_trade"] += 1
+            event_trace.update(skipped_active_position=True, final_action="SKIP_ACTIVE_POSITION")
+            trace.append(event_trace)
+            continue
+        if active_exit is not None:
+            previous_close = active_exit
+            active = None
+        trade, rejection, event_trace = evaluate_event(
+            event, timestamp, prefix, frame5, side, leg, settings, end,
+            previous_close=previous_close,
+        )
         if rejection:
             counts[rejection] += 1
-            continue
-        if active and active["result"] == "UNRESOLVED_OPEN":
-            resolve_trade(active, frame5, pd.Timestamp(trade["entry_timestamp"]))
-        if active and active["result"] == "UNRESOLVED_OPEN":
-            counts["skipped_active_trade"] += 1
+            trace.append(event_trace)
             continue
         active = trade
-        trades.append(active)
-
-    if active and active["result"] == "UNRESOLVED_OPEN":
         resolve_trade(active, frame5, end)
+        trades.append(active)
+        trace.append(event_trace)
 
     summary = {
         "total_smc_events": len(events),
@@ -83,15 +109,21 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
         "start": start.isoformat(), "end": end.isoformat(),
         "candle_counts": {"15m": int(((frame15.index+pd.Timedelta(minutes=15) >= start)&(frame15.index+pd.Timedelta(minutes=15) <= end)).sum()),
                           "5m": int(((frame5.index+pd.Timedelta(minutes=5) >= start)&(frame5.index+pd.Timedelta(minutes=5) <= end)).sum())},
-        "summary": summary, "trades": trades,
+        "summary": summary, "trades": trades, "event_trace": trace,
         "diagnostics": {
             "analysis_only": True, "isolated_in_memory_state": True,
             "data_source": "indicator_candles_read_only", "spread_slippage_included": False,
             "future_candle_access": False,
             "unsupported_or_approximated": [
-                "two sub-minimum BOS structure exception uses chronological same-direction approximation",
                 "historical spread, slippage, and tick ordering are unavailable",
-                "TP2 uses the production 2R fallback rather than a mutable runtime broker context",
+                "runtime broker position state is represented by isolated simulated trades",
+            ],
+            "parity_rules": [
+                "EMA 9/21 permission", "ATR/floor BOS buffer", "production consolidation gate",
+                "100-point structure qualification", "exact internal two-BOS exception",
+                "60-minute remembered-event window", "event-owned structural SL",
+                "opposing valid 15m swing TP2 with production 2R fallback",
+                "one active position", "previous-position-close freshness",
             ],
         },
     }

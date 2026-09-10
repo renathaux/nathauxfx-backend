@@ -129,15 +129,17 @@ def test_replay_is_deterministic_one_active_trade_and_reports_safety(monkeypatch
              "close": 1.101, "event_type": "BOS", "event_invalidation_swing": {"price": 1.09}}
     prefix = fifteen.loc[fifteen.index <= pd.Timestamp("2026-08-22T00:00:00Z")]
     def fake_candidates(*_args):
-        yield event, pd.Timestamp(event["timestamp"]), prefix, "BUY", .011, True
+        exception = {"qualified": False, "reason": "not_needed"}
+        yield event, pd.Timestamp(event["timestamp"]), prefix, "BUY", .011, True, exception
         later = {**event, "timestamp": "2026-08-22T00:15:00+00:00"}
-        yield later, pd.Timestamp(later["timestamp"]), prefix, "BUY", .011, True
-    def fake_build(event, timestamp, *_args):
+        yield later, pd.Timestamp(later["timestamp"]), prefix, "BUY", .011, True, exception
+    def fake_evaluate(event, timestamp, *_args, **_kwargs):
         built = trade(entry_time=(timestamp + pd.Timedelta(minutes=20)).isoformat())
         built.update(event_timestamp=event["timestamp"], event_type="BOS", source_event_identity=event["timestamp"])
-        return built, None
+        trace = {"event_time": timestamp.isoformat(), "final_action": "SIMULATED_TRADE"}
+        return built, None, trace
     monkeypatch.setattr("services.strategy_lab.replay_engine.candidates", fake_candidates)
-    monkeypatch.setattr("services.strategy_lab.replay_engine.build_trade", fake_build)
+    monkeypatch.setattr("services.strategy_lab.replay_engine.evaluate_event", fake_evaluate)
     settings = {"minimum_rr": 1.2, "maximum_rr": 2.0}
     args = ("EURUSD", "baseline_v1", "2026-08-22T00:00:00Z", "2026-08-23T00:00:00Z")
     first = run_replay(*args, frames=(fifteen, five), settings=settings)
@@ -146,6 +148,51 @@ def test_replay_is_deterministic_one_active_trade_and_reports_safety(monkeypatch
     assert first["summary"]["total_simulated_trades"] == 1
     assert first["summary"]["skipped_active_trade"] == 1
     assert first["diagnostics"]["analysis_only"] is True
+
+
+def test_historical_non_2r_tp2_fixtures_match_production_selection():
+    from services.strategy_lab.production_math import select_tp2
+    from strategies.strict_trader import select_tp2 as production_select_tp2
+    # Prices are from the Sep 2 06:45 and Sep 4 12:30 historical replay events.
+    sep2 = select_tp2([{"type": "LOW", "price": 1.15332}], "SELL", 1.15677,
+                      1.15898 - 1.15677, 1.2, 2.0)
+    sep4 = select_tp2([{"type": "LOW", "price": 1.15607}], "SELL", 1.15997,
+                      1.16320 - 1.15997, 1.2, 2.0)
+    assert sep2["source"] == sep4["source"] == "inverse_15m_swing"
+    assert sep2["rr"] == pytest.approx(1.56108597285068)
+    assert sep4["rr"] == pytest.approx(1.20743034055728)
+    assert sep2["rr"] != 2.0 and sep4["rr"] != 2.0
+    production_sep2 = production_select_tp2(
+        [{"type": "LOW", "price": 1.15332}], "SELL", 1.15677,
+        1.15898 - 1.15677, "EURUSD", minimum_rr=1.2, maximum_rr=2.0,
+    )
+    production_sep4 = production_select_tp2(
+        [{"type": "LOW", "price": 1.15607}], "SELL", 1.15997,
+        1.16320 - 1.15997, "EURUSD", minimum_rr=1.2, maximum_rr=2.0,
+    )
+    assert (sep2["tp2"], sep2["rr"], sep2["source"]) == (
+        production_sep2["tp2"], production_sep2["rr"], production_sep2["source"])
+    assert (sep4["tp2"], sep4["rr"], sep4["source"]) == (
+        production_sep4["tp2"], production_sep4["rr"], production_sep4["source"])
+
+
+def test_tp2_uses_2r_only_when_no_opposing_swing_is_in_rr_window():
+    from services.strategy_lab.production_math import select_tp2
+    result = select_tp2([{"type": "LOW", "price": 1.1590}], "SELL", 1.1600,
+                        .0020, 1.2, 2.0)
+    assert result["source"] == "fallback_2r"
+    assert result["rr"] == 2.0
+
+
+def test_internal_two_bos_requires_higher_high_and_higher_low():
+    from services.strategy_lab.production_math import internal_two_bos
+    first = {"break_index": 10, "event_type": "BOS", "direction": "BULLISH",
+             "broken_level": 1.1000, "event_invalidation_swing": {"type": "LOW", "price": 1.0995}}
+    valid = {"break_index": 20, "event_type": "BOS", "direction": "BULLISH",
+             "broken_level": 1.1004, "event_invalidation_swing": {"type": "LOW", "price": 1.0998}}
+    invalid = {**valid, "event_invalidation_swing": {"type": "LOW", "price": 1.0993}}
+    assert internal_two_bos({"events": [first, valid]}, valid)["qualified"] is True
+    assert internal_two_bos({"events": [first, invalid]}, invalid)["qualified"] is False
 
 
 def test_strategy_lab_has_no_execution_or_mutation_imports():
