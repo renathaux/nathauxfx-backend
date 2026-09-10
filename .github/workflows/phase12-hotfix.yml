@@ -36,4 +36,5 @@ jobs:
             tests/test_phase_1_2_final_audit.py \
             tests/test_database_configuration.py \
             tests/test_smc_strategy_authority.py \
+            tests/test_setup_swing_execution_guard.py \
             tests/test_xauusd_risk_guard.py
