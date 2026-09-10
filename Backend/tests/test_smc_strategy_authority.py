@@ -47,6 +47,8 @@ class _StrictTraderStub:
 
     @staticmethod
     def utc_timestamp(value):
+        if value is None:
+            return None
         timestamp = pd.Timestamp(value)
         return timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp.tz_convert("UTC")
 
@@ -168,6 +170,38 @@ def _two_small_bos_analysis(frame, direction="BULLISH", *, confirm_pattern=True)
     }
 
 
+def _today_bearish_choch_analysis(frame, event_age=4):
+    event_index = len(frame) - 1 - event_age
+    event_time = frame.index[event_index]
+    return {
+        "bias": "BEARISH",
+        "stream_last_candle": frame.index[-1].isoformat(),
+        "events": [
+            {
+                "event_id": "smc1_today_eurusd_choch",
+                "event_identity": {"symbol": "EURUSD", "timeframe": "15m"},
+                "event_type": "CHOCH",
+                "tradable": True,
+                "direction": "BEARISH",
+                "timestamp": event_time.isoformat(),
+                "close": 1.16168,
+                "broken_swing_timestamp": "2026-09-09T10:00:00+00:00",
+                "broken_level": 1.16218,
+                "structure_start_index": max(0, event_index - 5),
+                "break_index": event_index,
+                "event_invalidation_swing": {
+                    "type": "HIGH",
+                    "price": 1.16381,
+                    "swing_time": "2026-09-10T10:00:00+00:00",
+                },
+            }
+        ],
+        "current_structure": {"bias": "BEARISH"},
+        "swings": [],
+        "fib_levels": [],
+    }
+
+
 class SmcStrategyAuthorityTests(unittest.TestCase):
     def setUp(self):
         _StrictTraderStub.shared.FIFTEEN_M_SWING_WATCH = {}
@@ -284,12 +318,91 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
         self.assertEqual(result["side"], "WAIT")
         self.assertEqual(result["reason"], "WAIT_WEAK_15M_BOS")
 
-    def test_non_latest_indicator_event_is_not_a_fresh_entry(self):
-        frame = _frame()
+    def test_today_bearish_choch_remains_authoritative_at_four_candles_old(self):
+        frame = pd.DataFrame(
+            {
+                "Open": [1.1630] * 10,
+                "High": [1.1640] * 10,
+                "Low": [1.1590] * 10,
+                "Close": [1.1605] * 10,
+            },
+            index=pd.date_range(
+                "2026-09-10T10:30:00Z", periods=10, freq="15min"
+            ),
+        )
+        analysis = _today_bearish_choch_analysis(frame, event_age=4)
+        lifecycles = {
+            "smc1_today_eurusd_choch": {
+                "PAPER": {"status": "BLOCKED"},
+                "LIVE": {"status": "ELIGIBLE"},
+            }
+        }
+        with (
+            patch.object(authority, "get_authoritative_structure", return_value=analysis),
+            patch.object(authority, "get_event_lifecycles", return_value=lifecycles),
+        ):
+            result = authority.evaluate_indicator_breakout(
+                frame,
+                "EURUSD",
+                strict_trader_module=_StrictTraderStub,
+            )
+
+        self.assertEqual(result["side"], "SELL")
+        self.assertEqual(result["break_type"], "CHOCH")
+        self.assertTrue(result["remembered"])
+        self.assertEqual(result["smc_event_age_15m_candles"], 4)
+        self.assertEqual(
+            result["indicator_event_id"],
+            "smc1_today_eurusd_choch",
+        )
+        self.assertEqual(result["reason"], "SMC_INDICATOR_REMEMBERED_CHOCH")
+
+    def test_authoritative_event_expires_after_four_later_15m_candles(self):
+        frame = _frame(rows=12)
         analysis = _analysis(frame)
-        analysis["events"][0]["break_index"] = len(frame) - 2
-        analysis["events"][0]["timestamp"] = frame.index[-2].isoformat()
-        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
+        event = analysis["events"][0]
+        event["event_id"] = "smc1_old_event"
+        event["timestamp"] = frame.index[-6].isoformat()
+        event["break_index"] = len(frame) - 6
+        analysis["stream_last_candle"] = frame.index[-1].isoformat()
+        with (
+            patch.object(authority, "get_authoritative_structure", return_value=analysis),
+            patch.object(
+                authority,
+                "get_event_lifecycles",
+                return_value={"smc1_old_event": {"LIVE": {"status": "ELIGIBLE"}}},
+            ),
+        ):
+            result = authority.evaluate_indicator_breakout(
+                frame,
+                "EURUSD",
+                strict_trader_module=_StrictTraderStub,
+            )
+
+        self.assertEqual(result["side"], "WAIT")
+        self.assertEqual(result["reason"], "WAIT_NO_FRESH_15M_SMC_BREAK")
+
+    def test_terminal_event_is_not_replayed_inside_recent_window(self):
+        frame = _frame(rows=12)
+        analysis = _analysis(frame)
+        event = analysis["events"][0]
+        event["event_id"] = "smc1_consumed_event"
+        event["timestamp"] = frame.index[-3].isoformat()
+        event["break_index"] = len(frame) - 3
+        analysis["stream_last_candle"] = frame.index[-1].isoformat()
+        with (
+            patch.object(authority, "get_authoritative_structure", return_value=analysis),
+            patch.object(
+                authority,
+                "get_event_lifecycles",
+                return_value={
+                    "smc1_consumed_event": {
+                        "LIVE": {"status": "CONSUMED"},
+                        "PAPER": {"status": "EXPIRED"},
+                    }
+                },
+            ),
+        ):
             result = authority.evaluate_indicator_breakout(
                 frame,
                 "EURUSD",

@@ -20,6 +20,15 @@ from services.indicator_event_stream_service import (
 AUTHORITY_SOURCE = "backend_smc_indicator"
 AUTHORITY_CANDLE_LIMIT = 250
 STRATEGY_DIAGNOSTIC_SWING_LIMIT = 20
+RECENT_SETUP_MAX_15M_CANDLES = 4
+REPLAYABLE_LIFECYCLE_STATUSES = {"WAITING", "BLOCKED", "ELIGIBLE"}
+NON_REPLAYABLE_LIFECYCLE_STATUSES = {
+    "SUBMITTING",
+    "RECONCILIATION_REQUIRED",
+    "CONSUMED",
+    "EXPIRED",
+    "INVALIDATED",
+}
 
 
 def _as_float(value):
@@ -236,6 +245,58 @@ def _base_result(analysis=None, candle_count=0):
     }
 
 
+def _event_age_15m_candles(event, latest_open, strict_trader_module):
+    event_time = strict_trader_module.utc_timestamp((event or {}).get("timestamp"))
+    latest_time = strict_trader_module.utc_timestamp(latest_open)
+    if event_time is None or latest_time is None or event_time > latest_time:
+        return None
+    seconds = (latest_time - event_time).total_seconds()
+    return int(seconds // (15 * 60))
+
+
+def _lifecycle_allows_recent_event(event_id, lifecycles):
+    per_mode = (lifecycles or {}).get(event_id) or {}
+    statuses = {
+        str((state or {}).get("status") or "").upper()
+        for state in per_mode.values()
+        if isinstance(state, dict)
+    }
+    statuses.discard("")
+    if not statuses:
+        return True
+    if statuses & REPLAYABLE_LIFECYCLE_STATUSES:
+        return True
+    return not bool(statuses & NON_REPLAYABLE_LIFECYCLE_STATUSES)
+
+
+def _recent_authoritative_events(
+    analysis,
+    latest_open,
+    strict_trader_module,
+):
+    candidates = []
+    for event in (analysis or {}).get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        if event.get("tradable") is not True:
+            continue
+        if str(event.get("direction") or "").upper() not in {"BULLISH", "BEARISH"}:
+            continue
+        age = _event_age_15m_candles(event, latest_open, strict_trader_module)
+        if age is None or age < 0 or age > RECENT_SETUP_MAX_15M_CANDLES:
+            continue
+        candidates.append((event, age))
+
+    lifecycle_map = get_event_lifecycles(
+        [event.get("event_id") for event, _age in candidates]
+    )
+    return [
+        (event, age)
+        for event, age in candidates
+        if _lifecycle_allows_recent_event(event.get("event_id"), lifecycle_map)
+    ]
+
+
 def _marked_remembered_breakout(strict_trader_module, symbol, side, current_close_time, current_close):
     key = strict_trader_module.get_watch_key(symbol, side)
     watch = strict_trader_module.shared.FIFTEEN_M_SWING_WATCH.get(key)
@@ -271,8 +332,10 @@ def evaluate_indicator_breakout(
     Existing buffered 15m close, later 5m confirmation, EMA, consolidation,
     SL/TP, risk, duplicate, position and broker gates remain unchanged.
 
-    A fixed 250-closed-candle authority window is used so chart and strategy see
-    the same market-structure history and so strategy payloads remain bounded.
+    A confirmed tradable event remains the structure authority for four later
+    15m candles unless its durable lifecycle is terminal or in flight. This
+    preserves the pre-authority 60-minute setup window while keeping the event
+    itself immutable and preventing a later candle from erasing confirmation.
     """
     if data_15m is None or len(data_15m) < 10:
         result = _base_result(candle_count=0 if data_15m is None else len(data_15m))
@@ -303,21 +366,36 @@ def evaluate_indicator_breakout(
     result = _base_result(analysis, candle_count=len(authority_frame))
     result["bos_buffer"] = required_buffer
 
-    last_index = len(authority_frame) - 1
     last_close = float(authority_frame.iloc[-1]["Close"])
     last_close_time = strict_trader_module.candle_close_time(authority_frame.index[-1], 15)
-    fresh_events = [
-        event
-        for event in (analysis.get("events") or [])
-        if isinstance(event, dict)
-        and strict_trader_module.utc_timestamp(event.get("timestamp"))
-        == strict_trader_module.utc_timestamp(authority_frame.index[-1])
-        and event.get("tradable") is True
-        and str(event.get("direction") or "").upper() in {"BULLISH", "BEARISH"}
-    ]
+    latest_authoritative_open = (
+        analysis.get("stream_last_candle")
+        or authority_frame.index[-1]
+    )
+    recent_events = _recent_authoritative_events(
+        analysis,
+        latest_authoritative_open,
+        strict_trader_module,
+    )
 
-    if fresh_events:
-        event = fresh_events[-1]
+    if recent_events:
+        event, event_age = recent_events[-1]
+        event_time = strict_trader_module.utc_timestamp(event.get("timestamp"))
+        event_frame = authority_frame.loc[
+            [
+                strict_trader_module.utc_timestamp(value) <= event_time
+                for value in authority_frame.index
+            ]
+        ].copy()
+        event_buffer = strict_trader_module.bos_buffer(
+            event_frame if not event_frame.empty else authority_frame,
+            normalized_symbol,
+            configured.get("bos_buffer_points", strict_trader_module.BOS_MIN_BUFFER_POINTS),
+        )
+        result["bos_buffer"] = event_buffer
+        result["smc_event_age_15m_candles"] = event_age
+        result["recent_confirmed_smc_event"] = event
+
         direction = str(event.get("direction") or "").upper()
         side = "BUY" if direction == "BULLISH" else "SELL"
         level = _as_float(event.get("broken_level"))
@@ -354,9 +432,9 @@ def evaluate_indicator_breakout(
                 return result
 
         buffered = (
-            break_close > level + required_buffer
+            break_close > level + event_buffer
             if side == "BUY"
-            else break_close < level - required_buffer
+            else break_close < level - event_buffer
         )
         if not buffered:
             result["reason"] = "WAIT_WEAK_15M_BOS"
@@ -388,8 +466,8 @@ def evaluate_indicator_breakout(
             "break_time": break_time,
             "break_close_time": strict_trader_module.candle_close_time(break_time, 15),
             "break_close": break_close,
-            "remembered": False,
-            "bos_buffer": required_buffer,
+            "remembered": event_age > 0,
+            "bos_buffer": event_buffer,
             "swing": broken_swing,
             "break_type": str(event.get("event_type") or "BOS").upper(),
             "invalidation_level": invalidation_price,
@@ -399,6 +477,7 @@ def evaluate_indicator_breakout(
             "indicator_event": event,
             "indicator_event_id": event.get("event_id"),
             "indicator_event_identity": event.get("event_identity"),
+            "smc_event_age_15m_candles": event_age,
             "setup_status": "WAITING_FOR_FILTERS",
             "strategy_structure_qualification": (
                 "INTERNAL_TWO_BOS_CONFIRMATION"
@@ -417,7 +496,11 @@ def evaluate_indicator_breakout(
         result["breakouts"] = [candidate]
         result["swings"] = [broken_swing]
         result["raw_swings"] = [broken_swing]
-        result["reason"] = f"SMC_INDICATOR_{candidate['break_type']}"
+        result["reason"] = (
+            f"SMC_INDICATOR_{candidate['break_type']}"
+            if event_age == 0
+            else f"SMC_INDICATOR_REMEMBERED_{candidate['break_type']}"
+        )
         return result
 
     remembered_candidates = []
