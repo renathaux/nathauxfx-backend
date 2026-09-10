@@ -151,9 +151,11 @@ def build_trade(event, timestamp, prefix15, frame5, side, leg, settings, end):
         "side": side, "broken_level": float(event["broken_level"]),
         "event_structural_leg_size": leg, "m15_break_close": float(event["close"]),
         "m5_confirmation_timestamp": _iso(candle_time), "entry": entry,
-        "sl": sl, "tp1": tp1, "tp2": tp2, "protected_sl": protected,
+        "sl": sl, "original_sl": sl, "tp1": tp1, "tp2": tp2,
+        "protected_sl": protected, "protected_sl_price": protected,
         "rr": rr, "entry_timestamp": _iso(entry_time), "exit_timestamp": None,
-        "exit_reason": None, "result": "UNRESOLVED_OPEN", "r_result": None,
+        "exit_price": None, "exit_reason": None, "result": "UNRESOLVED_OPEN",
+        "r_result": None, "exact_r_before_rounding": None, "tp1_reached": False,
         "source_event_identity": _identity(event),
         "filters_passed": ["structure", "m15_buffer", "ema", "consolidation", "m5_confirmation", "risk_rr"],
         "filters_failed_or_skipped": [],
@@ -163,7 +165,13 @@ def build_trade(event, timestamp, prefix15, frame5, side, leg, settings, end):
 def resolve_trade(trade, frame5, end):
     entry_time = pd.Timestamp(trade["entry_timestamp"])
     tp1_reached = False
-    risk = abs(trade["entry"]-trade["sl"])
+    original_sl = float(trade.get("original_sl", trade["sl"]))
+    risk = abs(float(trade["entry"])-original_sl)
+
+    def realized_r(exit_price):
+        if trade["side"] == "BUY":
+            return (float(exit_price)-float(trade["entry"])) / (float(trade["entry"])-original_sl)
+        return (float(trade["entry"])-float(exit_price)) / (original_sl-float(trade["entry"]))
     for timestamp, candle in frame5.iterrows():
         close_time = timestamp + pd.Timedelta(minutes=5)
         if close_time <= entry_time or close_time > end:
@@ -176,16 +184,23 @@ def resolve_trade(trade, frame5, end):
         if (stop_hit and (tp2_hit or (tp1_hit and not tp1_reached))) or (
             not tp1_reached and protected_touched and (tp1_hit or tp2_hit)
         ):
-            result, r_value = "AMBIGUOUS_INTRABAR", None
+            result, exit_price, r_value = "AMBIGUOUS_INTRABAR", None, None
         elif tp2_hit:
-            result, r_value = "FULL_TP2_WIN", trade["rr"]
+            result, exit_price = "FULL_TP2_WIN", float(trade["tp2"])
+            r_value = realized_r(exit_price)
         elif stop_hit:
             result = "PROTECTED_WIN" if tp1_reached else "LOSS"
-            r_value = abs(stop-trade["entry"])/risk if tp1_reached else -1.0
+            exit_price = float(stop)
+            r_value = realized_r(exit_price)
         elif tp1_hit:
             tp1_reached = True
+            trade["tp1_reached"] = True
             continue
         else:
             continue
-        trade.update(result=result, r_result=r_value, exit_reason=result, exit_timestamp=_iso(close_time))
+        trade.update(
+            result=result, exit_price=exit_price, r_result=r_value,
+            exact_r_before_rounding=r_value, exit_reason=result,
+            exit_timestamp=_iso(close_time), tp1_reached=tp1_reached,
+        )
         return

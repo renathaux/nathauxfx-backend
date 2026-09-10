@@ -25,6 +25,7 @@ def trade(side="BUY", entry_time="2026-08-22T00:05:00Z"):
         "tp2": 1.1020, "protected_sl": 1.1010, "rr": 2.0,
         "entry_timestamp": entry_time, "result": "UNRESOLVED_OPEN",
         "r_result": None, "exit_timestamp": None, "exit_reason": None,
+        "exit_price": None, "original_sl": 1.0990,
     }
 
 
@@ -39,19 +40,49 @@ def test_tp1_then_protected_sl():
     resolve_trade(current, candles, pd.Timestamp("2026-08-22T01:00:00Z"))
     assert current["result"] == "PROTECTED_WIN"
     assert current["r_result"] == pytest.approx(1.0)
+    assert current["exit_price"] == current["protected_sl"]
+    assert current["exact_r_before_rounding"] == (
+        current["exit_price"]-current["entry"]
+    ) / (current["entry"]-current["original_sl"])
 
 
 def test_tp2_full_win():
     current = trade()
     resolve_trade(current, outcome_frame((1.1012, 1.1021, 1.1011, 1.1020)), pd.Timestamp("2026-08-22T01:00:00Z"))
     assert current["result"] == "FULL_TP2_WIN"
-    assert current["r_result"] == 2.0
+    assert current["exit_price"] == current["tp2"]
+    assert current["r_result"] == (
+        current["tp2"]-current["entry"]
+    ) / (current["entry"]-current["original_sl"])
 
 
 def test_sl_loss():
     current = trade()
     resolve_trade(current, outcome_frame((1.1000, 1.1002, 1.0989, 1.0990)), pd.Timestamp("2026-08-22T01:00:00Z"))
     assert current["result"] == "LOSS" and current["r_result"] == -1.0
+    assert current["exit_price"] == current["original_sl"]
+
+
+def test_sell_r_uses_actual_exit_price():
+    current = trade(side="SELL")
+    current.update(entry=1.1000, sl=1.1010, original_sl=1.1010, tp1=1.0984,
+                   tp2=1.0980, protected_sl=1.09925)
+    candles = outcome_frame((1.0988, 1.0989, 1.0983, 1.0985), (1.0985, 1.0993, 1.0982, 1.0992))
+    resolve_trade(current, candles, pd.Timestamp("2026-08-22T01:00:00Z"))
+    expected = (current["entry"]-current["protected_sl"]) / (current["original_sl"]-current["entry"])
+    assert current["result"] == "PROTECTED_WIN"
+    assert current["exit_price"] == current["protected_sl"]
+    assert current["exact_r_before_rounding"] == expected
+
+
+def test_tp1_touch_alone_is_not_realized_profit():
+    current = trade()
+    candles = outcome_frame((1.1012, 1.1017, 1.1011, 1.1015))
+    resolve_trade(current, candles, pd.Timestamp("2026-08-22T01:00:00Z"))
+    assert current["tp1_reached"] is True
+    assert current["result"] == "UNRESOLVED_OPEN"
+    assert current["exit_price"] is None
+    assert current["r_result"] is None
 
 
 def test_ambiguous_same_candle_sl_and_tp():

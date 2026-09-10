@@ -19,6 +19,7 @@ def summarize_r(trades):
     return {
         "win_rate": round((wins / len(resolved) * 100.0), 2) if resolved else 0.0,
         "total_r": round(sum(values), 4),
+        "total_r_before_rounding": sum(values),
         "average_r_per_trade": round(sum(values) / len(resolved), 4) if resolved else 0.0,
         "max_consecutive_losses": maximum_consecutive,
         "max_drawdown_r": round(max_drawdown, 4),
