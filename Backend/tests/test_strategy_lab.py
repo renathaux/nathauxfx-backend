@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from services.strategy_lab.baseline_v1 import candidates, resolve_trade
+from services.strategy_lab.replay_engine import run_replay
+
+
+def frame(minutes, rows=80, start="2026-08-20T00:00:00Z", base=1.1600):
+    index = pd.date_range(start, periods=rows, freq=f"{minutes}min", tz="UTC")
+    values = [base + pos * .00002 for pos in range(rows)]
+    return pd.DataFrame({
+        "Open": values, "High": [v+.0003 for v in values],
+        "Low": [v-.0003 for v in values], "Close": [v+.00001 for v in values],
+    }, index=index)
+
+
+def trade(side="BUY", entry_time="2026-08-22T00:05:00Z"):
+    return {
+        "side": side, "entry": 1.1000, "sl": 1.0990, "tp1": 1.1016,
+        "tp2": 1.1020, "protected_sl": 1.1010, "rr": 2.0,
+        "entry_timestamp": entry_time, "result": "UNRESOLVED_OPEN",
+        "r_result": None, "exit_timestamp": None, "exit_reason": None,
+        "exit_price": None, "original_sl": 1.0990,
+    }
+
+
+def outcome_frame(*ohlc):
+    index = pd.date_range("2026-08-22T00:05:00Z", periods=len(ohlc), freq="5min", tz="UTC")
+    return pd.DataFrame(ohlc, columns=["Open", "High", "Low", "Close"], index=index)
+
+
+def test_tp1_then_protected_sl():
+    current = trade()
+    candles = outcome_frame((1.1012, 1.1017, 1.1011, 1.1015), (1.1015, 1.1017, 1.1009, 1.1010))
+    resolve_trade(current, candles, pd.Timestamp("2026-08-22T01:00:00Z"))
+    assert current["result"] == "PROTECTED_WIN"
+    assert current["r_result"] == pytest.approx(1.0)
+    assert current["exit_price"] == current["protected_sl"]
+    assert current["exact_r_before_rounding"] == (
+        current["exit_price"]-current["entry"]
+    ) / (current["entry"]-current["original_sl"])
+
+
+def test_tp2_full_win():
+    current = trade()
+    resolve_trade(current, outcome_frame((1.1012, 1.1021, 1.1011, 1.1020)), pd.Timestamp("2026-08-22T01:00:00Z"))
+    assert current["result"] == "FULL_TP2_WIN"
+    assert current["exit_price"] == current["tp2"]
+    assert current["r_result"] == (
+        current["tp2"]-current["entry"]
+    ) / (current["entry"]-current["original_sl"])
+
+
+def test_sl_loss():
+    current = trade()
+    resolve_trade(current, outcome_frame((1.1000, 1.1002, 1.0989, 1.0990)), pd.Timestamp("2026-08-22T01:00:00Z"))
+    assert current["result"] == "LOSS" and current["r_result"] == -1.0
+    assert current["exit_price"] == current["original_sl"]
+
+
+def test_sell_r_uses_actual_exit_price():
+    current = trade(side="SELL")
+    current.update(entry=1.1000, sl=1.1010, original_sl=1.1010, tp1=1.0984,
+                   tp2=1.0980, protected_sl=1.09925)
+    candles = outcome_frame((1.0988, 1.0989, 1.0983, 1.0985), (1.0985, 1.0993, 1.0982, 1.0992))
+    resolve_trade(current, candles, pd.Timestamp("2026-08-22T01:00:00Z"))
+    expected = (current["entry"]-current["protected_sl"]) / (current["original_sl"]-current["entry"])
+    assert current["result"] == "PROTECTED_WIN"
+    assert current["exit_price"] == current["protected_sl"]
+    assert current["exact_r_before_rounding"] == expected
+
+
+def test_tp1_touch_alone_is_not_realized_profit():
+    current = trade()
+    candles = outcome_frame((1.1012, 1.1017, 1.1011, 1.1015))
+    resolve_trade(current, candles, pd.Timestamp("2026-08-22T01:00:00Z"))
+    assert current["tp1_reached"] is True
+    assert current["result"] == "UNRESOLVED_OPEN"
+    assert current["exit_price"] is None
+    assert current["r_result"] is None
+
+
+def test_ambiguous_same_candle_sl_and_tp():
+    current = trade()
+    resolve_trade(current, outcome_frame((1.1000, 1.1021, 1.0989, 1.1005)), pd.Timestamp("2026-08-22T01:00:00Z"))
+    assert current["result"] == "AMBIGUOUS_INTRABAR"
+    assert current["r_result"] is None
+
+
+def test_m5_confirmation_cannot_precede_m15_close(monkeypatch):
+    event = {"timestamp": "2026-08-22T00:00:00+00:00", "direction": "BULLISH", "broken_level": 1.1,
+             "close": 1.101, "event_type": "BOS", "event_invalidation_swing": {"price": 1.09}}
+    from services.strategy_lab import baseline_v1
+    five = outcome_frame((1.099, 1.102, 1.098, 1.101), (1.1, 1.102, 1.099, 1.101),
+                         (1.1, 1.102, 1.099, 1.101), (1.1, 1.102, 1.099, 1.101))
+    found = baseline_v1._confirmation(event, five, 0, pd.Timestamp("2026-08-22T01:00:00Z"))
+    assert found[1] > pd.Timestamp(event["timestamp"]) + pd.Timedelta(minutes=15)
+
+
+def test_m5_confirmation_cannot_cross_replay_end():
+    event = {"timestamp": "2026-08-22T00:00:00+00:00", "direction": "BULLISH", "broken_level": 1.1,
+             "close": 1.101, "event_type": "BOS", "event_invalidation_swing": {"price": 1.09}}
+    from services.strategy_lab import baseline_v1
+    five = outcome_frame((1.1, 1.102, 1.099, 1.101), (1.1, 1.102, 1.099, 1.101),
+                         (1.1, 1.102, 1.099, 1.101), (1.1, 1.102, 1.099, 1.101))
+    assert baseline_v1._confirmation(event, five, 0, pd.Timestamp("2026-08-22T00:15:00Z")) is None
+
+
+def test_smc_events_are_deterministic_and_do_not_use_future_candles():
+    fifteen, five = frame(15, 120), frame(5, 360)
+    start, end = pd.Timestamp("2026-08-20T00:00:00Z"), pd.Timestamp("2026-08-21T00:00:00Z")
+    first = list(candidates(fifteen, five, start, end, {}))
+    changed = pd.concat([fifteen, frame(15, 2, "2026-08-25T00:00:00Z", 1.5)])
+    second = list(candidates(changed, five, start, end, {}))
+    assert [(x[0]["timestamp"], x[0]["event_type"]) for x in first] == [(x[0]["timestamp"], x[0]["event_type"]) for x in second]
+
+
+def test_replay_is_deterministic_one_active_trade_and_reports_safety(monkeypatch):
+    fifteen, five = frame(15, 200), frame(5, 600, base=1.1000)
+    five.loc[:, ["Open", "Close"]] = 1.1000
+    five.loc[:, "High"] = 1.1003
+    five.loc[:, "Low"] = 1.0997
+    event = {"timestamp": "2026-08-22T00:00:00+00:00", "direction": "BULLISH", "broken_level": 1.1,
+             "close": 1.101, "event_type": "BOS", "event_invalidation_swing": {"price": 1.09}}
+    prefix = fifteen.loc[fifteen.index <= pd.Timestamp("2026-08-22T00:00:00Z")]
+    def fake_candidates(*_args):
+        exception = {"qualified": False, "reason": "not_needed"}
+        yield event, pd.Timestamp(event["timestamp"]), prefix, "BUY", .011, True, exception
+        later = {**event, "timestamp": "2026-08-22T00:15:00+00:00"}
+        yield later, pd.Timestamp(later["timestamp"]), prefix, "BUY", .011, True, exception
+    def fake_evaluate(event, timestamp, *_args, **_kwargs):
+        built = trade(entry_time=(timestamp + pd.Timedelta(minutes=20)).isoformat())
+        built.update(event_timestamp=event["timestamp"], event_type="BOS", source_event_identity=event["timestamp"])
+        trace = {"event_time": timestamp.isoformat(), "final_action": "SIMULATED_TRADE"}
+        return built, None, trace
+    monkeypatch.setattr("services.strategy_lab.replay_engine.candidates", fake_candidates)
+    monkeypatch.setattr("services.strategy_lab.replay_engine.evaluate_event", fake_evaluate)
+    settings = {"minimum_rr": 1.2, "maximum_rr": 2.0}
+    args = ("EURUSD", "baseline_v1", "2026-08-22T00:00:00Z", "2026-08-23T00:00:00Z")
+    first = run_replay(*args, frames=(fifteen, five), settings=settings)
+    second = run_replay(*args, frames=(fifteen, five), settings=settings)
+    assert first == second
+    assert first["summary"]["total_simulated_trades"] == 1
+    assert first["summary"]["skipped_active_trade"] == 1
+    assert first["diagnostics"]["analysis_only"] is True
+
+
+def test_historical_non_2r_tp2_fixtures_match_production_selection():
+    from services.strategy_lab.production_math import select_tp2
+    from strategies.strict_trader import select_tp2 as production_select_tp2
+    # Prices are from the Sep 2 06:45 and Sep 4 12:30 historical replay events.
+    sep2 = select_tp2([{"type": "LOW", "price": 1.15332}], "SELL", 1.15677,
+                      1.15898 - 1.15677, 1.2, 2.0)
+    sep4 = select_tp2([{"type": "LOW", "price": 1.15607}], "SELL", 1.15997,
+                      1.16320 - 1.15997, 1.2, 2.0)
+    assert sep2["source"] == sep4["source"] == "inverse_15m_swing"
+    assert sep2["rr"] == pytest.approx(1.56108597285068)
+    assert sep4["rr"] == pytest.approx(1.20743034055728)
+    assert sep2["rr"] != 2.0 and sep4["rr"] != 2.0
+    production_sep2 = production_select_tp2(
+        [{"type": "LOW", "price": 1.15332}], "SELL", 1.15677,
+        1.15898 - 1.15677, "EURUSD", minimum_rr=1.2, maximum_rr=2.0,
+    )
+    production_sep4 = production_select_tp2(
+        [{"type": "LOW", "price": 1.15607}], "SELL", 1.15997,
+        1.16320 - 1.15997, "EURUSD", minimum_rr=1.2, maximum_rr=2.0,
+    )
+    assert (sep2["tp2"], sep2["rr"], sep2["source"]) == (
+        production_sep2["tp2"], production_sep2["rr"], production_sep2["source"])
+    assert (sep4["tp2"], sep4["rr"], sep4["source"]) == (
+        production_sep4["tp2"], production_sep4["rr"], production_sep4["source"])
+
+
+def test_tp2_uses_2r_only_when_no_opposing_swing_is_in_rr_window():
+    from services.strategy_lab.production_math import select_tp2
+    result = select_tp2([{"type": "LOW", "price": 1.1590}], "SELL", 1.1600,
+                        .0020, 1.2, 2.0)
+    assert result["source"] == "fallback_2r"
+    assert result["rr"] == 2.0
+
+
+def test_internal_two_bos_requires_higher_high_and_higher_low():
+    from services.strategy_lab.production_math import internal_two_bos
+    first = {"break_index": 10, "event_type": "BOS", "direction": "BULLISH",
+             "broken_level": 1.1000, "event_invalidation_swing": {"type": "LOW", "price": 1.0995}}
+    valid = {"break_index": 20, "event_type": "BOS", "direction": "BULLISH",
+             "broken_level": 1.1004, "event_invalidation_swing": {"type": "LOW", "price": 1.0998}}
+    invalid = {**valid, "event_invalidation_swing": {"type": "LOW", "price": 1.0993}}
+    assert internal_two_bos({"events": [first, valid]}, valid)["qualified"] is True
+    assert internal_two_bos({"events": [first, invalid]}, invalid)["qualified"] is False
+
+
+def test_strategy_lab_has_no_execution_or_mutation_imports():
+    root = Path(__file__).parents[1] / "services" / "strategy_lab"
+    forbidden = {"ctrader_connector", "paper_live_entry_service", "indicator_event_stream_service", "trade_submission_service"}
+    for path in root.glob("*.py"):
+        tree = ast.parse(path.read_text())
+        imports = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+        imports |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+        assert not any(name and any(blocked in name for blocked in forbidden) for name in imports)
+        source = path.read_text()
+        assert "place_market_order" not in source
+        assert "update_event_lifecycle" not in source
+        assert "FIFTEEN_M_SWING_WATCH" not in source
+
+
+def test_replay_leaves_lifecycle_and_watch_sentinels_unchanged(monkeypatch):
+    fifteen, five = frame(15, 100), frame(5, 300)
+    lifecycle = {"event": "sentinel", "status": "ELIGIBLE"}
+    watches = {"EURUSD:BUY": {"status": "PENDING"}}
+    before = (lifecycle.copy(), {key: value.copy() for key, value in watches.items()})
+    monkeypatch.setattr("services.strategy_lab.replay_engine.candidates", lambda *_args: iter(()))
+    run_replay("EURUSD", "baseline_v1", "2026-08-20T00:00:00Z", "2026-08-21T00:00:00Z",
+               frames=(fifteen, five), settings={})
+    assert (lifecycle, watches) == before
