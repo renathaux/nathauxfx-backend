@@ -21,6 +21,7 @@ class _Shared:
 class _StrictTraderStub:
     shared = _Shared()
     BOS_MIN_BUFFER_POINTS = 10
+    REMEMBERED_BREAKOUT_MAX_15M_CANDLES = 4
 
     @staticmethod
     def get_cached_execution_settings():
@@ -284,7 +285,7 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
         self.assertEqual(result["side"], "WAIT")
         self.assertEqual(result["reason"], "WAIT_WEAK_15M_BOS")
 
-    def test_non_latest_indicator_event_is_not_a_fresh_entry(self):
+    def test_non_latest_indicator_event_remains_remembered_within_window(self):
         frame = _frame()
         analysis = _analysis(frame)
         analysis["events"][0]["break_index"] = len(frame) - 2
@@ -296,8 +297,9 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
                 strict_trader_module=_StrictTraderStub,
             )
 
-        self.assertEqual(result["side"], "WAIT")
-        self.assertEqual(result["reason"], "WAIT_NO_FRESH_15M_SMC_BREAK")
+        self.assertEqual(result["side"], "BUY")
+        self.assertTrue(result["remembered"])
+        self.assertEqual(result["reason"], "SMC_INDICATOR_REMEMBERED_CHOCH")
 
 
 if __name__ == "__main__":
