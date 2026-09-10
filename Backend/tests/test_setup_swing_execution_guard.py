@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -76,12 +77,7 @@ class StableSetupSwingExecutionGuardTests(unittest.TestCase):
         self.assertTrue(result["details"]["fresh_setup_swing_matched"])
         self.assertEqual(
             result["details"]["fresh_setup_swing_match_method"],
-            "raw_pivot_identity",
-        )
-        self.assertFalse(
-            result["details"]["fresh_setup_matched_swing"][
-                "fresh_window_valid_flag"
-            ]
+            "smc_indicator_confirmed_pivot_identity",
         )
 
     def test_changed_pivot_price_still_blocks_execution(self):
@@ -104,6 +100,57 @@ class StableSetupSwingExecutionGuardTests(unittest.TestCase):
             "WAIT_SETUP_SWING_CHANGED_BEFORE_EXECUTION",
         )
         self.assertFalse(result["details"]["fresh_setup_swing_matched"])
+
+    def test_durable_event_allows_delayed_execution_after_pivot_leaves_frame(self):
+        truncated = self._full_history().iloc[-5:].copy()
+        setup = {
+            "indicator_event_id": "smc1-delayed-eurusd",
+            "swing_type": "LOW",
+            "swing_timestamp": "2026-09-02T11:45:00+00:00",
+            "swing_price": 1.16218,
+        }
+        durable_event = {
+            "event_id": "smc1-delayed-eurusd",
+            "symbol": "EURUSD",
+            "timeframe": "15m",
+            "tradable": True,
+            "direction": "BEARISH",
+            "broken_swing_timestamp": "2026-09-02T11:45:00+00:00",
+            "broken_level": 1.16218,
+        }
+        with patch(
+            "services.setup_swing_execution_guard.read_authoritative_event",
+            return_value=durable_event,
+        ):
+            result = validate_fresh_setup_swing_identity(
+                truncated, "EURUSD", setup, strict_trader
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["details"]["fresh_setup_swing_match_method"],
+            "durable_indicator_event_identity",
+        )
+
+    def test_durable_event_mismatch_fails_closed_without_raw_fallback(self):
+        setup = {
+            "indicator_event_id": "smc1-mismatch",
+            "swing_type": "HIGH",
+            "swing_timestamp": "2026-09-02T11:45:00+00:00",
+            "swing_price": 1.16218,
+        }
+        with patch(
+            "services.setup_swing_execution_guard.read_authoritative_event",
+            return_value={"symbol": "EURUSD", "timeframe": "15m", "tradable": True,
+                          "direction": "BULLISH", "broken_swing_timestamp": setup["swing_timestamp"],
+                          "broken_level": 1.16221},
+        ):
+            result = validate_fresh_setup_swing_identity(
+                self._full_history(), "EURUSD", setup, strict_trader
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "WAIT_SETUP_SWING_CHANGED_BEFORE_EXECUTION")
 
 
 if __name__ == "__main__":

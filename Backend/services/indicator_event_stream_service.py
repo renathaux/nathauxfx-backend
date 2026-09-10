@@ -199,12 +199,37 @@ def _stored_frame(rows):
 def _event_payload(row):
     payload = copy.deepcopy(row.payload or {})
     payload["event_id"] = row.event_id
+    payload["symbol"] = row.symbol
+    payload["timeframe"] = row.timeframe
+    payload["timestamp"] = _utc(row.candle_timestamp).isoformat()
+    payload["direction"] = row.direction
+    payload["broken_level"] = row.broken_level
     payload["event_identity"] = copy.deepcopy(row.identity or {})
     payload["event_status"] = "CONFIRMED"
     payload["configuration_version"] = row.configuration_version
     payload["is_historical"] = bool(row.is_historical)
     payload["tradable"] = not bool(row.is_historical)
     return payload
+
+
+def read_authoritative_event(event_id, *, session_factory=None):
+    """Read one immutable indicator event without altering stream state.
+
+    Execution-time guards use this to validate the event that created a setup;
+    they must not rediscover an old pivot from a later, truncated candle frame.
+    """
+    if not event_id:
+        return None
+    factory = session_factory or SessionLocal
+    session = factory()
+    try:
+        row = session.query(IndicatorEvent).filter(
+            IndicatorEvent.event_id == str(event_id),
+            IndicatorEvent.configuration_version == CONFIGURATION_VERSION,
+        ).one_or_none()
+        return _event_payload(row) if row is not None else None
+    finally:
+        session.close()
 
 
 def get_authoritative_structure(
@@ -325,6 +350,7 @@ def get_authoritative_structure(
                     IndicatorEvent.timeframe == normalized_timeframe,
                 ).all()
             }
+            new_event_ids = []
             analyzed_events = [raw for raw in (analysis or {}).get("events") or [] if isinstance(raw, dict) and raw.get("timestamp")]
             if late_insert and persisted_ids:
                 rebuilt = {_event_signature(raw, normalized_symbol, normalized_timeframe, point_size)[0] for raw in analyzed_events if _utc(raw["timestamp"]) <= (watermark or _utc(canonical.index[-1]))}
@@ -405,6 +431,7 @@ def get_authoritative_structure(
                     created_at=now,
                 ))
                 persisted_ids.add(event_id)
+                new_event_ids.append(event_id)
 
             last_candle = _db_datetime(canonical.index[-1])
             if creating_stream:
@@ -430,6 +457,7 @@ def get_authoritative_structure(
             result["canonical_candle_count"] = len(canonical)
             result["stream_last_candle"] = _utc(canonical.index[-1]).isoformat()
             result["event_count"] = len(events)
+            result["new_event_ids"] = new_event_ids
             result["stream_status"] = state.status
             result["allow_sparse_trendbars"] = bool(allow_sparse_trendbars)
             result["activation_watermark"] = _utc(state.activation_watermark).isoformat() if state.activation_watermark else None

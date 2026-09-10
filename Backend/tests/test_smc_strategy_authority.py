@@ -21,6 +21,7 @@ class _Shared:
 class _StrictTraderStub:
     shared = _Shared()
     BOS_MIN_BUFFER_POINTS = 10
+    REMEMBERED_BREAKOUT_MAX_15M_CANDLES = 4
 
     @staticmethod
     def get_cached_execution_settings():
@@ -60,7 +61,37 @@ class _StrictTraderStub:
 
     @staticmethod
     def remembered_breakout(symbol, side, current_close_time=None, current_close=None):
-        return None
+        key = _StrictTraderStub.get_watch_key(symbol, side)
+        watch = _StrictTraderStub.shared.FIFTEEN_M_SWING_WATCH.get(key)
+        if not isinstance(watch, dict):
+            return None
+        expires_at = _StrictTraderStub.utc_timestamp(watch.get("expires_at"))
+        current_time = _StrictTraderStub.utc_timestamp(current_close_time)
+        invalidation_level = float(watch["invalidation_level"])
+        invalidated = (
+            side == "BUY" and float(current_close) <= invalidation_level
+        ) or (
+            side == "SELL" and float(current_close) >= invalidation_level
+        )
+        if (expires_at is not None and current_time > expires_at) or invalidated:
+            _StrictTraderStub.shared.FIFTEEN_M_SWING_WATCH.pop(key, None)
+            return None
+        return {
+            "side": side,
+            "level": watch["swing_level"],
+            "break_time": watch["break_candle_time"],
+            "break_close_time": watch["break_close_time"],
+            "break_close": watch["break_close"],
+            "bos_buffer": watch["bos_buffer"],
+            "swing": watch["swing"],
+            "break_type": watch["break_type"],
+            "invalidation_level": invalidation_level,
+            "remembered": True,
+            "watch_status": watch["status"],
+            "watch": watch,
+            "indicator_event_id": watch["indicator_event_id"],
+            "indicator_event_identity": watch.get("indicator_event_identity"),
+        }
 
 
 def _frame(rows=10):
@@ -83,6 +114,7 @@ def _analysis(frame, *, event_type="CHOCH", invalidation_price=1.0980, break_clo
         "bias": "BULLISH",
         "events": [
             {
+                "event_id": "test-current-event",
                 "event_type": event_type,
                 "tradable": True,
                 "direction": "BULLISH",
@@ -99,9 +131,36 @@ def _analysis(frame, *, event_type="CHOCH", invalidation_price=1.0980, break_clo
                 },
             }
         ],
+        "new_event_ids": ["test-current-event"],
         "current_structure": {"bias": "BULLISH"},
         "swings": [],
         "fib_levels": [],
+    }
+
+
+def _remembered_watch(event, *, side="SELL", invalidation_level=1.16400):
+    event_time = pd.Timestamp(event["timestamp"])
+    break_close_time = event_time + pd.Timedelta(minutes=15)
+    return {
+        "source": authority.AUTHORITY_SOURCE,
+        "side": side,
+        "swing_level": float(event["broken_level"]),
+        "break_candle_time": event["timestamp"],
+        "break_close_time": break_close_time.isoformat(),
+        "break_close": float(event["close"]),
+        "bos_buffer": 0.00010,
+        "swing": {
+            "type": "LOW" if side == "SELL" else "HIGH",
+            "time": event["broken_swing_timestamp"],
+            "price": float(event["broken_level"]),
+        },
+        "break_type": event["event_type"],
+        "invalidation_level": invalidation_level,
+        "expires_at": (break_close_time + pd.Timedelta(minutes=60)).isoformat(),
+        "status": "PENDING",
+        "indicator_event_id": event.get("event_id"),
+        "indicator_event_identity": event.get("event_identity"),
+        "event_invalidation_swing": event.get("event_invalidation_swing"),
     }
 
 
@@ -128,6 +187,7 @@ def _two_small_bos_analysis(frame, direction="BULLISH", *, confirm_pattern=True)
         "bias": bias,
         "events": [
             {
+                "event_id": "test-previous-event",
                 "event_type": "BOS",
                 "tradable": True,
                 "direction": direction,
@@ -145,6 +205,7 @@ def _two_small_bos_analysis(frame, direction="BULLISH", *, confirm_pattern=True)
                 },
             },
             {
+                "event_id": "test-current-event",
                 "event_type": "BOS",
                 "tradable": True,
                 "direction": direction,
@@ -162,6 +223,7 @@ def _two_small_bos_analysis(frame, direction="BULLISH", *, confirm_pattern=True)
                 },
             },
         ],
+        "new_event_ids": ["test-current-event"],
         "current_structure": {"bias": bias},
         "swings": [],
         "fib_levels": [],
@@ -284,11 +346,129 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
         self.assertEqual(result["side"], "WAIT")
         self.assertEqual(result["reason"], "WAIT_WEAK_15M_BOS")
 
-    def test_non_latest_indicator_event_is_not_a_fresh_entry(self):
-        frame = _frame()
+    def test_confirmed_event_remains_eligible_until_four_15m_candle_window_expires(self):
+        frame = _frame(rows=12)
         analysis = _analysis(frame)
-        analysis["events"][0]["break_index"] = len(frame) - 2
-        analysis["events"][0]["timestamp"] = frame.index[-2].isoformat()
+        # EURUSD BEARISH CHoCH: event candle 11:45 UTC, candle closes at
+        # 12:00; it remains executable at 12:52 (last closed M15 12:45).
+        event = analysis["events"][0]
+        event.update({
+            "event_id": "durable-eurusd-choch",
+            "event_type": "CHOCH",
+            "direction": "BEARISH",
+            "timestamp": frame.index[7].isoformat(),
+            "broken_swing_timestamp": frame.index[4].isoformat(),
+            "broken_level": 1.16218,
+            "close": 1.16200,
+            "event_invalidation_swing": {
+                "type": "HIGH", "price": 1.16400,
+                "swing_time": frame.index[3].isoformat(),
+            },
+        })
+        _StrictTraderStub.shared.FIFTEEN_M_SWING_WATCH["EURUSD:SELL"] = (
+            _remembered_watch(event)
+        )
+        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
+            result = authority.evaluate_indicator_breakout(
+                frame,
+                "EURUSD",
+                strict_trader_module=_StrictTraderStub,
+            )
+
+        self.assertEqual(result["side"], "SELL")
+        self.assertEqual(result["reason"], "SMC_INDICATOR_REMEMBERED_CHOCH")
+        self.assertTrue(result["remembered"])
+        self.assertEqual(result["indicator_event_id"], "durable-eurusd-choch")
+
+    def test_cleared_watch_cannot_be_recreated_from_aged_durable_event(self):
+        frame = _frame(rows=11)
+        analysis = _analysis(frame)
+        event = analysis["events"][0]
+        event.update({
+            "event_id": "cleared-event",
+            "timestamp": frame.index[7].isoformat(),
+            "broken_swing_timestamp": frame.index[4].isoformat(),
+        })
+        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
+            result = authority.evaluate_indicator_breakout(
+                frame, "EURUSD", strict_trader_module=_StrictTraderStub
+            )
+
+        self.assertEqual(result["side"], "WAIT")
+        self.assertEqual(result["reason"], "WAIT_DURABLE_EVENT_WATCH_INACTIVE")
+        self.assertEqual(result["indicator_event_truth"], "CONFIRMED")
+        self.assertFalse(result["entry_lifecycle_eligible"])
+
+    def test_structure_invalidation_clears_watch_without_resurrection(self):
+        frame = _frame(rows=11)
+        frame.iloc[-1, frame.columns.get_loc("Close")] = 1.16500
+        analysis = _analysis(frame)
+        event = analysis["events"][0]
+        event.update({
+            "event_id": "invalidated-event",
+            "direction": "BEARISH",
+            "timestamp": frame.index[7].isoformat(),
+            "broken_swing_timestamp": frame.index[4].isoformat(),
+            "broken_level": 1.16218,
+            "close": 1.16200,
+        })
+        _StrictTraderStub.shared.FIFTEEN_M_SWING_WATCH["EURUSD:SELL"] = (
+            _remembered_watch(event)
+        )
+        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
+            result = authority.evaluate_indicator_breakout(
+                frame, "EURUSD", strict_trader_module=_StrictTraderStub
+            )
+
+        self.assertNotIn("EURUSD:SELL", _StrictTraderStub.shared.FIFTEEN_M_SWING_WATCH)
+        self.assertEqual(result["side"], "WAIT")
+        self.assertEqual(result["reason"], "WAIT_DURABLE_EVENT_WATCH_INACTIVE")
+        self.assertEqual(result["indicator_event_truth"], "CONFIRMED")
+
+    def test_cleared_or_consumed_current_event_cannot_restart_entry_lifecycle(self):
+        frame = _frame()
+        for status, blocking_reason in (
+            ("BLOCKED", "EMA no longer permits remembered direction"),
+            ("BLOCKED", "consolidation ended; fresh BOS required"),
+            ("INVALIDATED", "remembered breakout structure invalidated"),
+            ("CONSUMED", "trade submission accepted"),
+        ):
+            with self.subTest(status=status, reason=blocking_reason):
+                analysis = _analysis(frame)
+                analysis["events"][0]["event_id"] = "same-current-event"
+                lifecycle = {
+                    "same-current-event": {
+                        "LIVE": {
+                            "status": status,
+                            "blocking_reason": blocking_reason,
+                        }
+                    }
+                }
+                with patch.object(
+                    authority, "get_authoritative_structure", return_value=analysis
+                ), patch.object(
+                    authority, "get_event_lifecycles", return_value=lifecycle
+                ):
+                    result = authority.evaluate_indicator_breakout(
+                        frame, "EURUSD", strict_trader_module=_StrictTraderStub
+                    )
+
+                self.assertEqual(result["side"], "WAIT")
+                self.assertEqual(
+                    result["reason"],
+                    "WAIT_DURABLE_EVENT_LIFECYCLE_INELIGIBLE",
+                )
+                self.assertEqual(result["indicator_event_truth"], "CONFIRMED")
+                self.assertFalse(result["entry_lifecycle_eligible"])
+                self.assertEqual(result["entry_lifecycle_reason"], blocking_reason)
+
+    def test_expired_event_remains_confirmed_truth_but_is_not_an_entry(self):
+        frame = _frame(rows=15)
+        analysis = _analysis(frame)
+        analysis["events"][0].update({
+            "event_id": "expired-event",
+            "timestamp": frame.index[9].isoformat(),
+        })
         with patch.object(authority, "get_authoritative_structure", return_value=analysis):
             result = authority.evaluate_indicator_breakout(
                 frame,
@@ -297,7 +477,9 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
             )
 
         self.assertEqual(result["side"], "WAIT")
-        self.assertEqual(result["reason"], "WAIT_NO_FRESH_15M_SMC_BREAK")
+        self.assertEqual(result["reason"], "WAIT_INDICATOR_EVENT_EXPIRED")
+        self.assertEqual(result["indicator_event_truth"], "CONFIRMED")
+        self.assertTrue(result["indicator_event_expired"])
 
 
 if __name__ == "__main__":

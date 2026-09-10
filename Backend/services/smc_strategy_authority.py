@@ -306,18 +306,130 @@ def evaluate_indicator_breakout(
     last_index = len(authority_frame) - 1
     last_close = float(authority_frame.iloc[-1]["Close"])
     last_close_time = strict_trader_module.candle_close_time(authority_frame.index[-1], 15)
-    fresh_events = [
+    tradable_events = [
         event
         for event in (analysis.get("events") or [])
         if isinstance(event, dict)
-        and strict_trader_module.utc_timestamp(event.get("timestamp"))
-        == strict_trader_module.utc_timestamp(authority_frame.index[-1])
         and event.get("tradable") is True
         and str(event.get("direction") or "").upper() in {"BULLISH", "BEARISH"}
     ]
+    max_age_minutes = 15 * int(
+        getattr(strict_trader_module, "REMEMBERED_BREAKOUT_MAX_15M_CANDLES", 4)
+    )
+    eligible_events = []
+    for event in tradable_events:
+        try:
+            event_close_time = strict_trader_module.candle_close_time(
+                event.get("timestamp"), 15
+            )
+            age_seconds = (
+                strict_trader_module.utc_timestamp(last_close_time)
+                - strict_trader_module.utc_timestamp(event_close_time)
+            ).total_seconds()
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if 0 <= age_seconds <= max_age_minutes * 60:
+            eligible_events.append(event)
 
-    if fresh_events:
-        event = fresh_events[-1]
+    # A confirmed event remains truth even after its entry window expires.  This
+    # prevents later candles from presenting a durable CHoCH/BOS as "no event".
+    if tradable_events:
+        latest_event = tradable_events[-1]
+        result["indicator_event"] = latest_event
+        result["indicator_event_id"] = latest_event.get("event_id")
+        result["indicator_event_identity"] = latest_event.get("event_identity")
+        result["indicator_event_type"] = str(
+            latest_event.get("event_type") or "BOS"
+        ).upper()
+        result["indicator_event_truth"] = "CONFIRMED"
+        result["indicator_event_expired"] = latest_event not in eligible_events
+        result["entry_lifecycle_eligible"] = False
+
+    # Once a watch exists, it exclusively owns continued entry eligibility.
+    # Calling this before considering a new event also lets the existing expiry
+    # and structural-invalidation checks clear the watch without the immutable
+    # event recreating it later in this evaluation.
+    remembered_candidates = []
+    for side in ("BUY", "SELL"):
+        remembered = _marked_remembered_breakout(
+            strict_trader_module,
+            normalized_symbol,
+            side,
+            current_close_time=last_close_time,
+            current_close=last_close,
+        )
+        if remembered:
+            remembered_candidates.append(remembered)
+
+    if remembered_candidates:
+        remembered = remembered_candidates[-1]
+        remembered["structure"] = result["structure"]
+        remembered["bos_buffer"] = float(remembered.get("bos_buffer") or required_buffer)
+        remembered["indicator_summary"] = result["indicator_summary"]
+        remembered["indicator_event_truth"] = "CONFIRMED"
+        remembered["entry_lifecycle_eligible"] = True
+        result.update(remembered)
+        result["breakouts"] = remembered_candidates
+        result["reason"] = f"SMC_INDICATOR_REMEMBERED_{str(remembered.get('break_type') or 'BOS').upper()}"
+        return result
+
+    latest_candle_timestamp = strict_trader_module.utc_timestamp(
+        authority_frame.index[-1]
+    )
+    newly_persisted_ids = {
+        str(value) for value in (analysis.get("new_event_ids") or []) if value
+    }
+    current_events = [
+        event for event in eligible_events
+        if strict_trader_module.utc_timestamp(event.get("timestamp"))
+        == latest_candle_timestamp
+    ]
+    new_events = [
+        event for event in current_events
+        if str(event.get("event_id") or "") in newly_persisted_ids
+    ]
+
+    if current_events and not new_events:
+        current_event_id = current_events[-1].get("event_id")
+        lifecycle = (
+            get_event_lifecycles(
+                [current_event_id], owner_id="SYSTEM", account_id="SHARED"
+            ).get(str(current_event_id), {}).get("LIVE")
+            if current_event_id
+            else None
+        )
+        if lifecycle:
+            result["indicator_event_lifecycle"] = lifecycle
+            result["entry_lifecycle_reason"] = (
+                lifecycle.get("blocking_reason")
+                or f"indicator event lifecycle is {lifecycle.get('status')}"
+            )
+            result["reason"] = "WAIT_DURABLE_EVENT_LIFECYCLE_INELIGIBLE"
+            return result
+
+    # A cleared current-candle setup must not be reconstructed on the next
+    # strategy poll.  The shared lifecycle is written by the existing WAIT /
+    # invalidation / consumption paths and survives process restarts.
+    if new_events:
+        new_event_id = new_events[-1].get("event_id")
+        lifecycle = (
+            get_event_lifecycles(
+                [new_event_id], owner_id="SYSTEM", account_id="SHARED"
+            ).get(str(new_event_id), {}).get("LIVE")
+            if new_event_id
+            else None
+        )
+        if lifecycle:
+            result["indicator_event_lifecycle"] = lifecycle
+            result["entry_lifecycle_reason"] = (
+                lifecycle.get("blocking_reason")
+                or f"indicator event lifecycle is {lifecycle.get('status')}"
+            )
+            result["reason"] = "WAIT_DURABLE_EVENT_LIFECYCLE_INELIGIBLE"
+            return result
+
+    if new_events:
+        event = new_events[-1]
         direction = str(event.get("direction") or "").upper()
         side = "BUY" if direction == "BULLISH" else "SELL"
         level = _as_float(event.get("broken_level"))
@@ -331,6 +443,7 @@ def evaluate_indicator_breakout(
         result["indicator_event_id"] = event.get("event_id")
         result["indicator_event_identity"] = event.get("event_identity")
         result["indicator_event_type"] = str(event.get("event_type") or "BOS").upper()
+        result["entry_lifecycle_eligible"] = True
         result["indicator_structural_leg_size"] = swing_size
         result["minimum_structural_leg_size"] = minimum_swing
 
@@ -420,27 +533,15 @@ def evaluate_indicator_breakout(
         result["reason"] = f"SMC_INDICATOR_{candidate['break_type']}"
         return result
 
-    remembered_candidates = []
-    for side in ("BUY", "SELL"):
-        remembered = _marked_remembered_breakout(
-            strict_trader_module,
-            normalized_symbol,
-            side,
-            current_close_time=last_close_time,
-            current_close=last_close,
-        )
-        if remembered:
-            remembered_candidates.append(remembered)
-
-    if remembered_candidates:
-        remembered = remembered_candidates[-1]
-        remembered["structure"] = result["structure"]
-        remembered["bos_buffer"] = float(remembered.get("bos_buffer") or required_buffer)
-        remembered["indicator_summary"] = result["indicator_summary"]
-        result.update(remembered)
-        result["breakouts"] = remembered_candidates
-        result["reason"] = f"SMC_INDICATOR_REMEMBERED_{str(remembered.get('break_type') or 'BOS').upper()}"
-        return result
+    if tradable_events:
+        if result.get("indicator_event_expired"):
+            result["reason"] = "WAIT_INDICATOR_EVENT_EXPIRED"
+            result["entry_lifecycle_reason"] = "indicator event entry window expired"
+        else:
+            result["reason"] = "WAIT_DURABLE_EVENT_WATCH_INACTIVE"
+            result["entry_lifecycle_reason"] = (
+                "confirmed event has no active remembered breakout watch"
+            )
 
     return result
 
