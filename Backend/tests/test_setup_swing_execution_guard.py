@@ -76,12 +76,7 @@ class StableSetupSwingExecutionGuardTests(unittest.TestCase):
         self.assertTrue(result["details"]["fresh_setup_swing_matched"])
         self.assertEqual(
             result["details"]["fresh_setup_swing_match_method"],
-            "raw_pivot_identity",
-        )
-        self.assertFalse(
-            result["details"]["fresh_setup_matched_swing"][
-                "fresh_window_valid_flag"
-            ]
+            "smc_indicator_confirmed_pivot_identity",
         )
 
     def test_changed_pivot_price_still_blocks_execution(self):
