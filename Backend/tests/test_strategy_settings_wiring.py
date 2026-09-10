@@ -533,6 +533,8 @@ class StrategySettingsStructureWiringTests(unittest.TestCase):
             "break_type": "CHOCH",
             "remembered": False,
             "swings": self.swings(),
+            "indicator_event_id": "smc1-consolidation-event",
+            "indicator_event_identity": {"symbol": "XAUUSD"},
         }
         confirmation = {
             "side": "BUY",
@@ -592,6 +594,11 @@ class StrategySettingsStructureWiringTests(unittest.TestCase):
         self.assertEqual(enabled["blocked_reason"], "WAIT_CONSOLIDATION")
         self.assertTrue(enabled["consolidation"]["is_consolidation"])
         self.assertTrue(enabled["consolidation"]["blocking"])
+        self.assertTrue(any(
+            call.kwargs.get("indicator_event_id") == "smc1-consolidation-event"
+            and call.kwargs.get("indicator_event_identity") == {"symbol": "XAUUSD"}
+            for call in strict_trader.save_remembered_breakout.call_args_list
+        ))
         self.assertEqual(disabled["signal"], "BUY")
         self.assertTrue(disabled["consolidation"]["is_consolidation"])
         self.assertFalse(disabled["consolidation"]["blocking"])

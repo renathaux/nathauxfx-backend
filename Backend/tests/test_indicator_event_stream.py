@@ -160,6 +160,7 @@ def test_historical_event_is_immutable_across_append_older_load_and_restart():
         analyzer=first_analyzer, session_factory=Session,
     )
     original = first["events"][0]
+    assert first["new_event_ids"] == [original["event_id"]]
 
     appended = frame(13)
 
@@ -175,6 +176,7 @@ def test_historical_event_is_immutable_across_append_older_load_and_restart():
     )
     assert second["events"][0] == original
     assert len(second["events"]) == 2
+    assert second["new_event_ids"] == [second["events"][1]["event_id"]]
 
     older_plus_same = appended.tail(8)
     restarted = stream.get_authoritative_structure(
@@ -182,6 +184,7 @@ def test_historical_event_is_immutable_across_append_older_load_and_restart():
         analyzer=later_analyzer, session_factory=Session,
     )
     assert restarted["events"][0] == original
+    assert restarted["new_event_ids"] == []
     durable_after_restart = stream.read_authoritative_event(
         original["event_id"], session_factory=Session
     )
@@ -249,6 +252,7 @@ def test_chart_and_strategy_use_identical_persisted_event():
     identity, event_id = stream.build_event_identity(raw, "EURUSD", "15m", 0.00001)
     raw.update({"event_id": event_id, "event_identity": identity, "tradable": True})
     stable = analysis([raw])
+    stable["new_event_ids"] = [event_id]
     with patch.object(authority, "read_authoritative_structure", return_value=stable), patch.object(
         authority, "get_authoritative_structure", return_value=stable
     ):

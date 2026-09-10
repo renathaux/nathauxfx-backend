@@ -1798,6 +1798,8 @@ def get_mtf_signal(data_5m, data_15m, data_1h, symbol):
             break_type=breakout.get("break_type"),
             invalidation_level=breakout.get("invalidation_level"),
             status=BLOCKED_BREAKOUT_STATUS,
+            indicator_event_id=breakout.get("indicator_event_id"),
+            indicator_event_identity=breakout.get("indicator_event_identity"),
         )
         stages = strategy_stage_states(
             swing_detection=STAGE_PASSED,

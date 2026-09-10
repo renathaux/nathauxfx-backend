@@ -350,6 +350,7 @@ def get_authoritative_structure(
                     IndicatorEvent.timeframe == normalized_timeframe,
                 ).all()
             }
+            new_event_ids = []
             analyzed_events = [raw for raw in (analysis or {}).get("events") or [] if isinstance(raw, dict) and raw.get("timestamp")]
             if late_insert and persisted_ids:
                 rebuilt = {_event_signature(raw, normalized_symbol, normalized_timeframe, point_size)[0] for raw in analyzed_events if _utc(raw["timestamp"]) <= (watermark or _utc(canonical.index[-1]))}
@@ -430,6 +431,7 @@ def get_authoritative_structure(
                     created_at=now,
                 ))
                 persisted_ids.add(event_id)
+                new_event_ids.append(event_id)
 
             last_candle = _db_datetime(canonical.index[-1])
             if creating_stream:
@@ -455,6 +457,7 @@ def get_authoritative_structure(
             result["canonical_candle_count"] = len(canonical)
             result["stream_last_candle"] = _utc(canonical.index[-1]).isoformat()
             result["event_count"] = len(events)
+            result["new_event_ids"] = new_event_ids
             result["stream_status"] = state.status
             result["allow_sparse_trendbars"] = bool(allow_sparse_trendbars)
             result["activation_watermark"] = _utc(state.activation_watermark).isoformat() if state.activation_watermark else None
