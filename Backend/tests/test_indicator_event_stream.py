@@ -182,6 +182,12 @@ def test_historical_event_is_immutable_across_append_older_load_and_restart():
         analyzer=later_analyzer, session_factory=Session,
     )
     assert restarted["events"][0] == original
+    durable_after_restart = stream.read_authoritative_event(
+        original["event_id"], session_factory=Session
+    )
+    assert durable_after_restart["event_id"] == original["event_id"]
+    assert durable_after_restart["broken_swing_timestamp"] == original["broken_swing_timestamp"]
+    assert durable_after_restart["tradable"] is False
 
     session = Session()
     try:

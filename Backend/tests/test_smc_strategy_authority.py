@@ -21,6 +21,7 @@ class _Shared:
 class _StrictTraderStub:
     shared = _Shared()
     BOS_MIN_BUFFER_POINTS = 10
+    REMEMBERED_BREAKOUT_MAX_15M_CANDLES = 4
 
     @staticmethod
     def get_cached_execution_settings():
@@ -284,11 +285,43 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
         self.assertEqual(result["side"], "WAIT")
         self.assertEqual(result["reason"], "WAIT_WEAK_15M_BOS")
 
-    def test_non_latest_indicator_event_is_not_a_fresh_entry(self):
-        frame = _frame()
+    def test_confirmed_event_remains_eligible_until_four_15m_candle_window_expires(self):
+        frame = _frame(rows=12)
         analysis = _analysis(frame)
-        analysis["events"][0]["break_index"] = len(frame) - 2
-        analysis["events"][0]["timestamp"] = frame.index[-2].isoformat()
+        # EURUSD BEARISH CHoCH: event candle 11:45 UTC, candle closes at
+        # 12:00; it remains executable at 12:52 (last closed M15 12:45).
+        event = analysis["events"][0]
+        event.update({
+            "event_id": "durable-eurusd-choch",
+            "event_type": "CHOCH",
+            "direction": "BEARISH",
+            "timestamp": frame.index[7].isoformat(),
+            "broken_swing_timestamp": frame.index[4].isoformat(),
+            "broken_level": 1.16218,
+            "close": 1.16200,
+            "event_invalidation_swing": {
+                "type": "HIGH", "price": 1.16400,
+                "swing_time": frame.index[3].isoformat(),
+            },
+        })
+        with patch.object(authority, "get_authoritative_structure", return_value=analysis):
+            result = authority.evaluate_indicator_breakout(
+                frame,
+                "EURUSD",
+                strict_trader_module=_StrictTraderStub,
+            )
+
+        self.assertEqual(result["side"], "SELL")
+        self.assertEqual(result["reason"], "SMC_INDICATOR_CHOCH")
+        self.assertEqual(result["indicator_event_id"], "durable-eurusd-choch")
+
+    def test_expired_event_remains_confirmed_truth_but_is_not_an_entry(self):
+        frame = _frame(rows=15)
+        analysis = _analysis(frame)
+        analysis["events"][0].update({
+            "event_id": "expired-event",
+            "timestamp": frame.index[9].isoformat(),
+        })
         with patch.object(authority, "get_authoritative_structure", return_value=analysis):
             result = authority.evaluate_indicator_breakout(
                 frame,
@@ -298,6 +331,8 @@ class SmcStrategyAuthorityTests(unittest.TestCase):
 
         self.assertEqual(result["side"], "WAIT")
         self.assertEqual(result["reason"], "WAIT_NO_FRESH_15M_SMC_BREAK")
+        self.assertEqual(result["indicator_event_truth"], "CONFIRMED")
+        self.assertTrue(result["indicator_event_expired"])
 
 
 if __name__ == "__main__":

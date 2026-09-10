@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from indicators.smc import detect_confirmed_swings
+from services.indicator_event_stream_service import read_authoritative_event
 
 
 SWING_CHANGED_REASON = "WAIT_SETUP_SWING_CHANGED_BEFORE_EXECUTION"
@@ -23,6 +24,26 @@ def _parse_timestamp(value):
         return None
 
 
+def _durable_event_matches_setup(event, symbol, expected_type, expected_time, expected_price, tolerance):
+    """Check that the immutable event is the one that created this setup."""
+    if not isinstance(event, dict):
+        return False
+    normalized_symbol = str(symbol or "").upper().replace("/", "")
+    direction = str(event.get("direction") or "").upper()
+    expected_direction = "BULLISH" if expected_type == "HIGH" else "BEARISH"
+    event_time = _parse_timestamp(event.get("broken_swing_timestamp"))
+    try:
+        event_price = float(event.get("broken_level"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(event.get("symbol") or "").upper().replace("/", "") == normalized_symbol
+        and str(event.get("timeframe") or "").lower() == "15m"
+        and event.get("tradable") is True
+        and direction == expected_direction
+        and event_time == expected_time
+        and abs(event_price - expected_price) <= tolerance
+    )
 def validate_fresh_setup_swing_identity(
     closed_15m,
     symbol,
@@ -55,6 +76,44 @@ def validate_fresh_setup_swing_identity(
             "price": expected_price,
         },
     }
+
+    event_id = identity.get("indicator_event_id")
+    if event_id:
+        # The setup was derived from a durable event.  Its immutable broken
+        # swing is the authoritative identity; a rolling market-data request
+        # must not invalidate it merely because the old pivot fell out of view.
+        if expected_type not in {"HIGH", "LOW"} or expected_time is None or expected_price is None:
+            details["fresh_setup_swing_validation_error"] = "durable setup identity unavailable"
+            return {"ok": False, "reason": SWING_CHANGED_REASON, "details": details}
+        tolerance = strict_trader_module.point_size(normalized_symbol) + 1e-12
+        try:
+            durable_event = read_authoritative_event(event_id)
+        except Exception as exc:
+            details["fresh_setup_swing_validation_error"] = (
+                f"durable indicator event unavailable: {exc}"
+            )
+            return {"ok": False, "reason": SWING_CHANGED_REASON, "details": details}
+        if _durable_event_matches_setup(
+            durable_event,
+            normalized_symbol,
+            expected_type,
+            expected_time,
+            expected_price,
+            tolerance,
+        ):
+            details.update({
+                "fresh_setup_swing_match_method": "durable_indicator_event_identity",
+                "fresh_setup_swing_matched": True,
+                "fresh_setup_matched_swing": {
+                    "type": expected_type,
+                    "time": expected_time.isoformat(),
+                    "price": expected_price,
+                    "indicator_event_id": event_id,
+                },
+            })
+            return {"ok": True, "reason": None, "details": details}
+        details["fresh_setup_swing_validation_error"] = "durable indicator event does not match setup"
+        return {"ok": False, "reason": SWING_CHANGED_REASON, "details": details}
 
     if (
         closed_15m is None

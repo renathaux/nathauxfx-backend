@@ -199,12 +199,37 @@ def _stored_frame(rows):
 def _event_payload(row):
     payload = copy.deepcopy(row.payload or {})
     payload["event_id"] = row.event_id
+    payload["symbol"] = row.symbol
+    payload["timeframe"] = row.timeframe
+    payload["timestamp"] = _utc(row.candle_timestamp).isoformat()
+    payload["direction"] = row.direction
+    payload["broken_level"] = row.broken_level
     payload["event_identity"] = copy.deepcopy(row.identity or {})
     payload["event_status"] = "CONFIRMED"
     payload["configuration_version"] = row.configuration_version
     payload["is_historical"] = bool(row.is_historical)
     payload["tradable"] = not bool(row.is_historical)
     return payload
+
+
+def read_authoritative_event(event_id, *, session_factory=None):
+    """Read one immutable indicator event without altering stream state.
+
+    Execution-time guards use this to validate the event that created a setup;
+    they must not rediscover an old pivot from a later, truncated candle frame.
+    """
+    if not event_id:
+        return None
+    factory = session_factory or SessionLocal
+    session = factory()
+    try:
+        row = session.query(IndicatorEvent).filter(
+            IndicatorEvent.event_id == str(event_id),
+            IndicatorEvent.configuration_version == CONFIGURATION_VERSION,
+        ).one_or_none()
+        return _event_payload(row) if row is not None else None
+    finally:
+        session.close()
 
 
 def get_authoritative_structure(

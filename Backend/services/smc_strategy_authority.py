@@ -306,18 +306,46 @@ def evaluate_indicator_breakout(
     last_index = len(authority_frame) - 1
     last_close = float(authority_frame.iloc[-1]["Close"])
     last_close_time = strict_trader_module.candle_close_time(authority_frame.index[-1], 15)
-    fresh_events = [
+    tradable_events = [
         event
         for event in (analysis.get("events") or [])
         if isinstance(event, dict)
-        and strict_trader_module.utc_timestamp(event.get("timestamp"))
-        == strict_trader_module.utc_timestamp(authority_frame.index[-1])
         and event.get("tradable") is True
         and str(event.get("direction") or "").upper() in {"BULLISH", "BEARISH"}
     ]
+    max_age_minutes = 15 * int(
+        getattr(strict_trader_module, "REMEMBERED_BREAKOUT_MAX_15M_CANDLES", 4)
+    )
+    eligible_events = []
+    for event in tradable_events:
+        try:
+            event_close_time = strict_trader_module.candle_close_time(
+                event.get("timestamp"), 15
+            )
+            age_seconds = (
+                strict_trader_module.utc_timestamp(last_close_time)
+                - strict_trader_module.utc_timestamp(event_close_time)
+            ).total_seconds()
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if 0 <= age_seconds <= max_age_minutes * 60:
+            eligible_events.append(event)
 
-    if fresh_events:
-        event = fresh_events[-1]
+    # A confirmed event remains truth even after its entry window expires.  This
+    # prevents later candles from presenting a durable CHoCH/BOS as "no event".
+    if tradable_events:
+        latest_event = tradable_events[-1]
+        result["indicator_event"] = latest_event
+        result["indicator_event_id"] = latest_event.get("event_id")
+        result["indicator_event_identity"] = latest_event.get("event_identity")
+        result["indicator_event_type"] = str(
+            latest_event.get("event_type") or "BOS"
+        ).upper()
+        result["indicator_event_truth"] = "CONFIRMED"
+        result["indicator_event_expired"] = latest_event not in eligible_events
+
+    if eligible_events:
+        event = eligible_events[-1]
         direction = str(event.get("direction") or "").upper()
         side = "BUY" if direction == "BULLISH" else "SELL"
         level = _as_float(event.get("broken_level"))
