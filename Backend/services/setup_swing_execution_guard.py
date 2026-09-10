@@ -1,6 +1,10 @@
 from datetime import datetime, timezone
 
 from indicators.smc import detect_confirmed_swings
+from services.indicator_event_stream_service import (
+    IndicatorStreamUnavailable,
+    read_authoritative_structure,
+)
 
 
 SWING_CHANGED_REASON = "WAIT_SETUP_SWING_CHANGED_BEFORE_EXECUTION"
@@ -23,6 +27,94 @@ def _parse_timestamp(value):
         return None
 
 
+def _expected_indicator_direction(identity):
+    side = str((identity or {}).get("direction") or "").upper()
+    if side in {"BUY", "BULLISH"}:
+        return "BULLISH"
+    if side in {"SELL", "BEARISH"}:
+        return "BEARISH"
+    return None
+
+
+def _authoritative_event_swing_match(
+    closed_15m,
+    normalized_symbol,
+    identity,
+    expected_type,
+    expected_time,
+    expected_price,
+    tolerance,
+    strict_trader_module,
+):
+    """Verify an old setup pivot against the immutable indicator event stream.
+
+    The final execution window can be shorter than the authority history. When
+    the original broken pivot has aged out of the local frame, recomputing
+    swings from that short frame cannot prove the pivot changed. The immutable
+    event record can: it owns the exact broken level and broken-swing timestamp
+    accepted when the BOS/CHoCH was confirmed.
+    """
+    try:
+        authority = read_authoritative_structure(
+            closed_15m.copy(),
+            normalized_symbol,
+            "15m",
+            strict_trader_module.point_size(normalized_symbol),
+        )
+    except (IndicatorStreamUnavailable, Exception) as exc:
+        return None, {
+            "authoritative_setup_swing_check": "unavailable",
+            "authoritative_setup_swing_error": str(exc),
+        }
+
+    expected_direction = _expected_indicator_direction(identity)
+    expected_broken_type = (
+        "HIGH" if expected_direction == "BULLISH"
+        else "LOW" if expected_direction == "BEARISH"
+        else expected_type
+    )
+    events = [
+        event
+        for event in (authority or {}).get("events") or []
+        if isinstance(event, dict) and event.get("tradable") is True
+    ]
+    diagnostic = {
+        "authoritative_setup_swing_check": "checked",
+        "authoritative_setup_event_count": len(events),
+        "authoritative_setup_swing_matched": False,
+    }
+
+    for event in reversed(events):
+        event_direction = str(event.get("direction") or "").upper()
+        if expected_direction and event_direction != expected_direction:
+            continue
+        if expected_type != expected_broken_type:
+            continue
+        event_time = _parse_timestamp(event.get("broken_swing_timestamp"))
+        try:
+            event_price = float(event.get("broken_level"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            event_time == expected_time
+            and abs(event_price - expected_price) <= tolerance
+        ):
+            diagnostic.update({
+                "authoritative_setup_swing_matched": True,
+                "authoritative_setup_event_id": event.get("event_id"),
+                "authoritative_setup_event_type": event.get("event_type"),
+                "authoritative_setup_event_direction": event_direction or None,
+                "authoritative_setup_broken_swing": {
+                    "type": expected_broken_type,
+                    "time": event.get("broken_swing_timestamp"),
+                    "price": event_price,
+                },
+            })
+            return event, diagnostic
+
+    return None, diagnostic
+
+
 def validate_fresh_setup_swing_identity(
     closed_15m,
     symbol,
@@ -31,11 +123,11 @@ def validate_fresh_setup_swing_identity(
 ):
     """Revalidate the immutable setup pivot without re-qualifying its old leg.
 
-    New setups are created by the authoritative backend SMC indicator, so the
-    same confirmed-pivot detector is checked first.  The legacy raw-pivot check
-    remains as a compatibility fallback for setups created before the authority
-    switch.  EMA/consolidation and the setup fingerprint are validated by the
-    existing execution gates separately.
+    Authoritative SMC events are checked first because they are the immutable
+    source that created new setups. Confirmed-pivot and legacy raw-pivot checks
+    remain as compatibility fallbacks for older setups. EMA/consolidation and
+    the setup fingerprint are validated by the existing execution gates
+    separately.
     """
     identity = setup_identity if isinstance(setup_identity, dict) else {}
     normalized_symbol = strict_trader_module.shared.normalize_symbol(symbol)
@@ -47,7 +139,7 @@ def validate_fresh_setup_swing_identity(
         expected_price = None
 
     details = {
-        "fresh_setup_swing_match_method": "smc_indicator_then_legacy_raw",
+        "fresh_setup_swing_match_method": "authoritative_event_then_smc_then_legacy_raw",
         "fresh_setup_swing_matched": False,
         "fresh_setup_expected_swing": {
             "type": expected_type or None,
@@ -73,6 +165,31 @@ def validate_fresh_setup_swing_identity(
         }
 
     tolerance = strict_trader_module.point_size(normalized_symbol) + 1e-12
+
+    authoritative_event, authoritative_details = _authoritative_event_swing_match(
+        closed_15m,
+        normalized_symbol,
+        identity,
+        expected_type,
+        expected_time,
+        expected_price,
+        tolerance,
+        strict_trader_module,
+    )
+    details.update(authoritative_details)
+    if authoritative_event is not None:
+        details.update({
+            "fresh_setup_swing_match_method": "authoritative_indicator_event_identity",
+            "fresh_setup_swing_matched": True,
+            "fresh_setup_matched_swing": {
+                "type": expected_type,
+                "time": expected_time.isoformat(),
+                "price": expected_price,
+                "indicator_event_id": authoritative_event.get("event_id"),
+            },
+        })
+        return {"ok": True, "reason": None, "details": details}
+
     indicator_swings = detect_confirmed_swings(
         closed_15m.copy(),
         left_bars=2,

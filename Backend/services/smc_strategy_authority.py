@@ -255,6 +255,161 @@ def _marked_remembered_breakout(strict_trader_module, symbol, side, current_clos
     return remembered
 
 
+def _build_event_candidate(
+    analysis,
+    event,
+    normalized_symbol,
+    required_buffer,
+    *,
+    strict_trader_module,
+    remembered=False,
+):
+    """Build one strategy candidate from an immutable authoritative event."""
+    direction = str((event or {}).get("direction") or "").upper()
+    if direction not in {"BULLISH", "BEARISH"}:
+        return None, "WAIT_INVALID_INDICATOR_SMC_EVENT", None
+
+    side = "BUY" if direction == "BULLISH" else "SELL"
+    level = _as_float(event.get("broken_level"))
+    break_close = _as_float(event.get("close"))
+    invalidation = _event_invalidation(event)
+    invalidation_price = _as_float((invalidation or {}).get("price"))
+    swing_size = _event_structural_leg_size(event)
+    minimum_swing = strict_trader_module.minimum_swing_size(normalized_symbol)
+
+    if level is None or break_close is None:
+        return None, "WAIT_INVALID_INDICATOR_SMC_EVENT", None
+
+    internal_confirmation = None
+    if swing_size is None:
+        return None, "WAIT_NO_VALID_100_POINT_SWING", None
+    if swing_size < minimum_swing:
+        internal_confirmation = _internal_two_bos_confirmation(
+            analysis,
+            event,
+            minimum_swing,
+        )
+        if not internal_confirmation.get("qualified"):
+            return None, "WAIT_NO_VALID_100_POINT_SWING", internal_confirmation
+
+    buffered = (
+        break_close > level + required_buffer
+        if side == "BUY"
+        else break_close < level - required_buffer
+    )
+    if not buffered:
+        return None, "WAIT_WEAK_15M_BOS", internal_confirmation
+
+    swing_type = "HIGH" if side == "BUY" else "LOW"
+    valid_reason = (
+        f"indicator_internal_two_bos_{str(internal_confirmation.get('pattern') or '').lower()}"
+        if internal_confirmation and internal_confirmation.get("qualified")
+        else "indicator_100_point_structure"
+    )
+    broken_swing = {
+        "type": swing_type,
+        "price": level,
+        "index": event.get("structure_start_index"),
+        "time": event.get("broken_swing_timestamp"),
+        "swing_size": swing_size,
+        "valid": True,
+        "valid_reason": valid_reason,
+        "indicator_source": AUTHORITY_SOURCE,
+        "indicator_event_id": event.get("event_id"),
+        "indicator_event_identity": event.get("event_identity"),
+        "indicator_event_invalidation_swing": invalidation,
+    }
+    break_time = event.get("timestamp")
+    candidate = {
+        "side": side,
+        "level": level,
+        "break_time": break_time,
+        "break_close_time": strict_trader_module.candle_close_time(break_time, 15),
+        "break_close": break_close,
+        "remembered": bool(remembered),
+        "bos_buffer": required_buffer,
+        "swing": broken_swing,
+        "break_type": str(event.get("event_type") or "BOS").upper(),
+        "invalidation_level": invalidation_price,
+        "event_invalidation_swing": invalidation,
+        "indicator_authority": True,
+        "indicator_source": AUTHORITY_SOURCE,
+        "indicator_event": event,
+        "indicator_event_id": event.get("event_id"),
+        "indicator_event_identity": event.get("event_identity"),
+        "setup_status": "WAITING_FOR_FILTERS",
+        "strategy_structure_qualification": (
+            "INTERNAL_TWO_BOS_CONFIRMATION"
+            if internal_confirmation and internal_confirmation.get("qualified")
+            else "EXTERNAL_100_POINT_LEG"
+        ),
+    }
+    if internal_confirmation and internal_confirmation.get("qualified"):
+        candidate["internal_structure_confirmation"] = internal_confirmation
+    return candidate, None, internal_confirmation
+
+
+def _latest_durable_event_within_window(
+    analysis,
+    current_close_time,
+    current_close,
+    *,
+    strict_trader_module,
+):
+    """Recover the latest confirmed event while its original setup is fresh.
+
+    The durable event stream owns event existence. The legacy in-memory/file
+    watch remains useful, but a missing Render-local watch must not make a
+    confirmed BOS/CHoCH disappear from strategy state. This helper applies the
+    same 4x15m clock freshness and structural invalidation rules as the legacy
+    remembered breakout before allowing a durable fallback.
+    """
+    events = [
+        event
+        for event in (analysis or {}).get("events") or []
+        if isinstance(event, dict)
+        and event.get("tradable") is True
+        and str(event.get("direction") or "").upper() in {"BULLISH", "BEARISH"}
+    ]
+    if not events:
+        return None
+
+    event = events[-1]
+    event_time = strict_trader_module.utc_timestamp(event.get("timestamp"))
+    current_time = strict_trader_module.utc_timestamp(current_close_time)
+    if event_time is None or current_time is None:
+        return None
+
+    event_close_time = event_time + copy.copy(
+        __import__("pandas").Timedelta(minutes=15)
+    )
+    max_candles = int(
+        getattr(strict_trader_module, "REMEMBERED_BREAKOUT_MAX_15M_CANDLES", 4)
+    )
+    expires_at = event_close_time + __import__("pandas").Timedelta(
+        minutes=15 * max_candles
+    )
+    if current_time > expires_at:
+        return None
+
+    invalidation = _event_invalidation(event) or {}
+    invalidation_price = _as_float(invalidation.get("price"))
+    close_value = _as_float(current_close)
+    direction = str(event.get("direction") or "").upper()
+    invalidated = bool(
+        invalidation_price is not None
+        and close_value is not None
+        and (
+            (direction == "BULLISH" and close_value <= invalidation_price)
+            or (direction == "BEARISH" and close_value >= invalidation_price)
+        )
+    )
+    if invalidated:
+        return None
+
+    return event
+
+
 def evaluate_indicator_breakout(
     data_15m,
     symbol,
@@ -303,7 +458,6 @@ def evaluate_indicator_breakout(
     result = _base_result(analysis, candle_count=len(authority_frame))
     result["bos_buffer"] = required_buffer
 
-    last_index = len(authority_frame) - 1
     last_close = float(authority_frame.iloc[-1]["Close"])
     last_close_time = strict_trader_module.candle_close_time(authority_frame.index[-1], 15)
     fresh_events = [
@@ -318,105 +472,35 @@ def evaluate_indicator_breakout(
 
     if fresh_events:
         event = fresh_events[-1]
-        direction = str(event.get("direction") or "").upper()
-        side = "BUY" if direction == "BULLISH" else "SELL"
-        level = _as_float(event.get("broken_level"))
-        break_close = _as_float(event.get("close"))
-        invalidation = _event_invalidation(event)
-        invalidation_price = _as_float((invalidation or {}).get("price"))
-        swing_size = _event_structural_leg_size(event)
-        minimum_swing = strict_trader_module.minimum_swing_size(normalized_symbol)
-
+        candidate, reason, internal_confirmation = _build_event_candidate(
+            analysis,
+            event,
+            normalized_symbol,
+            required_buffer,
+            strict_trader_module=strict_trader_module,
+            remembered=False,
+        )
         result["indicator_event"] = event
         result["indicator_event_id"] = event.get("event_id")
         result["indicator_event_identity"] = event.get("event_identity")
         result["indicator_event_type"] = str(event.get("event_type") or "BOS").upper()
-        result["indicator_structural_leg_size"] = swing_size
-        result["minimum_structural_leg_size"] = minimum_swing
-
-        if level is None or break_close is None:
-            result["reason"] = "WAIT_INVALID_INDICATOR_SMC_EVENT"
-            return result
-
-        internal_confirmation = None
-        if swing_size is None:
-            result["reason"] = "WAIT_NO_VALID_100_POINT_SWING"
-            return result
-        if swing_size < minimum_swing:
-            internal_confirmation = _internal_two_bos_confirmation(
-                analysis,
-                event,
-                minimum_swing,
-            )
+        result["indicator_structural_leg_size"] = _event_structural_leg_size(event)
+        result["minimum_structural_leg_size"] = strict_trader_module.minimum_swing_size(normalized_symbol)
+        if internal_confirmation is not None:
             result["internal_structure_confirmation"] = internal_confirmation
-            if not internal_confirmation.get("qualified"):
-                result["reason"] = "WAIT_NO_VALID_100_POINT_SWING"
-                return result
-
-        buffered = (
-            break_close > level + required_buffer
-            if side == "BUY"
-            else break_close < level - required_buffer
-        )
-        if not buffered:
-            result["reason"] = "WAIT_WEAK_15M_BOS"
+        if candidate is None:
+            result["reason"] = reason
             return result
 
-        swing_type = "HIGH" if side == "BUY" else "LOW"
-        valid_reason = (
-            f"indicator_internal_two_bos_{str(internal_confirmation.get('pattern') or '').lower()}"
-            if internal_confirmation and internal_confirmation.get("qualified")
-            else "indicator_100_point_structure"
-        )
-        broken_swing = {
-            "type": swing_type,
-            "price": level,
-            "index": event.get("structure_start_index"),
-            "time": event.get("broken_swing_timestamp"),
-            "swing_size": swing_size,
-            "valid": True,
-            "valid_reason": valid_reason,
-            "indicator_source": AUTHORITY_SOURCE,
-            "indicator_event_id": event.get("event_id"),
-            "indicator_event_identity": event.get("event_identity"),
-            "indicator_event_invalidation_swing": invalidation,
-        }
-        break_time = event.get("timestamp")
-        candidate = {
-            "side": side,
-            "level": level,
-            "break_time": break_time,
-            "break_close_time": strict_trader_module.candle_close_time(break_time, 15),
-            "break_close": break_close,
-            "remembered": False,
-            "bos_buffer": required_buffer,
-            "swing": broken_swing,
-            "break_type": str(event.get("event_type") or "BOS").upper(),
-            "invalidation_level": invalidation_price,
-            "event_invalidation_swing": invalidation,
-            "indicator_authority": True,
-            "indicator_source": AUTHORITY_SOURCE,
-            "indicator_event": event,
-            "indicator_event_id": event.get("event_id"),
-            "indicator_event_identity": event.get("event_identity"),
-            "setup_status": "WAITING_FOR_FILTERS",
-            "strategy_structure_qualification": (
-                "INTERNAL_TWO_BOS_CONFIRMATION"
-                if internal_confirmation and internal_confirmation.get("qualified")
-                else "EXTERNAL_100_POINT_LEG"
-            ),
-        }
-        if internal_confirmation and internal_confirmation.get("qualified"):
-            candidate["internal_structure_confirmation"] = internal_confirmation
         strict_trader_module.clear_opposite_watch(
             normalized_symbol,
-            side,
+            candidate["side"],
             "opposite SMC indicator event",
         )
         result.update(candidate)
         result["breakouts"] = [candidate]
-        result["swings"] = [broken_swing]
-        result["raw_swings"] = [broken_swing]
+        result["swings"] = [candidate["swing"]]
+        result["raw_swings"] = [candidate["swing"]]
         result["reason"] = f"SMC_INDICATOR_{candidate['break_type']}"
         return result
 
@@ -441,6 +525,43 @@ def evaluate_indicator_breakout(
         result["breakouts"] = remembered_candidates
         result["reason"] = f"SMC_INDICATOR_REMEMBERED_{str(remembered.get('break_type') or 'BOS').upper()}"
         return result
+
+    durable_event = _latest_durable_event_within_window(
+        analysis,
+        last_close_time,
+        last_close,
+        strict_trader_module=strict_trader_module,
+    )
+    if durable_event is not None:
+        candidate, reason, internal_confirmation = _build_event_candidate(
+            analysis,
+            durable_event,
+            normalized_symbol,
+            required_buffer,
+            strict_trader_module=strict_trader_module,
+            remembered=True,
+        )
+        if internal_confirmation is not None:
+            result["internal_structure_confirmation"] = internal_confirmation
+        if candidate is not None:
+            candidate["durable_event_recovered"] = True
+            candidate["indicator_lifecycle"] = copy.deepcopy(
+                get_event_lifecycles([durable_event.get("event_id")]).get(
+                    durable_event.get("event_id"), {}
+                )
+                if durable_event.get("event_id")
+                else {}
+            )
+            result.update(candidate)
+            result["breakouts"] = [candidate]
+            result["swings"] = [candidate["swing"]]
+            result["raw_swings"] = [candidate["swing"]]
+            result["reason"] = (
+                f"SMC_INDICATOR_REMEMBERED_{str(candidate.get('break_type') or 'BOS').upper()}"
+            )
+            return result
+        if reason:
+            result["durable_event_recovery_block_reason"] = reason
 
     return result
 
