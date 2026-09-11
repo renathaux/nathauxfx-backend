@@ -16,8 +16,10 @@ jobs:
         run: |
           python - <<'PY'
           import json
+          import urllib.error
           import urllib.parse
           import urllib.request
+          from datetime import datetime, timedelta, timezone
 
           BASE = "https://flowsignal-backend-3.onrender.com/chart/candles-window"
           cases = [
@@ -36,70 +38,100 @@ jobs:
               {"seq":27,"start":"2026-09-10T12:30:00Z","end":"2026-09-10T12:35:00Z","side":"SELL","sl":4391.11,"trigger":4347.84,"protected":4351.37,"tp2":4337.26},
           ]
 
-          def fetch(case):
+          def iso(dt):
+              return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+          def parse(value):
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+          def fetch_window(start, end):
               qs = urllib.parse.urlencode({
-                  "symbol":"XAUUSD","timeframe":"1m",
-                  "start":case["start"],"end":case["end"],
+                  "symbol":"XAUUSD","timeframe":"1m","start":iso(start),"end":iso(end),
               })
-              req = urllib.request.Request(BASE + "?" + qs, headers={"User-Agent":"FlowSignal-M1-Audit/1.0"})
-              with urllib.request.urlopen(req, timeout=30) as response:
-                  return json.loads(response.read().decode("utf-8"))
+              req = urllib.request.Request(BASE + "?" + qs, headers={"User-Agent":"FlowSignal-M1-Audit/2.0"})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      return (json.loads(response.read().decode("utf-8")).get("candles") or [])
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 503:  # closed-market/no-candle chunk
+                      return []
+                  raise
 
-          def resolve(case, candles):
+          def touches(case, candle):
+              hi, lo = float(candle["high"]), float(candle["low"])
+              if case["side"] == "BUY":
+                  return {
+                      "stop": lo <= case["sl"], "trigger": hi >= case["trigger"],
+                      "protected": lo <= case["protected"], "tp2": hi >= case["tp2"],
+                  }
+              return {
+                  "stop": hi >= case["sl"], "trigger": lo <= case["trigger"],
+                  "protected": hi >= case["protected"], "tp2": lo <= case["tp2"],
+              }
+
+          def resolve_unarmed(case, candles):
               armed = False
+              armed_ts = None
               for c in candles:
-                  hi, lo = float(c["high"]), float(c["low"])
-                  if case["side"] == "BUY":
-                      stop_hit = lo <= case["sl"]
-                      trigger_hit = hi >= case["trigger"]
-                      protected_hit = lo <= case["protected"]
-                      tp2_hit = hi >= case["tp2"]
-                  else:
-                      stop_hit = hi >= case["sl"]
-                      trigger_hit = lo <= case["trigger"]
-                      protected_hit = hi >= case["protected"]
-                      tp2_hit = lo <= case["tp2"]
-
+                  hit = touches(case, c)
                   if not armed:
-                      if stop_hit and (trigger_hit or tp2_hit):
-                          return "AMBIGUOUS_M1", c["timestamp"]
-                      if tp2_hit and protected_hit:
-                          return "AMBIGUOUS_M1", c["timestamp"]
-                      if tp2_hit:
-                          return "FULL", c["timestamp"]
-                      if stop_hit:
-                          return "LOSS", c["timestamp"]
-                      if trigger_hit and protected_hit:
-                          return "AMBIGUOUS_M1", c["timestamp"]
-                      if trigger_hit:
+                      if hit["stop"] and (hit["trigger"] or hit["tp2"]):
+                          return "AMBIGUOUS_M1", c["timestamp"], False, None
+                      if hit["tp2"] and hit["protected"]:
+                          return "AMBIGUOUS_M1", c["timestamp"], False, None
+                      if hit["tp2"]:
+                          return "FULL", c["timestamp"], False, None
+                      if hit["stop"]:
+                          return "LOSS", c["timestamp"], False, None
+                      if hit["trigger"] and hit["protected"]:
+                          return "AMBIGUOUS_M1", c["timestamp"], False, None
+                      if hit["trigger"]:
                           armed = True
+                          armed_ts = c["timestamp"]
                           continue
                   else:
-                      if protected_hit and tp2_hit:
+                      if hit["protected"] and hit["tp2"]:
+                          return "AMBIGUOUS_M1", c["timestamp"], True, armed_ts
+                      if hit["tp2"]:
+                          return "FULL", c["timestamp"], True, armed_ts
+                      if hit["protected"]:
+                          return "PROTECTED", c["timestamp"], True, armed_ts
+              return ("ARMED_NO_EXIT" if armed else "NO_DECISION"), None, armed, armed_ts
+
+          def continue_armed(case, cursor, days=7):
+              deadline = cursor + timedelta(days=days)
+              while cursor < deadline:
+                  chunk_end = min(cursor + timedelta(hours=6), deadline)
+                  candles = fetch_window(cursor, chunk_end)
+                  for c in candles:
+                      hit = touches(case, c)
+                      if hit["protected"] and hit["tp2"]:
                           return "AMBIGUOUS_M1", c["timestamp"]
-                      if tp2_hit:
+                      if hit["tp2"]:
                           return "FULL", c["timestamp"]
-                      if protected_hit:
+                      if hit["protected"]:
                           return "PROTECTED", c["timestamp"]
-              return ("ARMED_NO_EXIT" if armed else "NO_DECISION"), None
+                  cursor = chunk_end
+              return "ARMED_UNRESOLVED_7D", None
 
           results = []
           for case in cases:
-              payload = fetch(case)
-              candles = payload.get("candles") or []
-              result, decision_ts = resolve(case, candles)
+              start, end = parse(case["start"]), parse(case["end"])
+              first_candles = fetch_window(start, end)
+              result, decision_ts, armed, armed_ts = resolve_unarmed(case, first_candles)
+              if result == "ARMED_NO_EXIT":
+                  result, decision_ts = continue_armed(case, end)
               row = {
-                  "seq": case["seq"], "window": [case["start"], case["end"]],
-                  "m1_count": len(candles), "result": result,
-                  "decision_ts": decision_ts, "candles": candles,
+                  "seq": case["seq"], "initial_window": [case["start"], case["end"]],
+                  "initial_m1_count": len(first_candles), "armed_ts": armed_ts,
+                  "result": result, "decision_ts": decision_ts,
               }
               results.append(row)
-              print("M1_CASE", json.dumps(row, separators=(",", ":")))
+              print("M1_FINAL_CASE", json.dumps(row, separators=(",", ":")))
 
           counts = {}
           for row in results:
               counts[row["result"]] = counts.get(row["result"], 0) + 1
-          # The 14 non-ambiguous M5 trades are 2 protected wins and 12 losses.
           known_nonambiguous_r = 2 * 1.14 - 12
           resolved_ambiguous_r = sum(
               1.90 if r["result"] == "FULL" else
@@ -111,7 +143,7 @@ jobs:
               "counts": counts,
               "known_nonambiguous_r": round(known_nonambiguous_r, 2),
               "resolved_ambiguous_r": round(resolved_ambiguous_r, 2),
-              "known_total_r_excluding_remaining_ambiguity": round(known_nonambiguous_r + resolved_ambiguous_r, 2),
+              "known_total_r_excluding_remaining_m1_ambiguity": round(known_nonambiguous_r + resolved_ambiguous_r, 2),
           }
-          print("M1_AUDIT_SUMMARY", json.dumps(summary, separators=(",", ":")))
+          print("M1_FINAL_AUDIT_SUMMARY", json.dumps(summary, separators=(",", ":")))
           PY
