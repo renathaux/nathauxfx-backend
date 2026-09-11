@@ -1,0 +1,36 @@
+name: M1 research safety check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "Backend/routes/ctrader.py"
+      - "Backend/tests/test_ctrader_m1_research.py"
+      - ".github/workflows/m1-research.yml"
+
+jobs:
+  m1-research-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: Backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: Backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest httpx2
+
+      - name: Run M1 research isolation tests
+        run: python -m pytest -q tests/test_ctrader_m1_research.py
