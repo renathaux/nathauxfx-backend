@@ -1,0 +1,112 @@
+name: Gold tick final audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/gold-tick-final-audit.yml"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve final three Gold V3B trades from cTrader ticks
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.parse
+          import urllib.request
+
+          BASE = "https://flowsignal-backend-3.onrender.com/chart/ticks-window"
+          cases = [
+              {"seq":11,"quote":"bid","start":"2026-08-25T00:00:00Z","end":"2026-08-25T00:01:00Z","side":"BUY","sl":4646.52,"trigger":4683.17,"protected":4680.18,"tp2":4692.14},
+              {"seq":15,"quote":"ask","start":"2026-08-27T10:02:00Z","end":"2026-08-27T10:03:00Z","side":"SELL","sl":4612.13,"trigger":4576.13,"protected":4579.07,"tp2":4567.33},
+              {"seq":22,"quote":"ask","start":"2026-09-01T08:06:00Z","end":"2026-09-01T08:07:00Z","side":"SELL","sl":4449.45,"trigger":4408.16,"protected":4411.53,"tp2":4398.06},
+          ]
+
+          def fetch(case):
+              qs = urllib.parse.urlencode({
+                  "symbol":"XAUUSD",
+                  "quote":case["quote"],
+                  "start":case["start"],
+                  "end":case["end"],
+              })
+              req = urllib.request.Request(BASE + "?" + qs, headers={"User-Agent":"FlowSignal-Gold-Tick-Audit/1.0"})
+              with urllib.request.urlopen(req, timeout=40) as response:
+                  payload = json.loads(response.read().decode("utf-8"))
+              if not payload.get("pagination_complete", False):
+                  raise RuntimeError(f"incomplete tick pagination for seq {case['seq']}")
+              return payload.get("ticks") or []
+
+          def resolve(case, ticks):
+              armed = False
+              armed_tick = None
+              for tick in ticks:
+                  price = float(tick["price"])
+                  ts = tick["timestamp"]
+                  if not armed:
+                      if case["side"] == "BUY":
+                          if price <= case["sl"]:
+                              return "LOSS", ts, armed_tick
+                          if price >= case["tp2"]:
+                              return "FULL", ts, ts
+                          if price >= case["trigger"]:
+                              armed = True
+                              armed_tick = ts
+                      else:
+                          if price >= case["sl"]:
+                              return "LOSS", ts, armed_tick
+                          if price <= case["tp2"]:
+                              return "FULL", ts, ts
+                          if price <= case["trigger"]:
+                              armed = True
+                              armed_tick = ts
+                  else:
+                      if case["side"] == "BUY":
+                          if price >= case["tp2"]:
+                              return "FULL", ts, armed_tick
+                          if price <= case["protected"]:
+                              return "PROTECTED", ts, armed_tick
+                      else:
+                          if price <= case["tp2"]:
+                              return "FULL", ts, armed_tick
+                          if price >= case["protected"]:
+                              return "PROTECTED", ts, armed_tick
+              return ("ARMED_NO_EXIT" if armed else "NO_DECISION"), None, armed_tick
+
+          outcomes = []
+          for case in cases:
+              ticks = fetch(case)
+              result, decision_ts, armed_ts = resolve(case, ticks)
+              row = {
+                  "seq": case["seq"],
+                  "side": case["side"],
+                  "quote": case["quote"],
+                  "tick_count": len(ticks),
+                  "first_tick": ticks[0] if ticks else None,
+                  "last_tick": ticks[-1] if ticks else None,
+                  "armed_ts": armed_ts,
+                  "result": result,
+                  "decision_ts": decision_ts,
+              }
+              outcomes.append(row)
+              print("GOLD_TICK_CASE", json.dumps(row, separators=(",", ":")))
+
+          unresolved = [r for r in outcomes if r["result"] not in {"FULL","PROTECTED","LOSS"}]
+          if unresolved:
+              raise RuntimeError("tick audit unresolved: " + json.dumps(unresolved))
+
+          mapping = {"FULL": 1.90, "PROTECTED": 1.14, "LOSS": -1.0}
+          added_r = sum(mapping[r["result"]] for r in outcomes)
+          final_gold_r = 3.96 + added_r
+          summary = {
+              "outcomes": {str(r["seq"]): r["result"] for r in outcomes},
+              "three_tick_resolved_r": round(added_r, 2),
+              "previously_classified_24_r": 3.96,
+              "final_27_trade_gold_r": round(final_gold_r, 2),
+              "at_100_risk_dollars": round(final_gold_r * 100, 2),
+          }
+          print("GOLD_TICK_FINAL_SUMMARY", json.dumps(summary, separators=(",", ":")))
+          PY
