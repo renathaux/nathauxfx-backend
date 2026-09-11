@@ -228,9 +228,21 @@ def test_live_v3b_service_has_no_broker_execution_imports_or_calls():
         if isinstance(node, ast.Import)
         for alias in node.names
     }
+    called = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            called.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            called.add(node.func.attr)
 
     assert not any("ctrader_connector" in name for name in imports)
-    assert "place_market_order(" not in source
-    assert "execute_live_order_core(" not in source
-    assert "modify_position" not in source
-    assert "close_position(" not in source
+    assert not {
+        "place_market_order",
+        "execute_live_order_core",
+        "modify_position",
+        "modify_position_sltp",
+        "modify_position_stop_loss",
+        "close_position",
+    } & called
