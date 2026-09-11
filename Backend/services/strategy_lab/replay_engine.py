@@ -7,11 +7,15 @@ import pandas as pd
 
 from services.strategy_settings_service import defaults, get_strategy_settings
 
+# Keep these baseline aliases for backwards-compatible tests and callers that
+# monkeypatch the Phase 1 replay seams.
 from .baseline_v1 import candidates, evaluate_event, resolve_trade
+from . import v2_m5_quality
 from .data_source import load_candles
 from .metrics import summarize_r
 
 MAX_SPAN_DAYS = 120
+AVAILABLE_STRATEGIES = {"baseline_v1", "v2_m5_quality"}
 
 
 def _utc(value):
@@ -19,17 +23,34 @@ def _utc(value):
     return stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
 
 
+def _strategy_engine(strategy):
+    if strategy == "baseline_v1":
+        return candidates, evaluate_event, resolve_trade
+    if strategy == "v2_m5_quality":
+        return (
+            v2_m5_quality.candidates,
+            v2_m5_quality.evaluate_event,
+            v2_m5_quality.resolve_trade,
+        )
+    raise ValueError(f"unsupported Strategy Lab strategy: {strategy}")
+
+
 def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frames=None, settings=None):
-    if symbol != "EURUSD" or strategy != "baseline_v1":
-        raise ValueError("Phase 1 supports only EURUSD baseline_v1")
+    if symbol != "EURUSD" or strategy not in AVAILABLE_STRATEGIES:
+        raise ValueError(
+            "Strategy Lab currently supports EURUSD baseline_v1 and v2_m5_quality"
+        )
+    strategy_candidates, strategy_evaluate_event, strategy_resolve_trade = _strategy_engine(strategy)
     start, end = _utc(start), _utc(end or datetime.now(timezone.utc))
     if end <= start or end-start > pd.Timedelta(days=MAX_SPAN_DAYS):
         raise ValueError(f"replay range must be between 1 second and {MAX_SPAN_DAYS} days")
     if settings is None:
         loaded = get_strategy_settings(session_factory) if session_factory else get_strategy_settings()
         settings = {**defaults(), **(loaded.get("current", loaded) if isinstance(loaded, dict) else {})}
+        settings_source = "runtime_strategy_settings"
     else:
         settings = {**defaults(), **settings}
+        settings_source = "explicit_replay_settings"
     if frames is None:
         kwargs = {"session_factory": session_factory} if session_factory else {}
         frame15 = load_candles(symbol, "15m", start.to_pydatetime(), end.to_pydatetime(), **kwargs)
@@ -42,11 +63,13 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
     counts = {key: 0 for key in (
         "rejected_by_structure", "rejected_by_m15_buffer", "rejected_by_ema",
         "rejected_by_consolidation", "rejected_by_m5_confirmation_expired",
-        "rejected_by_risk_rr", "skipped_active_trade",
+        "rejected_by_m5_quality", "rejected_by_risk_rr", "skipped_active_trade",
         "skipped_previous_position_close_freshness",
     )}
     events, trades, trace, active, previous_close = [], [], [], None, None
-    for event, timestamp, prefix, side, leg, structure_ok, exception in candidates(frame15, frame5, start, end, settings):
+    for event, timestamp, prefix, side, leg, structure_ok, exception in strategy_candidates(
+        frame15, frame5, start, end, settings
+    ):
         events.append(event)
         event_trace = {
             "event_time": timestamp.isoformat(), "event_type": event["event_type"],
@@ -78,7 +101,7 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
         if active_exit is not None:
             previous_close = active_exit
             active = None
-        trade, rejection, event_trace = evaluate_event(
+        trade, rejection, event_trace = strategy_evaluate_event(
             event, timestamp, prefix, frame5, side, leg, settings, end,
             previous_close=previous_close,
         )
@@ -87,7 +110,7 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
             trace.append(event_trace)
             continue
         active = trade
-        resolve_trade(active, frame5, end)
+        strategy_resolve_trade(active, frame5, end)
         trades.append(active)
         trace.append(event_trace)
 
@@ -104,16 +127,27 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
         "unresolved_open": sum(t["result"] == "UNRESOLVED_OPEN" for t in trades),
         **summarize_r(trades),
     }
+    strategy_parameters = None
+    if strategy == "v2_m5_quality":
+        strategy_parameters = {
+            "m5_minimum_body_ratio": v2_m5_quality.MIN_BODY_RATIO,
+            "m5_maximum_close_side_wick_ratio": v2_m5_quality.MAX_CLOSE_SIDE_WICK_RATIO,
+        }
     return {
         "strategy_version": strategy, "symbol": symbol,
         "start": start.isoformat(), "end": end.isoformat(),
-        "candle_counts": {"15m": int(((frame15.index+pd.Timedelta(minutes=15) >= start)&(frame15.index+pd.Timedelta(minutes=15) <= end)).sum()),
-                          "5m": int(((frame5.index+pd.Timedelta(minutes=5) >= start)&(frame5.index+pd.Timedelta(minutes=5) <= end)).sum())},
+        "candle_counts": {
+            "15m": int(((frame15.index+pd.Timedelta(minutes=15) >= start)&(frame15.index+pd.Timedelta(minutes=15) <= end)).sum()),
+            "5m": int(((frame5.index+pd.Timedelta(minutes=5) >= start)&(frame5.index+pd.Timedelta(minutes=5) <= end)).sum()),
+        },
         "summary": summary, "trades": trades, "event_trace": trace,
         "diagnostics": {
             "analysis_only": True, "isolated_in_memory_state": True,
             "data_source": "indicator_candles_read_only", "spread_slippage_included": False,
             "future_candle_access": False,
+            "settings_source": settings_source,
+            "settings_used": dict(settings),
+            "strategy_parameters": strategy_parameters,
             "unsupported_or_approximated": [
                 "historical spread, slippage, and tick ordering are unavailable",
                 "runtime broker position state is represented by isolated simulated trades",
