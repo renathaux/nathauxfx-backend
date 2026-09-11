@@ -1,0 +1,117 @@
+name: Gold M1 ambiguity audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/m1-gold-audit.yml"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve Gold V3B ambiguous M5 bars with production M1 history
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.parse
+          import urllib.request
+
+          BASE = "https://flowsignal-backend-3.onrender.com/chart/candles-window"
+          cases = [
+              {"seq":1,"start":"2026-08-14T12:25:00Z","end":"2026-08-14T12:30:00Z","side":"BUY","sl":4347.36,"trigger":4380.40,"protected":4377.71,"tp2":4388.48},
+              {"seq":4,"start":"2026-08-18T23:30:00Z","end":"2026-08-18T23:35:00Z","side":"SELL","sl":4359.09,"trigger":4328.31,"protected":4330.82,"tp2":4320.78},
+              {"seq":5,"start":"2026-08-19T12:35:00Z","end":"2026-08-19T12:40:00Z","side":"BUY","sl":4323.92,"trigger":4396.87,"protected":4390.92,"tp2":4414.72},
+              {"seq":7,"start":"2026-08-20T12:00:00Z","end":"2026-08-20T12:05:00Z","side":"SELL","sl":4503.67,"trigger":4459.98,"protected":4463.55,"tp2":4449.30},
+              {"seq":8,"start":"2026-08-21T09:05:00Z","end":"2026-08-21T09:10:00Z","side":"BUY","sl":4544.91,"trigger":4591.04,"protected":4587.28,"tp2":4602.33},
+              {"seq":11,"start":"2026-08-25T00:00:00Z","end":"2026-08-25T00:05:00Z","side":"BUY","sl":4646.52,"trigger":4683.17,"protected":4680.18,"tp2":4692.14},
+              {"seq":12,"start":"2026-08-25T13:25:00Z","end":"2026-08-25T13:30:00Z","side":"SELL","sl":4680.45,"trigger":4612.25,"protected":4617.81,"tp2":4595.57},
+              {"seq":14,"start":"2026-08-26T13:15:00Z","end":"2026-08-26T13:20:00Z","side":"SELL","sl":4641.84,"trigger":4606.42,"protected":4609.31,"tp2":4597.76},
+              {"seq":15,"start":"2026-08-27T10:00:00Z","end":"2026-08-27T10:05:00Z","side":"SELL","sl":4612.13,"trigger":4576.13,"protected":4579.07,"tp2":4567.33},
+              {"seq":22,"start":"2026-09-01T08:05:00Z","end":"2026-09-01T08:10:00Z","side":"SELL","sl":4449.45,"trigger":4408.16,"protected":4411.53,"tp2":4398.06},
+              {"seq":24,"start":"2026-09-03T04:05:00Z","end":"2026-09-03T04:10:00Z","side":"BUY","sl":4393.35,"trigger":4433.54,"protected":4430.27,"tp2":4443.38},
+              {"seq":26,"start":"2026-09-09T06:00:00Z","end":"2026-09-09T06:05:00Z","side":"BUY","sl":4375.70,"trigger":4403.38,"protected":4401.12,"tp2":4410.15},
+              {"seq":27,"start":"2026-09-10T12:30:00Z","end":"2026-09-10T12:35:00Z","side":"SELL","sl":4391.11,"trigger":4347.84,"protected":4351.37,"tp2":4337.26},
+          ]
+
+          def fetch(case):
+              qs = urllib.parse.urlencode({
+                  "symbol":"XAUUSD","timeframe":"1m",
+                  "start":case["start"],"end":case["end"],
+              })
+              req = urllib.request.Request(BASE + "?" + qs, headers={"User-Agent":"FlowSignal-M1-Audit/1.0"})
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.loads(response.read().decode("utf-8"))
+
+          def resolve(case, candles):
+              armed = False
+              for c in candles:
+                  hi, lo = float(c["high"]), float(c["low"])
+                  if case["side"] == "BUY":
+                      stop_hit = lo <= case["sl"]
+                      trigger_hit = hi >= case["trigger"]
+                      protected_hit = lo <= case["protected"]
+                      tp2_hit = hi >= case["tp2"]
+                  else:
+                      stop_hit = hi >= case["sl"]
+                      trigger_hit = lo <= case["trigger"]
+                      protected_hit = hi >= case["protected"]
+                      tp2_hit = lo <= case["tp2"]
+
+                  if not armed:
+                      if stop_hit and (trigger_hit or tp2_hit):
+                          return "AMBIGUOUS_M1", c["timestamp"]
+                      if tp2_hit and protected_hit:
+                          return "AMBIGUOUS_M1", c["timestamp"]
+                      if tp2_hit:
+                          return "FULL", c["timestamp"]
+                      if stop_hit:
+                          return "LOSS", c["timestamp"]
+                      if trigger_hit and protected_hit:
+                          return "AMBIGUOUS_M1", c["timestamp"]
+                      if trigger_hit:
+                          armed = True
+                          continue
+                  else:
+                      if protected_hit and tp2_hit:
+                          return "AMBIGUOUS_M1", c["timestamp"]
+                      if tp2_hit:
+                          return "FULL", c["timestamp"]
+                      if protected_hit:
+                          return "PROTECTED", c["timestamp"]
+              return ("ARMED_NO_EXIT" if armed else "NO_DECISION"), None
+
+          results = []
+          for case in cases:
+              payload = fetch(case)
+              candles = payload.get("candles") or []
+              result, decision_ts = resolve(case, candles)
+              row = {
+                  "seq": case["seq"], "window": [case["start"], case["end"]],
+                  "m1_count": len(candles), "result": result,
+                  "decision_ts": decision_ts, "candles": candles,
+              }
+              results.append(row)
+              print("M1_CASE", json.dumps(row, separators=(",", ":")))
+
+          counts = {}
+          for row in results:
+              counts[row["result"]] = counts.get(row["result"], 0) + 1
+          # The 14 non-ambiguous M5 trades are 2 protected wins and 12 losses.
+          known_nonambiguous_r = 2 * 1.14 - 12
+          resolved_ambiguous_r = sum(
+              1.90 if r["result"] == "FULL" else
+              1.14 if r["result"] == "PROTECTED" else
+              -1.0 if r["result"] == "LOSS" else 0.0
+              for r in results
+          )
+          summary = {
+              "counts": counts,
+              "known_nonambiguous_r": round(known_nonambiguous_r, 2),
+              "resolved_ambiguous_r": round(resolved_ambiguous_r, 2),
+              "known_total_r_excluding_remaining_ambiguity": round(known_nonambiguous_r + resolved_ambiguous_r, 2),
+          }
+          print("M1_AUDIT_SUMMARY", json.dumps(summary, separators=(",", ":")))
+          PY
