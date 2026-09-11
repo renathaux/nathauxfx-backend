@@ -65,6 +65,7 @@ from routes.trading import router as trading_router
 from routes.diagnostics import router as diagnostics_router
 from routes.shadow import router as shadow_router
 from routes.strategy_lab import router as strategy_lab_router
+from routes.admin_access import router as admin_access_router
 from services.news_service import (
     fetch_calendar_events,
     get_calendar_data_age_seconds,
@@ -200,6 +201,7 @@ app.include_router(trading_router)
 app.include_router(diagnostics_router)
 app.include_router(shadow_router)
 app.include_router(strategy_lab_router)
+app.include_router(admin_access_router)
 
 @app.middleware("http")
 async def log_unhandled_api_errors(request: Request, call_next):

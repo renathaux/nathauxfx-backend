@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import smtplib
+from html import escape
 import urllib.error
 import urllib.request
 from email.mime.text import MIMEText
@@ -107,3 +108,24 @@ def send_password_reset_email(email: str, code: str) -> None:
         title="Reset your NathauxFX password",
         instruction="Enter this 6-digit code to choose a new password.",
     )
+
+
+def send_account_approved_email(email: str, full_name: str) -> None:
+    name = escape(str(full_name or "there").strip())
+    html = (
+        "<div style='font-family:Arial,sans-serif;background:#07111e;color:#eaf3ff;"
+        "padding:28px;border-radius:16px'>"
+        "<h2 style='margin:0 0 12px'>Your NathauxFX account is approved</h2>"
+        f"<p style='color:#a9bbce'>Hello {name}, your administrator has approved your access.</p>"
+        "<p style='color:#a9bbce'>You can now sign in with the email address and password you registered.</p>"
+        "</div>"
+    )
+    resend_key = str(os.getenv("RESEND_API_KEY", "") or "").strip()
+    if resend_key:
+        _send_with_resend(email, "", resend_key, subject="Your NathauxFX access is approved", html=html)
+        return
+    gmail_password = str(os.getenv("FEEDBACK_APP_PASSWORD", "") or "").strip()
+    if gmail_password:
+        _send_with_gmail(email, gmail_password, subject="Your NathauxFX access is approved", html=html)
+        return
+    raise RuntimeError("EMAIL_PROVIDER_NOT_CONFIGURED")
