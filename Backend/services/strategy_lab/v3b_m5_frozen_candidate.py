@@ -1,19 +1,22 @@
-"""V3B frozen Strategy Lab research candidate.
+"""V3B frozen Strategy Lab research candidate for EURUSD.
 
 Exact rules frozen from the current EURUSD research pass:
 - 5m BOS only; no 15m dependency.
 - BOS candle body >= 50% of its full range.
 - The immediately following 5m candle must close in the BOS direction and
   remain beyond the broken BOS level; enter at that candle close.
-- Event-owned 5m invalidation swing with a fixed 50-point buffer.
-- Minimum stop distance 100 points.
+- Event-owned 5m invalidation swing with a fixed 50-point EURUSD buffer.
+- Minimum stop distance 100 EURUSD points.
 - Fixed TP2 = 1.90R.
 - When price reaches 70% of the TP2 path (1.33R), protection is armed.
 - Protected stop = 60% of the TP2 path (1.14R).
 - No partial close at the protection trigger.
 
-This module is analysis-only.  It intentionally ignores runtime RR/TP settings
-so future replay results cannot silently change when production settings change.
+This module is analysis-only and intentionally EURUSD-specific. It must not be
+reused for XAUUSD until the gold point size, structural stop distances, and
+historical results are validated independently. It intentionally ignores
+runtime RR/TP settings so future replay results cannot silently change when
+production settings change.
 """
 from __future__ import annotations
 
