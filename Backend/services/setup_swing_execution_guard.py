@@ -24,8 +24,22 @@ def _parse_timestamp(value):
         return None
 
 
-def _durable_event_matches_setup(event, symbol, expected_type, expected_time, expected_price, tolerance):
-    """Check that the immutable event is the one that created this setup."""
+def _durable_event_matches_setup(
+    event,
+    symbol,
+    expected_type,
+    expected_time,
+    expected_price,
+    tolerance,
+    expected_timeframe="15m",
+):
+    """Check that the immutable event is the one that created this setup.
+
+    Existing production setup identities omit the timeframe and therefore keep
+    the historical 15m requirement. The controlled V3B PAPER bridge explicitly
+    stamps ``setup_timeframe=5m`` so its durable 5m event can be validated
+    without weakening the 15m path.
+    """
     if not isinstance(event, dict):
         return False
     normalized_symbol = str(symbol or "").upper().replace("/", "")
@@ -38,12 +52,14 @@ def _durable_event_matches_setup(event, symbol, expected_type, expected_time, ex
         return False
     return (
         str(event.get("symbol") or "").upper().replace("/", "") == normalized_symbol
-        and str(event.get("timeframe") or "").lower() == "15m"
+        and str(event.get("timeframe") or "").lower() == str(expected_timeframe or "15m").lower()
         and event.get("tradable") is True
         and direction == expected_direction
         and event_time == expected_time
         and abs(event_price - expected_price) <= tolerance
     )
+
+
 def validate_fresh_setup_swing_identity(
     closed_15m,
     symbol,
@@ -57,11 +73,20 @@ def validate_fresh_setup_swing_identity(
     remains as a compatibility fallback for setups created before the authority
     switch.  EMA/consolidation and the setup fingerprint are validated by the
     existing execution gates separately.
+
+    Durable event-backed identities may explicitly declare ``setup_timeframe``.
+    The default remains 15m for every existing production setup. A V3B PAPER
+    candidate declares 5m and is validated against that immutable 5m event.
     """
     identity = setup_identity if isinstance(setup_identity, dict) else {}
     normalized_symbol = strict_trader_module.shared.normalize_symbol(symbol)
     expected_type = str(identity.get("swing_type") or "").upper()
     expected_time = _parse_timestamp(identity.get("swing_timestamp"))
+    expected_timeframe = str(
+        identity.get("setup_timeframe")
+        or identity.get("timeframe")
+        or "15m"
+    ).strip().lower()
     try:
         expected_price = float(identity.get("swing_price"))
     except (TypeError, ValueError):
@@ -74,6 +99,7 @@ def validate_fresh_setup_swing_identity(
             "type": expected_type or None,
             "time": expected_time.isoformat() if expected_time else None,
             "price": expected_price,
+            "timeframe": expected_timeframe,
         },
     }
 
@@ -82,7 +108,12 @@ def validate_fresh_setup_swing_identity(
         # The setup was derived from a durable event.  Its immutable broken
         # swing is the authoritative identity; a rolling market-data request
         # must not invalidate it merely because the old pivot fell out of view.
-        if expected_type not in {"HIGH", "LOW"} or expected_time is None or expected_price is None:
+        if (
+            expected_type not in {"HIGH", "LOW"}
+            or expected_time is None
+            or expected_price is None
+            or expected_timeframe not in {"5m", "15m"}
+        ):
             details["fresh_setup_swing_validation_error"] = "durable setup identity unavailable"
             return {"ok": False, "reason": SWING_CHANGED_REASON, "details": details}
         tolerance = strict_trader_module.point_size(normalized_symbol) + 1e-12
@@ -100,6 +131,7 @@ def validate_fresh_setup_swing_identity(
             expected_time,
             expected_price,
             tolerance,
+            expected_timeframe,
         ):
             details.update({
                 "fresh_setup_swing_match_method": "durable_indicator_event_identity",
@@ -108,6 +140,7 @@ def validate_fresh_setup_swing_identity(
                     "type": expected_type,
                     "time": expected_time.isoformat(),
                     "price": expected_price,
+                    "timeframe": expected_timeframe,
                     "indicator_event_id": event_id,
                 },
             })
