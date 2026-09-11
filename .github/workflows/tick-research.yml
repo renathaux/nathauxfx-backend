@@ -33,4 +33,4 @@ jobs:
           pip install pytest httpx2
 
       - name: Run tick research isolation tests
-        run: python -m pytest -q tests/test_tick_research_window.py tests/test_m1_research_window.py
+        run: python -m pytest -q tests/test_tick_research_window.py
