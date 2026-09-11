@@ -10,7 +10,7 @@ class ReplayRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     symbol: Literal["EURUSD"] = "EURUSD"
-    strategy: Literal["baseline_v1"] = "baseline_v1"
+    strategy: Literal["baseline_v1", "v2_m5_quality"] = "baseline_v1"
     start: datetime
     end: datetime | None = None
 
