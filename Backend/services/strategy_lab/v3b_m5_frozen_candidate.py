@@ -12,11 +12,12 @@ Exact rules frozen from the current EURUSD research pass:
 - Protected stop = 60% of the TP2 path (1.14R).
 - No partial close at the protection trigger.
 
-This module is analysis-only and intentionally EURUSD-specific. It must not be
-reused for XAUUSD until the gold point size, structural stop distances, and
-historical results are validated independently. It intentionally ignores
-runtime RR/TP settings so future replay results cannot silently change when
-production settings change.
+This module is analysis-only and intentionally EURUSD-specific. Treat the
+constants below as frozen research parameters: change them only by creating a
+new strategy version. Do not reuse this module for XAUUSD until gold point size,
+structural stop distances, and historical results are validated independently.
+It intentionally ignores runtime RR/TP settings so future replay results cannot
+silently change when production settings change.
 """
 from __future__ import annotations
 
