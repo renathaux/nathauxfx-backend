@@ -17,12 +17,17 @@ from . import (
     v2c_m15_quality,
     v3_m5_two_close,
     v3a_m5_bos_body_50,
+    v3b_m5_frozen_candidate,
 )
 from .data_source import load_candles
 from .metrics import summarize_r
 
 MAX_SPAN_DAYS = 120
-PURE_5M_STRATEGIES = {"v3_m5_two_close", "v3a_m5_bos_body_50"}
+PURE_5M_STRATEGIES = {
+    "v3_m5_two_close",
+    "v3a_m5_bos_body_50",
+    "v3b_m5_frozen_candidate",
+}
 AVAILABLE_STRATEGIES = {
     "baseline_v1",
     "v2_m5_quality",
@@ -31,6 +36,7 @@ AVAILABLE_STRATEGIES = {
     "v2c_m15_quality_60_30",
     "v3_m5_two_close",
     "v3a_m5_bos_body_50",
+    "v3b_m5_frozen_candidate",
 }
 
 
@@ -49,6 +55,7 @@ def _strategy_engine(strategy):
         "v2c_m15_quality_60_30": v2c_m15_quality,
         "v3_m5_two_close": v3_m5_two_close,
         "v3a_m5_bos_body_50": v3a_m5_bos_body_50,
+        "v3b_m5_frozen_candidate": v3b_m5_frozen_candidate,
     }
     module = engines.get(strategy)
     if module is None:
@@ -96,6 +103,22 @@ def _strategy_parameters(strategy):
             "confirmation": "immediate next 5m candle closes same direction and stays beyond BOS level",
             "entry_at": "second_5m_close",
         }
+    if strategy == "v3b_m5_frozen_candidate":
+        return {
+            "frozen_research_candidate": True,
+            "setup_timeframe": "5m",
+            "confirmation_timeframe": "5m",
+            "uses_15m": False,
+            "event_type": "BOS",
+            "minimum_bos_body_ratio": v3b_m5_frozen_candidate.MIN_BOS_BODY_RATIO,
+            "sl_buffer_points": v3b_m5_frozen_candidate.SL_BUFFER_POINTS,
+            "minimum_sl_points": v3b_m5_frozen_candidate.MIN_SL_POINTS,
+            "target_rr": v3b_m5_frozen_candidate.TARGET_RR,
+            "protection_trigger_tp2_fraction": v3b_m5_frozen_candidate.PROTECTION_TRIGGER_TP2_FRACTION,
+            "protected_stop_tp2_fraction": v3b_m5_frozen_candidate.PROTECTED_STOP_TP2_FRACTION,
+            "confirmation": "immediate next 5m candle closes same direction and stays beyond BOS level",
+            "entry_at": "second_5m_close",
+        }
     return None
 
 
@@ -108,12 +131,22 @@ def _parity_rules(strategy):
             "entry at second 5m close",
             "no 15m structure, EMA, consolidation, or confirmation dependency",
             "event-owned 5m structural SL",
-            "opposing valid 5m swing TP2 with replay 2R fallback",
             "one active position",
             "previous-position-close freshness",
         ]
-        if strategy == "v3a_m5_bos_body_50":
+        if strategy in {"v3a_m5_bos_body_50", "v3b_m5_frozen_candidate"}:
             rules.insert(1, "5m BOS candle body must cover at least 50% of candle range")
+        if strategy == "v3b_m5_frozen_candidate":
+            rules.extend([
+                "SL buffer fixed at 50 EURUSD points with 100-point minimum stop distance",
+                "TP2 fixed at 1.90R; runtime RR settings do not alter this candidate",
+                "arm protection at 70% of TP2 path (1.33R)",
+                "protected stop locks 60% of TP2 path (1.14R)",
+                "no partial close at protection trigger",
+                "ambiguous intrabar ordering is not assumed favorable",
+            ])
+        else:
+            rules.insert(6, "opposing valid 5m swing TP2 with replay 2R fallback")
         return rules
     return [
         "EMA 9/21 permission", "ATR/floor BOS buffer", "production consolidation gate",
