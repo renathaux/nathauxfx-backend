@@ -10,12 +10,18 @@ from services.strategy_settings_service import defaults, get_strategy_settings
 # Keep these baseline aliases for backwards-compatible tests and callers that
 # monkeypatch the Phase 1 replay seams.
 from .baseline_v1 import candidates, evaluate_event, resolve_trade
-from . import v2_m5_quality
+from . import v2_m5_quality, v2a_m5_quality, v2b_m5_quality, v2c_m15_quality
 from .data_source import load_candles
 from .metrics import summarize_r
 
 MAX_SPAN_DAYS = 120
-AVAILABLE_STRATEGIES = {"baseline_v1", "v2_m5_quality"}
+AVAILABLE_STRATEGIES = {
+    "baseline_v1",
+    "v2_m5_quality",
+    "v2a_m5_quality_50_30",
+    "v2b_m5_quality_45_35",
+    "v2c_m15_quality_60_30",
+}
 
 
 def _utc(value):
@@ -26,19 +32,46 @@ def _utc(value):
 def _strategy_engine(strategy):
     if strategy == "baseline_v1":
         return candidates, evaluate_event, resolve_trade
+    engines = {
+        "v2_m5_quality": v2_m5_quality,
+        "v2a_m5_quality_50_30": v2a_m5_quality,
+        "v2b_m5_quality_45_35": v2b_m5_quality,
+        "v2c_m15_quality_60_30": v2c_m15_quality,
+    }
+    module = engines.get(strategy)
+    if module is None:
+        raise ValueError(f"unsupported Strategy Lab strategy: {strategy}")
+    return module.candidates, module.evaluate_event, module.resolve_trade
+
+
+def _strategy_parameters(strategy):
     if strategy == "v2_m5_quality":
-        return (
-            v2_m5_quality.candidates,
-            v2_m5_quality.evaluate_event,
-            v2_m5_quality.resolve_trade,
-        )
-    raise ValueError(f"unsupported Strategy Lab strategy: {strategy}")
+        return {
+            "m5_minimum_body_ratio": v2_m5_quality.MIN_BODY_RATIO,
+            "m5_maximum_close_side_wick_ratio": v2_m5_quality.MAX_CLOSE_SIDE_WICK_RATIO,
+        }
+    if strategy == "v2a_m5_quality_50_30":
+        return {
+            "m5_minimum_body_ratio": v2a_m5_quality.MIN_BODY_RATIO,
+            "m5_maximum_close_side_wick_ratio": v2a_m5_quality.MAX_CLOSE_SIDE_WICK_RATIO,
+        }
+    if strategy == "v2b_m5_quality_45_35":
+        return {
+            "m5_minimum_body_ratio": v2b_m5_quality.MIN_BODY_RATIO,
+            "m5_maximum_close_side_wick_ratio": v2b_m5_quality.MAX_CLOSE_SIDE_WICK_RATIO,
+        }
+    if strategy == "v2c_m15_quality_60_30":
+        return {
+            "m15_minimum_body_ratio": v2c_m15_quality.MIN_BODY_RATIO,
+            "m15_maximum_close_side_wick_ratio": v2c_m15_quality.MAX_CLOSE_SIDE_WICK_RATIO,
+        }
+    return None
 
 
 def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frames=None, settings=None):
     if symbol != "EURUSD" or strategy not in AVAILABLE_STRATEGIES:
         raise ValueError(
-            "Strategy Lab currently supports EURUSD baseline_v1 and v2_m5_quality"
+            "Strategy Lab currently supports EURUSD baseline and V2 experiment variants"
         )
     strategy_candidates, strategy_evaluate_event, strategy_resolve_trade = _strategy_engine(strategy)
     start, end = _utc(start), _utc(end or datetime.now(timezone.utc))
@@ -63,8 +96,8 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
     counts = {key: 0 for key in (
         "rejected_by_structure", "rejected_by_m15_buffer", "rejected_by_ema",
         "rejected_by_consolidation", "rejected_by_m5_confirmation_expired",
-        "rejected_by_m5_quality", "rejected_by_risk_rr", "skipped_active_trade",
-        "skipped_previous_position_close_freshness",
+        "rejected_by_m5_quality", "rejected_by_m15_quality", "rejected_by_risk_rr",
+        "skipped_active_trade", "skipped_previous_position_close_freshness",
     )}
     events, trades, trace, active, previous_close = [], [], [], None, None
     for event, timestamp, prefix, side, leg, structure_ok, exception in strategy_candidates(
@@ -127,12 +160,6 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
         "unresolved_open": sum(t["result"] == "UNRESOLVED_OPEN" for t in trades),
         **summarize_r(trades),
     }
-    strategy_parameters = None
-    if strategy == "v2_m5_quality":
-        strategy_parameters = {
-            "m5_minimum_body_ratio": v2_m5_quality.MIN_BODY_RATIO,
-            "m5_maximum_close_side_wick_ratio": v2_m5_quality.MAX_CLOSE_SIDE_WICK_RATIO,
-        }
     return {
         "strategy_version": strategy, "symbol": symbol,
         "start": start.isoformat(), "end": end.isoformat(),
@@ -147,7 +174,7 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
             "future_candle_access": False,
             "settings_source": settings_source,
             "settings_used": dict(settings),
-            "strategy_parameters": strategy_parameters,
+            "strategy_parameters": _strategy_parameters(strategy),
             "unsupported_or_approximated": [
                 "historical spread, slippage, and tick ordering are unavailable",
                 "runtime broker position state is represented by isolated simulated trades",
