@@ -27,8 +27,8 @@ def test_v2a_50_30_keeps_moderate_quality_and_rejects_weak_body():
 
 
 def test_v2b_is_looser_than_v2a_without_becoming_baseline():
-    # 45% body and 15% close-side wick: accepted by V2B, rejected by V2A.
-    candle = _frame((1.0998, 1.1010, 1.0990, 1.1007))
+    # About 46% body with a small close-side wick: V2B yes, V2A no.
+    candle = _frame((1.09978, 1.1010, 1.0990, 1.10070))
     quality = m5_quality_variant.candle_quality(candle.iloc[0], "BUY")
     assert quality["body_ratio"] >= v2b_m5_quality.MIN_BODY_RATIO
     assert quality["body_ratio"] < v2a_m5_quality.MIN_BODY_RATIO
