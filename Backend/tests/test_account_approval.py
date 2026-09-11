@@ -67,6 +67,30 @@ def test_denied_account_remains_locked():
     assert list_access_requests(engine=engine)[0]["approval_status"] == "DENIED"
 
 
+def test_denied_unverified_account_can_verify_and_be_reconsidered():
+    engine = make_engine()
+    user = signup("person@example.com", "very-secure-password", "Test Person", engine=engine)
+    review_access_request(user["id"], "DENIED", "admin@example.com", engine=engine)
+
+    verified = verify(user["email"], engine)
+    assert verified["email_verified"] is True
+    assert verified["approval_status"] == "DENIED"
+
+    review_access_request(user["id"], "APPROVED", "admin@example.com", engine=engine)
+    token, _csrf, _expires = create_session(user["id"], engine=engine)
+    assert session_snapshot(token, engine=engine) is not None
+
+
+def test_legacy_customer_signup_and_login_are_closed():
+    source = (__import__("pathlib").Path(__file__).parents[1] / "api.py").read_text()
+    signup_block = source[source.index('@app.post("/signup")'):source.index('@app.post("/login")')]
+    login_block = source[source.index('@app.post("/login")'):source.index('@app.post("/session/access-code")')]
+
+    assert "USE_AUTH_SIGNUP" in signup_block
+    assert "save_users" not in signup_block
+    assert 'role": role' not in login_block
+
+
 def test_unverified_account_cannot_be_approved():
     engine = make_engine()
     user = signup("person@example.com", "very-secure-password", "Test Person", engine=engine)

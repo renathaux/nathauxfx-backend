@@ -2731,27 +2731,9 @@ Message:
     
 @app.post("/signup")
 def signup(request: SignupRequest):
-    users = load_users()
-    email = request.email.strip().lower()
-
-    if not email or not request.password.strip():
-        return {"ok": False, "message": "Email and password required"}
-
-    if email in users:
-        return {"ok": False, "message": "Account already exists"}
-
-    role = "user"
-
-    if email == "flowsignal.contact@gmail.com":
-        role = "admin"
-
-    users[email] = {
-        "password": hash_password(request.password),
-        "role": role
-    }
-    save_users(users)
-
-    return {"ok": True, "message": "Account created"}
+    # Customer signup lives exclusively under /auth/signup so email
+    # verification and administrator approval cannot be bypassed.
+    raise HTTPException(status_code=410, detail="USE_AUTH_SIGNUP")
 
 @app.post("/login")
 def login(request: LoginRequest):
@@ -2774,27 +2756,10 @@ def login(request: LoginRequest):
             "role": "admin"
         }
 
-    if email not in users:
-        return {"ok": False, "message": "Account not found"}
-
-    if users[email]["password"] != hashed:
-        return {"ok": False, "message": "Wrong password"}
-
-    role = "admin" if email == "flowsignal.contact@gmail.com" else users[email].get("role", "user")
-
-    token = str(uuid.uuid4())
-    SESSIONS[token] = {
-        "email": email,
-        "role": role
-    }
-
-    return {
-        "ok": True,
-        "message": "Login success",
-        "token": token,
-        "email": email,
-        "role": role
-    }
+    # This legacy endpoint remains only for the existing owner login. Customer
+    # authentication must use /auth/login, which enforces verification and
+    # administrator approval before issuing a session.
+    return {"ok": False, "message": "Account not found"}
 
 
 @app.post("/session/access-code")

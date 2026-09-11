@@ -229,8 +229,9 @@ def review_access_request(user_id: str, decision: str, reviewed_by: str, *, engi
             raise RuntimeError("ACCESS_REQUEST_NOT_FOUND")
         if normalized == "APPROVED" and not bool(row["email_verified"]):
             raise RuntimeError("EMAIL_VERIFICATION_REQUIRED")
+        active_after_review = normalized == "APPROVED" or not bool(row["email_verified"])
         connection.execute(update(users).where(users.c.id == str(user_id)).values(
-            approval_status=normalized, is_active=normalized == "APPROVED",
+            approval_status=normalized, is_active=active_after_review,
             reviewed_at=now, reviewed_by=str(reviewed_by), updated_at=now,
         ))
         connection.execute(update(sessions).where(
@@ -383,10 +384,17 @@ def verify_email_code(email: str, code: str, *, engine: Engine | None = None) ->
             .where(email_verification_codes.c.id == record["id"])
             .values(consumed_at=now, attempt_count=attempts)
         )
+        approval_status = str(user.get("approval_status") or "PENDING_EMAIL")
+        verified_status = "DENIED" if approval_status == "DENIED" else "PENDING_ADMIN"
         connection.execute(
             update(users)
             .where(users.c.id == user["id"])
-            .values(email_verified=True, approval_status="PENDING_ADMIN", updated_at=now)
+            .values(
+                email_verified=True,
+                approval_status=verified_status,
+                is_active=verified_status != "DENIED",
+                updated_at=now,
+            )
         )
         connection.execute(
             update(sessions)
@@ -395,7 +403,8 @@ def verify_email_code(email: str, code: str, *, engine: Engine | None = None) ->
         )
         verified = dict(user)
         verified["email_verified"] = True
-        verified["approval_status"] = "PENDING_ADMIN"
+        verified["approval_status"] = verified_status
+        verified["is_active"] = verified_status != "DENIED"
         verified["updated_at"] = now
         return public_user(verified)
 
