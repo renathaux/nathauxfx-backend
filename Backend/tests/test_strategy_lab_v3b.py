@@ -52,8 +52,11 @@ def test_v3b_protected_exit_is_1_14r():
     }
     frame = pd.DataFrame(
         [
-            (1.1002, 1.10140, 1.10010, 1.10120),
-            (1.1012, 1.10130, 1.10110, 1.10115),
+            # First post-entry bar arms protection without also touching the
+            # protected stop, so the OHLC ordering is unambiguous.
+            (1.10120, 1.10140, 1.10115, 1.10130),
+            # Following bar reverses into the protected stop.
+            (1.10120, 1.10130, 1.10110, 1.10115),
         ],
         columns=["Open", "High", "Low", "Close"],
         index=pd.to_datetime(
