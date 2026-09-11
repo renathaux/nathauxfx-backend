@@ -16,12 +16,13 @@ from . import (
     v2b_m5_quality,
     v2c_m15_quality,
     v3_m5_two_close,
+    v3a_m5_bos_body_50,
 )
 from .data_source import load_candles
 from .metrics import summarize_r
 
 MAX_SPAN_DAYS = 120
-PURE_5M_STRATEGIES = {"v3_m5_two_close"}
+PURE_5M_STRATEGIES = {"v3_m5_two_close", "v3a_m5_bos_body_50"}
 AVAILABLE_STRATEGIES = {
     "baseline_v1",
     "v2_m5_quality",
@@ -29,6 +30,7 @@ AVAILABLE_STRATEGIES = {
     "v2b_m5_quality_45_35",
     "v2c_m15_quality_60_30",
     "v3_m5_two_close",
+    "v3a_m5_bos_body_50",
 }
 
 
@@ -46,6 +48,7 @@ def _strategy_engine(strategy):
         "v2b_m5_quality_45_35": v2b_m5_quality,
         "v2c_m15_quality_60_30": v2c_m15_quality,
         "v3_m5_two_close": v3_m5_two_close,
+        "v3a_m5_bos_body_50": v3a_m5_bos_body_50,
     }
     module = engines.get(strategy)
     if module is None:
@@ -83,12 +86,22 @@ def _strategy_parameters(strategy):
             "confirmation": "immediate next 5m candle closes same direction and stays beyond BOS level",
             "entry_at": "second_5m_close",
         }
+    if strategy == "v3a_m5_bos_body_50":
+        return {
+            "setup_timeframe": "5m",
+            "confirmation_timeframe": "5m",
+            "uses_15m": False,
+            "event_type": "BOS",
+            "minimum_bos_body_ratio": v3a_m5_bos_body_50.MIN_BOS_BODY_RATIO,
+            "confirmation": "immediate next 5m candle closes same direction and stays beyond BOS level",
+            "entry_at": "second_5m_close",
+        }
     return None
 
 
 def _parity_rules(strategy):
-    if strategy == "v3_m5_two_close":
-        return [
+    if strategy in PURE_5M_STRATEGIES:
+        rules = [
             "5m BOS only",
             "immediate next closed 5m candle must close in the BOS direction",
             "second 5m close must remain beyond the broken BOS level",
@@ -99,6 +112,9 @@ def _parity_rules(strategy):
             "one active position",
             "previous-position-close freshness",
         ]
+        if strategy == "v3a_m5_bos_body_50":
+            rules.insert(1, "5m BOS candle body must cover at least 50% of candle range")
+        return rules
     return [
         "EMA 9/21 permission", "ATR/floor BOS buffer", "production consolidation gate",
         "100-point structure qualification", "exact internal two-BOS exception",
@@ -148,7 +164,7 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
         "rejected_by_structure", "rejected_by_m15_buffer", "rejected_by_ema",
         "rejected_by_consolidation", "rejected_by_m5_confirmation_expired",
         "rejected_by_m5_quality", "rejected_by_m15_quality", "rejected_by_second_5m",
-        "rejected_by_risk_rr", "skipped_active_trade",
+        "rejected_by_5m_bos_body", "rejected_by_risk_rr", "skipped_active_trade",
         "skipped_previous_position_close_freshness",
     )}
     events, trades, trace, active, previous_close = [], [], [], None, None
@@ -157,7 +173,7 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
     ):
         events.append(event)
         qualification = exception.get("reason")
-        if strategy != "v3_m5_two_close" and leg is not None and leg >= .001:
+        if strategy not in PURE_5M_STRATEGIES and leg is not None and leg >= .001:
             qualification = "external_100_point_leg"
         event_trace = {
             "event_time": timestamp.isoformat(), "event_type": event["event_type"],
