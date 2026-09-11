@@ -67,6 +67,18 @@ def strategies(request: Request):
                 "experimental": True,
                 "description": "Baseline confirmation plus M15 break body >= 60% and close-side wick <= 30%.",
             },
+            {
+                "id": "v3_m5_two_close",
+                "name": "V3 — Pure M5 BOS + next close",
+                "symbols": ["EURUSD"],
+                "default_start": "2026-08-22T00:00:00Z",
+                "experimental": True,
+                "description": (
+                    "5m only: a closed 5m BOS, then the immediate next 5m candle must "
+                    "close in the same direction and remain beyond the BOS level; entry "
+                    "is at that second close. No 15m logic."
+                ),
+            },
         ],
     }
 
