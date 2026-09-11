@@ -90,6 +90,20 @@ def strategies(request: Request):
                     "50% of its full range. No second-candle quality or 15m filter."
                 ),
             },
+            {
+                "id": "v3b_m5_frozen_candidate",
+                "name": "V3B — Frozen M5 candidate",
+                "symbols": ["EURUSD"],
+                "default_start": "2026-08-17T03:20:00Z",
+                "experimental": True,
+                "frozen_research_candidate": True,
+                "description": (
+                    "Frozen EURUSD research candidate: pure 5m BOS, BOS body >=50%, "
+                    "immediate next-candle confirmation, fixed 1.90R target, protection "
+                    "armed at 70% of target path and stop locked at 60% of target path. "
+                    "No 15m logic and no partial close."
+                ),
+            },
         ],
     }
 
