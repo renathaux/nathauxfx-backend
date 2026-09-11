@@ -36,6 +36,10 @@ _HISTORICAL_EXPORT_TIMEFRAMES = {"15m": "15m", "15min": "15m", "m15": "15m"}
 _MAX_HISTORICAL_EXPORT_RANGE = timedelta(days=14)
 _MAX_CHART_HISTORY_RANGE = timedelta(days=62)
 _MAX_M1_RESEARCH_WINDOW = timedelta(days=1)
+_MAX_TICK_RESEARCH_WINDOW = timedelta(minutes=2)
+_TICK_REQ = 2145
+_TICK_RES = 2146
+_TICK_QUOTE_TYPES = {"bid": 1, "ask": 2}
 
 
 def _enable_read_only_m1_history():
@@ -80,6 +84,108 @@ def _serialize_closed_candles(frame, start_utc, end_utc, period_minutes):
         }
         for timestamp, row in data.iterrows()
     ]
+
+
+def _fetch_read_only_ticks(symbol, quote, start_utc, end_utc):
+    """Fetch a tiny historical tick window directly from cTrader without persistence."""
+    config = _ctrader_connector.get_ctrader_config()
+    if not config:
+        raise HTTPException(status_code=503, detail="cTrader config unavailable")
+
+    account_id = int(config["account_id"])
+    host, port = _ctrader_connector.CTRADER_JSON_ENDPOINTS[config["env"]]
+    sock = _ctrader_connector.open_ctrader_json_socket(host, port)
+    try:
+        try:
+            sock.settimeout(12)
+        except Exception:
+            pass
+        _ctrader_connector.authorize_ctrader_socket(sock, config, account_id)
+        symbol_details = _ctrader_connector.fetch_ctrader_symbol_details(sock, account_id)
+        symbol_info = _ctrader_connector.resolve_ctrader_symbol(symbol_details, symbol)
+        if not symbol_info:
+            raise HTTPException(status_code=503, detail="cTrader symbol unavailable")
+
+        symbol_id = int(symbol_info["symbol_id"])
+        digits = int(symbol_info.get("digits") or 2)
+        quote_type = _TICK_QUOTE_TYPES[quote]
+        start_ms = int(start_utc.timestamp() * 1000)
+        end_ms = int(end_utc.timestamp() * 1000)
+        cursor_end_ms = end_ms
+        ticks = []
+        seen = set()
+        complete = True
+
+        for _page in range(20):
+            response = _ctrader_connector.send_ctrader_request(
+                sock,
+                _TICK_REQ,
+                {
+                    "ctidTraderAccountId": account_id,
+                    "symbolId": symbol_id,
+                    "type": quote_type,
+                    "fromTimestamp": start_ms,
+                    "toTimestamp": cursor_end_ms,
+                },
+                _TICK_RES,
+            )
+            payload = response.get("payload", {}) if isinstance(response, dict) else {}
+            raw_ticks = payload.get("tickData") or []
+            if not raw_ticks:
+                break
+
+            current_ms = None
+            page_times = []
+            for index, item in enumerate(raw_ticks):
+                if not isinstance(item, dict) or item.get("timestamp") is None or item.get("tick") is None:
+                    continue
+                raw_timestamp = int(item["timestamp"])
+                if index == 0:
+                    current_ms = raw_timestamp
+                elif current_ms is not None:
+                    current_ms -= raw_timestamp
+                if current_ms is None:
+                    continue
+                page_times.append(current_ms)
+                if current_ms < start_ms or current_ms > end_ms:
+                    continue
+                price = round(int(item["tick"]) / 100000.0, digits)
+                key = (current_ms, price)
+                if key in seen:
+                    continue
+                seen.add(key)
+                stamp = datetime.fromtimestamp(current_ms / 1000.0, tz=timezone.utc)
+                ticks.append({
+                    "timestamp": stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                    "timestamp_ms": current_ms,
+                    "quote": quote,
+                    "price": price,
+                })
+
+            has_more = bool(payload.get("hasMore"))
+            if not has_more:
+                break
+            if not page_times:
+                complete = False
+                break
+            oldest_ms = min(page_times)
+            if oldest_ms <= start_ms:
+                break
+            next_end = oldest_ms - 1
+            if next_end >= cursor_end_ms:
+                complete = False
+                break
+            cursor_end_ms = next_end
+        else:
+            complete = False
+
+        ticks.sort(key=lambda row: (row["timestamp_ms"], row["price"]))
+        return ticks, complete
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
 
 
 def _require_candle_export_admin(request: Request):
@@ -427,6 +533,51 @@ def chart_candle_window(
         "affects_strategy": False,
         "count": len(candles),
         "candles": candles,
+    }
+
+
+@router.get("/chart/ticks-window", include_in_schema=False)
+def chart_tick_window(
+    symbol: str = Query(default="XAUUSD"),
+    quote: str = Query(...),
+    start: datetime = Query(...),
+    end: datetime = Query(...),
+):
+    """Temporary, tightly bounded cTrader historical tick window for Gold audit."""
+    normalized_symbol = str(symbol or "").strip().upper()
+    normalized_quote = str(quote or "").strip().lower()
+    if normalized_symbol != "XAUUSD":
+        raise HTTPException(status_code=422, detail="tick research window supports XAUUSD only")
+    if normalized_quote not in _TICK_QUOTE_TYPES:
+        raise HTTPException(status_code=422, detail="quote must be bid or ask")
+
+    start_utc = _normalize_utc(start)
+    end_utc = _normalize_utc(end)
+    if end_utc <= start_utc:
+        raise HTTPException(status_code=422, detail="end must be after start")
+    if end_utc - start_utc > _MAX_TICK_RESEARCH_WINDOW:
+        raise HTTPException(status_code=422, detail="tick research window exceeds 2 minutes")
+
+    ticks, complete = _fetch_read_only_ticks(
+        normalized_symbol,
+        normalized_quote,
+        start_utc,
+        end_utc,
+    )
+    if not ticks:
+        raise HTTPException(status_code=503, detail="cTrader returned no historical ticks")
+    return {
+        "symbol": normalized_symbol,
+        "quote": normalized_quote,
+        "start_utc": start_utc.isoformat().replace("+00:00", "Z"),
+        "end_utc": end_utc.isoformat().replace("+00:00", "Z"),
+        "read_only": True,
+        "observation_only": True,
+        "affects_strategy": False,
+        "persisted": False,
+        "pagination_complete": complete,
+        "count": len(ticks),
+        "ticks": ticks,
     }
 
 
