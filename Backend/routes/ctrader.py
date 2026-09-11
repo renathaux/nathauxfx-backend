@@ -3,6 +3,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+import ctrader_connector as _ctrader_connector
 from services.ctrader_transport_guard import install_ctrader_transport_guard
 from services.trade_signal_lifecycle_guard import (
     clone_panel_for_transport,
@@ -30,9 +31,55 @@ router = APIRouter()
 
 _ALLOWED_SYMBOLS = {"EURUSD", "XAUUSD"}
 _TIMEFRAME_MINUTES = {"5m": 5, "15m": 15, "1h": 60}
+_CHART_HISTORY_TIMEFRAME_MINUTES = {"1m": 1, **_TIMEFRAME_MINUTES}
 _HISTORICAL_EXPORT_TIMEFRAMES = {"15m": "15m", "15min": "15m", "m15": "15m"}
 _MAX_HISTORICAL_EXPORT_RANGE = timedelta(days=14)
 _MAX_CHART_HISTORY_RANGE = timedelta(days=62)
+_MAX_M1_RESEARCH_WINDOW = timedelta(days=1)
+
+
+def _enable_read_only_m1_history():
+    """Enable cTrader's native M1 trendbar period for observation-only reads.
+
+    The execution strategy and its supported timeframes are intentionally not
+    changed. This only teaches the historical market-data helper the native
+    cTrader M1 period so Strategy Lab research can resolve intrabar ordering.
+    """
+    for alias in ("1m", "1min", "m1"):
+        _ctrader_connector.CTRADER_TRENDBAR_PERIODS.setdefault(alias, 1)
+    _ctrader_connector.CTRADER_TRENDBAR_PERIOD_MINUTES.setdefault(1, 1)
+
+
+def _normalize_utc(value):
+    stamp = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+def _serialize_closed_candles(frame, start_utc, end_utc, period_minutes):
+    if frame is None or frame.empty:
+        return []
+    data = frame.copy()
+    data.index = data.index.map(
+        lambda value: value if getattr(value, "tzinfo", None) else value.tz_localize("UTC")
+    )
+    data = data[~data.index.duplicated(keep="last")].sort_index()
+    period = timedelta(minutes=period_minutes)
+    data = data[
+        (data.index >= start_utc)
+        & (data.index <= end_utc)
+        & (data.index.map(lambda value: value.to_pydatetime() + period <= end_utc))
+    ]
+    return [
+        {
+            "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
+            "open": float(row["Open"]),
+            "high": float(row["High"]),
+            "low": float(row["Low"]),
+            "close": float(row["Close"]),
+            **({"volume": float(row["Volume"])} if "Volume" in row.index else {}),
+        }
+        for timestamp, row in data.iterrows()
+    ]
 
 
 def _require_candle_export_admin(request: Request):
@@ -230,10 +277,8 @@ def export_closed_ctrader_candles(
     if normalized_timeframe is None:
         raise HTTPException(status_code=422, detail="timeframe must be M15")
 
-    start_utc = start if start.tzinfo else start.replace(tzinfo=timezone.utc)
-    end_utc = end if end.tzinfo else end.replace(tzinfo=timezone.utc)
-    start_utc = start_utc.astimezone(timezone.utc)
-    end_utc = end_utc.astimezone(timezone.utc)
+    start_utc = _normalize_utc(start)
+    end_utc = _normalize_utc(end)
     if end_utc <= start_utc:
         raise HTTPException(status_code=422, detail="end must be after start")
     if end_utc - start_utc > _MAX_HISTORICAL_EXPORT_RANGE:
@@ -296,14 +341,17 @@ def chart_candle_history(
     """Return bounded, closed native candles for the visual chart only.
 
     This uses the historical market-data request and never reads or mutates the
-    strategy candle cache, order state, positions, or stops.
+    strategy candle cache, order state, positions, or stops. M1 is observation
+    only and is not added to the strategy/SMA/SMC execution timeframe set.
     """
     normalized_symbol = str(symbol or "").strip().upper()
     normalized_timeframe = str(timeframe or "").strip().lower()
     if normalized_symbol not in _ALLOWED_SYMBOLS:
         raise HTTPException(status_code=422, detail="symbol must be EURUSD or XAUUSD")
-    if normalized_timeframe not in _TIMEFRAME_MINUTES:
-        raise HTTPException(status_code=422, detail="timeframe must be 5m, 15m, or 1h")
+    if normalized_timeframe not in _CHART_HISTORY_TIMEFRAME_MINUTES:
+        raise HTTPException(status_code=422, detail="timeframe must be 1m, 5m, 15m, or 1h")
+    if normalized_timeframe == "1m":
+        _enable_read_only_m1_history()
 
     end_utc = datetime.now(timezone.utc)
     start_utc = end_utc - min(timedelta(days=days), _MAX_CHART_HISTORY_RANGE)
@@ -313,34 +361,70 @@ def chart_candle_history(
     if frame is None or frame.empty:
         raise HTTPException(status_code=503, detail="cTrader returned no historical candles")
 
-    data = frame.copy()
-    data.index = data.index.map(
-        lambda value: value if getattr(value, "tzinfo", None) else value.tz_localize("UTC")
+    candles = _serialize_closed_candles(
+        frame,
+        start_utc,
+        end_utc,
+        _CHART_HISTORY_TIMEFRAME_MINUTES[normalized_timeframe],
     )
-    data = data[~data.index.duplicated(keep="last")].sort_index()
-    period = timedelta(minutes=_TIMEFRAME_MINUTES[normalized_timeframe])
-    data = data[
-        (data.index >= start_utc)
-        & (data.index <= end_utc)
-        & (data.index.map(lambda value: value.to_pydatetime() + period <= end_utc))
-    ]
-    candles = [
-        {
-            "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
-            "open": float(row["Open"]),
-            "high": float(row["High"]),
-            "low": float(row["Low"]),
-            "close": float(row["Close"]),
-            **({"volume": float(row["Volume"])} if "Volume" in row.index else {}),
-        }
-        for timestamp, row in data.iterrows()
-    ]
     return {
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
         "days": days,
         "closed_only": True,
         "read_only": True,
+        "observation_only": normalized_timeframe == "1m",
+        "count": len(candles),
+        "candles": candles,
+    }
+
+
+@router.get("/chart/candles-window", include_in_schema=False)
+def chart_candle_window(
+    symbol: str = Query(...),
+    timeframe: str = Query(default="1m"),
+    start: datetime = Query(...),
+    end: datetime = Query(...),
+):
+    """Return a tightly bounded M1 window for read-only intrabar research.
+
+    This route exists only to resolve Strategy Lab ordering ambiguity. It does
+    not persist candles and cannot place, amend, close, or authorize trades.
+    """
+    normalized_symbol = str(symbol or "").strip().upper()
+    normalized_timeframe = str(timeframe or "").strip().lower()
+    if normalized_symbol not in _ALLOWED_SYMBOLS:
+        raise HTTPException(status_code=422, detail="symbol must be EURUSD or XAUUSD")
+    if normalized_timeframe != "1m":
+        raise HTTPException(status_code=422, detail="research window supports 1m only")
+
+    start_utc = _normalize_utc(start)
+    end_utc = _normalize_utc(end)
+    if end_utc <= start_utc:
+        raise HTTPException(status_code=422, detail="end must be after start")
+    if end_utc - start_utc > _MAX_M1_RESEARCH_WINDOW:
+        raise HTTPException(status_code=422, detail="M1 research window exceeds 1 day")
+
+    _enable_read_only_m1_history()
+    frame = fetch_ctrader_historical_candles(
+        normalized_symbol,
+        normalized_timeframe,
+        start_utc,
+        end_utc,
+    )
+    if frame is None or frame.empty:
+        raise HTTPException(status_code=503, detail="cTrader returned no historical candles")
+
+    candles = _serialize_closed_candles(frame, start_utc, end_utc, 1)
+    return {
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+        "start_utc": start_utc.isoformat().replace("+00:00", "Z"),
+        "end_utc": end_utc.isoformat().replace("+00:00", "Z"),
+        "closed_only": True,
+        "read_only": True,
+        "observation_only": True,
+        "affects_strategy": False,
         "count": len(candles),
         "candles": candles,
     }
