@@ -79,6 +79,17 @@ def strategies(request: Request):
                     "is at that second close. No 15m logic."
                 ),
             },
+            {
+                "id": "v3a_m5_bos_body_50",
+                "name": "V3A — Pure M5 + BOS body >= 50%",
+                "symbols": ["EURUSD"],
+                "default_start": "2026-08-22T00:00:00Z",
+                "experimental": True,
+                "description": (
+                    "V3 unchanged except the 5m BOS candle body must cover at least "
+                    "50% of its full range. No second-candle quality or 15m filter."
+                ),
+            },
         ],
     }
 
