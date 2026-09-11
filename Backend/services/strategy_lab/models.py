@@ -16,6 +16,7 @@ class ReplayRequest(BaseModel):
         "v2a_m5_quality_50_30",
         "v2b_m5_quality_45_35",
         "v2c_m15_quality_60_30",
+        "v3_m5_two_close",
     ] = "baseline_v1"
     start: datetime
     end: datetime | None = None
