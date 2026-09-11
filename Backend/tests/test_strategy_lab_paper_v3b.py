@@ -1,9 +1,7 @@
-from types import SimpleNamespace
-
 import pandas as pd
 import pytest
 
-from services.strategy_lab.paper_v3b_bridge import (
+from services.paper_v3b_bridge import (
     PAPER_V3B_MODEL,
     build_paper_v3b_candidate,
 )
