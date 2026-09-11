@@ -32,10 +32,13 @@ def test_tick_decoder_rebuilds_relative_timestamps_and_prices(monkeypatch):
         "send_ctrader_request",
         lambda *_args: {
             "payload": {
+                # cTrader historical ticks are newest-first. After the first
+                # absolute tick, BOTH timestamp and price are deltas from the
+                # previous tick.
                 "tickData": [
                     {"timestamp": newest_ms, "tick": 434250000},
-                    {"timestamp": 250, "tick": 434240000},
-                    {"timestamp": 500, "tick": 434230000},
+                    {"timestamp": -250, "tick": -10000},
+                    {"timestamp": -500, "tick": -10000},
                 ],
                 "hasMore": False,
             }

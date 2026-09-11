@@ -134,22 +134,27 @@ def _fetch_read_only_ticks(symbol, quote, start_utc, end_utc):
             if not raw_ticks:
                 break
 
+            # cTrader historical ticks are newest-first and delta encoded after
+            # the first record. Both timestamp and price deltas are relative to
+            # the immediately previous tick, so they must be accumulated.
             current_ms = None
+            current_tick = None
             page_times = []
-            for index, item in enumerate(raw_ticks):
+            for item in raw_ticks:
                 if not isinstance(item, dict) or item.get("timestamp") is None or item.get("tick") is None:
                     continue
                 raw_timestamp = int(item["timestamp"])
-                if index == 0:
+                raw_tick = int(item["tick"])
+                if current_ms is None or current_tick is None:
                     current_ms = raw_timestamp
-                elif current_ms is not None:
-                    current_ms -= raw_timestamp
-                if current_ms is None:
-                    continue
+                    current_tick = raw_tick
+                else:
+                    current_ms += raw_timestamp
+                    current_tick += raw_tick
                 page_times.append(current_ms)
                 if current_ms < start_ms or current_ms > end_ms:
                     continue
-                price = round(int(item["tick"]) / 100000.0, digits)
+                price = round(current_tick / 100000.0, digits)
                 key = (current_ms, price)
                 if key in seen:
                     continue
@@ -179,7 +184,7 @@ def _fetch_read_only_ticks(symbol, quote, start_utc, end_utc):
         else:
             complete = False
 
-        ticks.sort(key=lambda row: (row["timestamp_ms"], row["price"]))
+        ticks.sort(key=lambda row: row["timestamp_ms"])
         return ticks, complete
     finally:
         try:
