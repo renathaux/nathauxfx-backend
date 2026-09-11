@@ -27,10 +27,26 @@ def strategies(request: Request):
     _require_strategy_lab_admin(request)
     return {
         "analysis_only": True,
-        "strategies": [{
-            "id": "baseline_v1", "name": "Baseline v1",
-            "symbols": ["EURUSD"], "default_start": "2026-08-22T00:00:00Z",
-        }],
+        "strategies": [
+            {
+                "id": "baseline_v1",
+                "name": "Baseline v1",
+                "symbols": ["EURUSD"],
+                "default_start": "2026-08-22T00:00:00Z",
+                "experimental": False,
+            },
+            {
+                "id": "v2_m5_quality",
+                "name": "V2 — M5 quality confirmation",
+                "symbols": ["EURUSD"],
+                "default_start": "2026-08-22T00:00:00Z",
+                "experimental": True,
+                "description": (
+                    "Baseline structure/risk with M5 confirmation body ratio >= 0.55 "
+                    "and close-side wick ratio <= 0.25."
+                ),
+            },
+        ],
     }
 
 
