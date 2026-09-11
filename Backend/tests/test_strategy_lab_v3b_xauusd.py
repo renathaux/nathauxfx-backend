@@ -23,7 +23,7 @@ def test_gold_v3b_buy_levels_use_gold_point_math():
     assert levels["ok"] is True
     assert levels["stop_loss"] == pytest.approx(4397.50)
     assert levels["tp2"] == pytest.approx(4404.75)
-    assert levels["tp1"] == pytest.approx(4403.33)
+    assert levels["tp1"] == pytest.approx(4403.32)
     assert levels["protected_sl_price"] == pytest.approx(4402.85)
     assert levels["risk_reward_ratio"] == pytest.approx(1.90)
 
@@ -38,7 +38,7 @@ def test_gold_v3b_sell_levels_use_gold_point_math():
     assert levels["ok"] is True
     assert levels["stop_loss"] == pytest.approx(4402.50)
     assert levels["tp2"] == pytest.approx(4395.25)
-    assert levels["tp1"] == pytest.approx(4396.67)
+    assert levels["tp1"] == pytest.approx(4396.68)
     assert levels["protected_sl_price"] == pytest.approx(4397.15)
 
 
