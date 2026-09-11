@@ -37,14 +37,35 @@ def strategies(request: Request):
             },
             {
                 "id": "v2_m5_quality",
-                "name": "V2 — M5 quality confirmation",
+                "name": "V2 — M5 quality 55/25",
                 "symbols": ["EURUSD"],
                 "default_start": "2026-08-22T00:00:00Z",
                 "experimental": True,
-                "description": (
-                    "Baseline structure/risk with M5 confirmation body ratio >= 0.55 "
-                    "and close-side wick ratio <= 0.25."
-                ),
+                "description": "Baseline plus M5 body >= 55% and close-side wick <= 25%.",
+            },
+            {
+                "id": "v2a_m5_quality_50_30",
+                "name": "V2A — M5 quality 50/30",
+                "symbols": ["EURUSD"],
+                "default_start": "2026-08-22T00:00:00Z",
+                "experimental": True,
+                "description": "Baseline plus M5 body >= 50% and close-side wick <= 30%.",
+            },
+            {
+                "id": "v2b_m5_quality_45_35",
+                "name": "V2B — M5 quality 45/35",
+                "symbols": ["EURUSD"],
+                "default_start": "2026-08-22T00:00:00Z",
+                "experimental": True,
+                "description": "Baseline plus M5 body >= 45% and close-side wick <= 35%.",
+            },
+            {
+                "id": "v2c_m15_quality_60_30",
+                "name": "V2C — M15 quality 60/30",
+                "symbols": ["EURUSD"],
+                "default_start": "2026-08-22T00:00:00Z",
+                "experimental": True,
+                "description": "Baseline confirmation plus M15 break body >= 60% and close-side wick <= 30%.",
             },
         ],
     }
