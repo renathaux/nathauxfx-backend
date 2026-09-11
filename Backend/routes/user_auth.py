@@ -27,6 +27,7 @@ LOGIN_HINT_MAX_AGE = 60 * 60 * 24 * 3650
 
 
 class SignupRequest(BaseModel):
+    full_name: str
     email: str
     password: str
 
@@ -107,7 +108,7 @@ def _verification_response(email: str, response: Response):
 @router.post("/signup")
 def create_account(payload: SignupRequest, response: Response):
     try:
-        user = signup(payload.email, payload.password)
+        user = signup(payload.email, payload.password, payload.full_name)
         return _verification_response(user["email"], response)
     except RuntimeError as exc:
         code = str(exc)
@@ -149,6 +150,12 @@ def login(payload: LoginRequest, response: Response):
                     "delivery": delivery,
                 },
             )
+        if str(row.get("role", "user")) == "user" and str(row.get("approval_status") or "APPROVED") != "APPROVED":
+            _clear_login_cookies(response)
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "ADMIN_APPROVAL_PENDING"},
+            )
         token, csrf, expires = create_session(str(row["id"]))
         set_session_cookie(response, token)
         _set_login_hint(response)
@@ -169,16 +176,13 @@ def login(payload: LoginRequest, response: Response):
 def verify_email(payload: VerifyEmailRequest, response: Response):
     try:
         user = verify_email_code(payload.email, payload.code)
-        token, csrf, expires = create_session(str(user["id"]))
-        set_session_cookie(response, token)
-        _set_login_hint(response)
+        _clear_login_cookies(response)
         return {
             "ok": True,
             "verified": True,
+            "approval_pending": True,
             "user": user,
-            "session_token": token,
-            "csrf_token": csrf,
-            "expires_at": expires,
+            "message": "Thank you. Your email is verified. Please wait for administrator approval.",
         }
     except RuntimeError as exc:
         code = str(exc)

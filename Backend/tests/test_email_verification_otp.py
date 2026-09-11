@@ -44,6 +44,7 @@ def test_issue_and_verify_code_marks_email_verified():
     assert len(sent[0][1]) == 6
     verified = verify_email_code("otp@example.com", sent[0][1], engine=engine)
     assert verified["email_verified"] is True
+    assert verified["approval_status"] == "PENDING_ADMIN"
 
 
 def test_wrong_code_does_not_verify():

@@ -35,10 +35,14 @@ users = Table(
     "flowsignal_users", metadata,
     Column("id", String(36), primary_key=True),
     Column("email", String(320), nullable=False, unique=True, index=True),
+    Column("full_name", String(160), nullable=False),
     Column("password_hash", Text, nullable=False),
     Column("role", String(16), nullable=False, default="user"),
     Column("is_active", Boolean, nullable=False, default=True),
     Column("email_verified", Boolean, nullable=False, default=False),
+    Column("approval_status", String(24), nullable=False, default="PENDING_EMAIL"),
+    Column("reviewed_at", Float),
+    Column("reviewed_by", String(320)),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
     Column("last_login_at", Float),
@@ -71,6 +75,7 @@ class CurrentUser:
     email: str
     role: str
     email_verified: bool
+    full_name: str = ""
 
     @property
     def is_admin(self) -> bool:
@@ -150,22 +155,31 @@ def public_user(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row["id"],
         "email": row["email"],
+        "full_name": row.get("full_name") or row["email"],
         "role": row["role"],
         "email_verified": bool(row["email_verified"]),
+        "approval_status": str(row.get("approval_status") or "APPROVED"),
     }
 
 
-def signup(email: str, password: str, *, engine: Engine | None = None) -> dict[str, Any]:
+def signup(email: str, password: str, full_name: str = "", *, engine: Engine | None = None) -> dict[str, Any]:
     chosen = _engine(engine)
     normalized = normalize_email(email)
+    name = " ".join(str(full_name or "").strip().split()) or normalized.split("@", 1)[0]
+    if len(name) < 2 or len(name) > 160:
+        raise RuntimeError("FULL_NAME_INVALID")
     now = time.time()
     row = {
         "id": str(uuid.uuid4()),
         "email": normalized,
+        "full_name": name,
         "password_hash": hash_password(password),
         "role": "user",
         "is_active": True,
         "email_verified": False,
+        "approval_status": "PENDING_EMAIL",
+        "reviewed_at": None,
+        "reviewed_by": None,
         "created_at": now,
         "updated_at": now,
     }
@@ -186,6 +200,45 @@ def authenticate(email: str, password: str, *, engine: Engine | None = None) -> 
             raise RuntimeError("INVALID_EMAIL_OR_PASSWORD")
         connection.execute(update(users).where(users.c.id == row["id"]).values(last_login_at=time.time(), updated_at=time.time()))
     return dict(row)
+
+
+def list_access_requests(*, engine: Engine | None = None) -> list[dict[str, Any]]:
+    chosen = _engine(engine)
+    with chosen.begin() as connection:
+        rows = connection.execute(
+            select(users).where(users.c.role == "user").order_by(users.c.created_at.desc())
+        ).mappings().all()
+    return [{
+        "id": str(row["id"]), "full_name": str(row["full_name"]),
+        "email": str(row["email"]), "email_verified": bool(row["email_verified"]),
+        "approval_status": str(row["approval_status"]),
+        "created_at": float(row["created_at"]), "reviewed_at": row["reviewed_at"],
+        "reviewed_by": row["reviewed_by"],
+    } for row in rows]
+
+
+def review_access_request(user_id: str, decision: str, reviewed_by: str, *, engine: Engine | None = None) -> dict[str, Any]:
+    chosen = _engine(engine)
+    normalized = str(decision or "").strip().upper()
+    if normalized not in {"APPROVED", "DENIED"}:
+        raise RuntimeError("INVALID_APPROVAL_DECISION")
+    now = time.time()
+    with chosen.begin() as connection:
+        row = connection.execute(select(users).where(users.c.id == str(user_id))).mappings().first()
+        if not row or str(row["role"]) != "user":
+            raise RuntimeError("ACCESS_REQUEST_NOT_FOUND")
+        if normalized == "APPROVED" and not bool(row["email_verified"]):
+            raise RuntimeError("EMAIL_VERIFICATION_REQUIRED")
+        active_after_review = normalized == "APPROVED" or not bool(row["email_verified"])
+        connection.execute(update(users).where(users.c.id == str(user_id)).values(
+            approval_status=normalized, is_active=active_after_review,
+            reviewed_at=now, reviewed_by=str(reviewed_by), updated_at=now,
+        ))
+        connection.execute(update(sessions).where(
+            sessions.c.user_id == str(user_id), sessions.c.revoked_at.is_(None),
+        ).values(revoked_at=now))
+    return {"id": str(user_id), "full_name": str(row["full_name"]),
+            "email": str(row["email"]), "approval_status": normalized}
 
 
 def issue_email_verification(
@@ -331,10 +384,17 @@ def verify_email_code(email: str, code: str, *, engine: Engine | None = None) ->
             .where(email_verification_codes.c.id == record["id"])
             .values(consumed_at=now, attempt_count=attempts)
         )
+        approval_status = str(user.get("approval_status") or "PENDING_EMAIL")
+        verified_status = "DENIED" if approval_status == "DENIED" else "PENDING_ADMIN"
         connection.execute(
             update(users)
             .where(users.c.id == user["id"])
-            .values(email_verified=True, updated_at=now)
+            .values(
+                email_verified=True,
+                approval_status=verified_status,
+                is_active=verified_status != "DENIED",
+                updated_at=now,
+            )
         )
         connection.execute(
             update(sessions)
@@ -343,6 +403,8 @@ def verify_email_code(email: str, code: str, *, engine: Engine | None = None) ->
         )
         verified = dict(user)
         verified["email_verified"] = True
+        verified["approval_status"] = verified_status
+        verified["is_active"] = verified_status != "DENIED"
         verified["updated_at"] = now
         return public_user(verified)
 
@@ -397,10 +459,16 @@ def session_snapshot(token: str, *, engine: Engine | None = None) -> tuple[Curre
         user = connection.execute(select(users).where(users.c.id == session["user_id"])).mappings().first()
         if not user or not user["is_active"]:
             return None
-        if str(user["role"]) == "user" and not bool(user["email_verified"]):
+        if str(user["role"]) == "user" and (
+            not bool(user["email_verified"])
+            or str(user.get("approval_status") or "APPROVED") != "APPROVED"
+        ):
             return None
         connection.execute(update(sessions).where(sessions.c.token_hash == session["token_hash"]).values(last_seen_at=now))
-    return CurrentUser(str(user["id"]), str(user["email"]), str(user["role"]), bool(user["email_verified"])), str(session["csrf_token"])
+    return CurrentUser(
+        str(user["id"]), str(user["email"]), str(user["role"]),
+        bool(user["email_verified"]), str(user.get("full_name") or ""),
+    ), str(session["csrf_token"])
 
 
 def current_user(request: Request) -> CurrentUser:
