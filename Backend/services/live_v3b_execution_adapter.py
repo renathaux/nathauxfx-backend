@@ -1,25 +1,32 @@
 """Double-gated broker handoff adapter for the frozen V3B LIVE candidate.
 
 This module is intentionally dependency-injected: it never imports cTrader or the
-broker execution core.  A runtime caller must explicitly provide the existing
-LIVE executor, and the handoff remains blocked unless all three conditions are
+broker execution core. A runtime caller must explicitly provide the existing
+LIVE executor, and the handoff remains blocked unless all four conditions are
 true:
 
 1. V3B strategy evaluation is explicitly enabled.
 2. The separate V3B broker-handoff kill switch is explicitly enabled.
 3. The normal durable LIVE Auto preference is already enabled.
+4. The supplied executor is explicitly declared V3B-profile-aware.
 
-Keeping the broker-handoff switch separate from strategy evaluation allows the
-V3B candidate to be observed/validated without making an order path reachable.
-The module also stamps the frozen management contract onto the payload so a
-future runtime integration cannot silently fall back to legacy TP1/protection
-math.
+The fourth gate prevents the frozen 5m candidate from accidentally falling into
+legacy V1 15m EMA/TP1/protection assumptions while the runtime integration is
+still being completed.
 """
 from __future__ import annotations
 
 import copy
 import os
 
+from services.live_v3b_execution_profile import (
+    V3B_EXECUTION_PROFILE,
+    V3B_PROTECTED_STOP_FRACTION,
+    V3B_PROTECTION_TRIGGER_FRACTION,
+    V3B_TARGET_RR,
+    stamp_v3b_identity,
+    validate_frozen_management_contract,
+)
 from services.live_v3b_service import (
     LIVE_V3B_MODEL,
     build_live_v3b_execution_payload,
@@ -27,11 +34,7 @@ from services.live_v3b_service import (
 )
 
 
-V3B_EXECUTION_PROFILE = "V3B_M5_FROZEN"
 V3B_BROKER_HANDOFF_ENV = "V3B_LIVE_BROKER_HANDOFF_ENABLED"
-V3B_TARGET_RR = 1.90
-V3B_PROTECTION_TRIGGER_FRACTION = 0.70
-V3B_PROTECTED_STOP_FRACTION = 0.60
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -52,19 +55,12 @@ def _blocked(reason, *, payload=None, details=None):
     }
 
 
-def _matches(value, expected, tolerance=1e-9):
-    try:
-        return abs(float(value) - float(expected)) <= tolerance
-    except (TypeError, ValueError):
-        return False
-
-
 def build_v3b_broker_core_payload(candidate):
-    """Build and freeze the exact payload contract expected by the LIVE core.
+    """Build and freeze the exact payload contract expected by a V3B-aware core.
 
-    No broker action happens here.  The returned payload deliberately carries
-    both the trigger price and the protected-stop price because the legacy LIVE
-    core historically derives those values from different percentages.
+    No broker action happens here. The returned payload deliberately carries
+    both the trigger price and protected-stop price because legacy V1 derives
+    those values from different percentages.
     """
     handoff = build_live_v3b_execution_payload(candidate)
     if not handoff.get("ok"):
@@ -74,35 +70,6 @@ def build_v3b_broker_core_payload(candidate):
         )
 
     payload = copy.deepcopy(handoff.get("payload") or {})
-    frozen_checks = {
-        "risk_reward_ratio": _matches(
-            payload.get("risk_reward_ratio"),
-            V3B_TARGET_RR,
-        ),
-        "protection_trigger_fraction": _matches(
-            candidate.get("protection_trigger_tp2_fraction"),
-            V3B_PROTECTION_TRIGGER_FRACTION,
-        ),
-        "protected_stop_fraction": _matches(
-            candidate.get("protected_stop_tp2_fraction"),
-            V3B_PROTECTED_STOP_FRACTION,
-        ),
-        "no_partial_close": candidate.get(
-            "no_partial_close_at_protection_trigger"
-        ) is True,
-        "protected_stop_present": candidate.get("protected_sl_price") not in {
-            None,
-            "",
-        },
-        "trigger_price_present": candidate.get("tp1") not in {None, ""},
-    }
-    if not all(frozen_checks.values()):
-        return _blocked(
-            "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT",
-            payload=payload,
-            details={"frozen_checks": frozen_checks},
-        )
-
     payload.update({
         "live_strategy_model": LIVE_V3B_MODEL,
         "strategy_execution_profile": V3B_EXECUTION_PROFILE,
@@ -112,7 +79,18 @@ def build_v3b_broker_core_payload(candidate):
         "protected_stop_tp2_fraction": V3B_PROTECTED_STOP_FRACTION,
         "no_partial_close_at_protection_trigger": True,
         "v3b_frozen_target_rr": V3B_TARGET_RR,
+        "setup_identity": stamp_v3b_identity(
+            payload.get("setup_identity") or {}
+        ),
     })
+    contract = validate_frozen_management_contract(payload)
+    if not contract.get("ok"):
+        return _blocked(
+            contract.get("reason") or "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT",
+            payload=payload,
+            details=contract.get("details"),
+        )
+
     return {
         "ok": True,
         "submitted": False,
@@ -129,11 +107,14 @@ def dispatch_v3b_to_live_core(
     live_auto_enabled,
     strategy_enabled=None,
     broker_handoff_enabled=None,
+    execution_profile_supported=False,
 ):
     """Call an injected LIVE executor only after every independent gate passes.
 
-    The normal LIVE Auto switch remains authoritative.  This adapter never
-    toggles it and never changes either V3B environment switch.
+    `execution_profile_supported` must be passed explicitly by the runtime
+    integration after the LIVE core has learned the V3B-specific 5m locked
+    entry and management rules. Until then, even enabling every environment
+    switch cannot make the legacy executor reachable.
     """
     strategy_on = (
         live_v3b_enabled()
@@ -152,6 +133,8 @@ def dispatch_v3b_to_live_core(
         return _blocked("WAIT_V3B_BROKER_HANDOFF_DISABLED")
     if not bool(live_auto_enabled):
         return _blocked("LIVE_AUTO_OFF")
+    if not bool(execution_profile_supported):
+        return _blocked("WAIT_V3B_EXECUTION_PROFILE_UNSUPPORTED")
 
     prepared = build_v3b_broker_core_payload(candidate)
     if not prepared.get("ok"):
@@ -162,7 +145,7 @@ def dispatch_v3b_to_live_core(
             payload=prepared.get("payload"),
         )
 
-    # Exceptions are intentionally not swallowed here.  The existing LIVE core
+    # Exceptions are intentionally not swallowed here. The existing LIVE core
     # owns durable submission/reconciliation semantics and must see failures.
     result = executor(prepared["payload"], source="auto")
     return {
