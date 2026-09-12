@@ -55,6 +55,13 @@ def _blocked(reason, *, payload=None, details=None):
     }
 
 
+def _matches(value, expected, tolerance=1e-9):
+    try:
+        return abs(float(value) - float(expected)) <= tolerance
+    except (TypeError, ValueError):
+        return False
+
+
 def build_v3b_broker_core_payload(candidate):
     """Build and freeze the exact payload contract expected by a V3B-aware core.
 
@@ -62,6 +69,32 @@ def build_v3b_broker_core_payload(candidate):
     both the trigger price and protected-stop price because legacy V1 derives
     those values from different percentages.
     """
+    candidate = candidate if isinstance(candidate, dict) else {}
+    declared_checks = {
+        "target_rr": _matches(candidate.get("risk_reward_ratio"), V3B_TARGET_RR),
+        "protection_trigger_fraction": _matches(
+            candidate.get("protection_trigger_tp2_fraction"),
+            V3B_PROTECTION_TRIGGER_FRACTION,
+        ),
+        "protected_stop_fraction": _matches(
+            candidate.get("protected_stop_tp2_fraction"),
+            V3B_PROTECTED_STOP_FRACTION,
+        ),
+        "no_partial_close": candidate.get(
+            "no_partial_close_at_protection_trigger"
+        ) is True,
+        "protected_stop_present": candidate.get("protected_sl_price") not in {
+            None,
+            "",
+        },
+        "trigger_price_present": candidate.get("tp1") not in {None, ""},
+    }
+    if not all(declared_checks.values()):
+        return _blocked(
+            "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT",
+            details={"declared_checks": declared_checks},
+        )
+
     handoff = build_live_v3b_execution_payload(candidate)
     if not handoff.get("ok"):
         return _blocked(
@@ -133,12 +166,15 @@ def dispatch_v3b_to_live_core(
         return _blocked("WAIT_V3B_BROKER_HANDOFF_DISABLED")
     if not bool(live_auto_enabled):
         return _blocked("LIVE_AUTO_OFF")
-    if not bool(execution_profile_supported):
-        return _blocked("WAIT_V3B_EXECUTION_PROFILE_UNSUPPORTED")
 
     prepared = build_v3b_broker_core_payload(candidate)
     if not prepared.get("ok"):
         return prepared
+    if not bool(execution_profile_supported):
+        return _blocked(
+            "WAIT_V3B_EXECUTION_PROFILE_UNSUPPORTED",
+            payload=prepared.get("payload"),
+        )
     if not callable(executor):
         return _blocked(
             "WAIT_V3B_LIVE_EXECUTOR_UNAVAILABLE",
