@@ -81,17 +81,19 @@ def test_broker_handoff_kill_switch_defaults_off():
 
 
 @pytest.mark.parametrize(
-    "strategy_enabled,broker_handoff_enabled,live_auto_enabled,reason",
+    "strategy_enabled,broker_handoff_enabled,live_auto_enabled,profile_supported,reason",
     [
-        (False, True, True, "WAIT_V3B_LIVE_DISABLED"),
-        (True, False, True, "WAIT_V3B_BROKER_HANDOFF_DISABLED"),
-        (True, True, False, "LIVE_AUTO_OFF"),
+        (False, True, True, True, "WAIT_V3B_LIVE_DISABLED"),
+        (True, False, True, True, "WAIT_V3B_BROKER_HANDOFF_DISABLED"),
+        (True, True, False, True, "LIVE_AUTO_OFF"),
+        (True, True, True, False, "WAIT_V3B_EXECUTION_PROFILE_UNSUPPORTED"),
     ],
 )
-def test_executor_is_unreachable_until_all_three_gates_are_true(
+def test_executor_is_unreachable_until_all_four_gates_are_true(
     strategy_enabled,
     broker_handoff_enabled,
     live_auto_enabled,
+    profile_supported,
     reason,
 ):
     calls = []
@@ -106,6 +108,7 @@ def test_executor_is_unreachable_until_all_three_gates_are_true(
         strategy_enabled=strategy_enabled,
         broker_handoff_enabled=broker_handoff_enabled,
         live_auto_enabled=live_auto_enabled,
+        execution_profile_supported=profile_supported,
     )
 
     assert result["ok"] is False
@@ -121,6 +124,7 @@ def test_frozen_payload_carries_exact_v3b_management_contract():
     payload = prepared["payload"]
     assert payload["live_strategy_model"] == LIVE_V3B_MODEL
     assert payload["strategy_execution_profile"] == V3B_EXECUTION_PROFILE
+    assert payload["setup_identity"]["strategy_execution_profile"] == V3B_EXECUTION_PROFILE
     assert payload["risk_reward_ratio"] == pytest.approx(1.90)
     assert payload["protection_trigger_price"] == pytest.approx(4388.85)
     assert payload["protected_sl_price"] == pytest.approx(4389.80)
@@ -145,6 +149,7 @@ def test_frozen_contract_mismatch_fails_closed_before_executor():
         strategy_enabled=True,
         broker_handoff_enabled=True,
         live_auto_enabled=True,
+        execution_profile_supported=True,
     )
 
     assert result["ok"] is False
@@ -166,6 +171,7 @@ def test_all_gates_true_hands_exact_payload_to_injected_live_core_once():
         strategy_enabled=True,
         broker_handoff_enabled=True,
         live_auto_enabled=True,
+        execution_profile_supported=True,
     )
 
     assert result["ok"] is True
