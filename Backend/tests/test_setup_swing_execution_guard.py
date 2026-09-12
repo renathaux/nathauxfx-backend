@@ -132,6 +132,49 @@ class StableSetupSwingExecutionGuardTests(unittest.TestCase):
             "durable_indicator_event_identity",
         )
 
+    def test_v3b_durable_5m_event_is_allowed_only_when_identity_declares_5m(self):
+        setup = {
+            "indicator_event_id": "smc1-v3b-5m",
+            "setup_timeframe": "5m",
+            "swing_type": "HIGH",
+            "swing_timestamp": "2026-09-10T09:50:00+00:00",
+            "swing_price": 1.1015,
+        }
+        durable_event = {
+            "event_id": "smc1-v3b-5m",
+            "symbol": "EURUSD",
+            "timeframe": "5m",
+            "tradable": True,
+            "direction": "BULLISH",
+            "broken_swing_timestamp": setup["swing_timestamp"],
+            "broken_level": 1.1015,
+        }
+        with patch(
+            "services.setup_swing_execution_guard.read_authoritative_event",
+            return_value=durable_event,
+        ):
+            result = validate_fresh_setup_swing_identity(
+                None, "EURUSD", setup, strict_trader
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["details"]["fresh_setup_matched_swing"]["timeframe"],
+            "5m",
+        )
+
+        legacy_identity = dict(setup)
+        legacy_identity.pop("setup_timeframe")
+        with patch(
+            "services.setup_swing_execution_guard.read_authoritative_event",
+            return_value=durable_event,
+        ):
+            blocked = validate_fresh_setup_swing_identity(
+                None, "EURUSD", legacy_identity, strict_trader
+            )
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["reason"], "WAIT_SETUP_SWING_CHANGED_BEFORE_EXECUTION")
+
     def test_durable_event_mismatch_fails_closed_without_raw_fallback(self):
         setup = {
             "indicator_event_id": "smc1-mismatch",

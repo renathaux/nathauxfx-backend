@@ -7,11 +7,37 @@ import pandas as pd
 
 from services.strategy_settings_service import defaults, get_strategy_settings
 
+# Keep these baseline aliases for backwards-compatible tests and callers that
+# monkeypatch the Phase 1 replay seams.
 from .baseline_v1 import candidates, evaluate_event, resolve_trade
+from . import (
+    v2_m5_quality,
+    v2a_m5_quality,
+    v2b_m5_quality,
+    v2c_m15_quality,
+    v3_m5_two_close,
+    v3a_m5_bos_body_50,
+    v3b_m5_frozen_candidate,
+)
 from .data_source import load_candles
 from .metrics import summarize_r
 
 MAX_SPAN_DAYS = 120
+PURE_5M_STRATEGIES = {
+    "v3_m5_two_close",
+    "v3a_m5_bos_body_50",
+    "v3b_m5_frozen_candidate",
+}
+AVAILABLE_STRATEGIES = {
+    "baseline_v1",
+    "v2_m5_quality",
+    "v2a_m5_quality_50_30",
+    "v2b_m5_quality_45_35",
+    "v2c_m15_quality_60_30",
+    "v3_m5_two_close",
+    "v3a_m5_bos_body_50",
+    "v3b_m5_frozen_candidate",
+}
 
 
 def _utc(value):
@@ -19,44 +45,175 @@ def _utc(value):
     return stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
 
 
+def _strategy_engine(strategy):
+    if strategy == "baseline_v1":
+        return candidates, evaluate_event, resolve_trade
+    engines = {
+        "v2_m5_quality": v2_m5_quality,
+        "v2a_m5_quality_50_30": v2a_m5_quality,
+        "v2b_m5_quality_45_35": v2b_m5_quality,
+        "v2c_m15_quality_60_30": v2c_m15_quality,
+        "v3_m5_two_close": v3_m5_two_close,
+        "v3a_m5_bos_body_50": v3a_m5_bos_body_50,
+        "v3b_m5_frozen_candidate": v3b_m5_frozen_candidate,
+    }
+    module = engines.get(strategy)
+    if module is None:
+        raise ValueError(f"unsupported Strategy Lab strategy: {strategy}")
+    return module.candidates, module.evaluate_event, module.resolve_trade
+
+
+def _strategy_parameters(strategy):
+    if strategy == "v2_m5_quality":
+        return {
+            "m5_minimum_body_ratio": v2_m5_quality.MIN_BODY_RATIO,
+            "m5_maximum_close_side_wick_ratio": v2_m5_quality.MAX_CLOSE_SIDE_WICK_RATIO,
+        }
+    if strategy == "v2a_m5_quality_50_30":
+        return {
+            "m5_minimum_body_ratio": v2a_m5_quality.MIN_BODY_RATIO,
+            "m5_maximum_close_side_wick_ratio": v2a_m5_quality.MAX_CLOSE_SIDE_WICK_RATIO,
+        }
+    if strategy == "v2b_m5_quality_45_35":
+        return {
+            "m5_minimum_body_ratio": v2b_m5_quality.MIN_BODY_RATIO,
+            "m5_maximum_close_side_wick_ratio": v2b_m5_quality.MAX_CLOSE_SIDE_WICK_RATIO,
+        }
+    if strategy == "v2c_m15_quality_60_30":
+        return {
+            "m15_minimum_body_ratio": v2c_m15_quality.MIN_BODY_RATIO,
+            "m15_maximum_close_side_wick_ratio": v2c_m15_quality.MAX_CLOSE_SIDE_WICK_RATIO,
+        }
+    if strategy == "v3_m5_two_close":
+        return {
+            "setup_timeframe": "5m",
+            "confirmation_timeframe": "5m",
+            "uses_15m": False,
+            "event_type": "BOS",
+            "confirmation": "immediate next 5m candle closes same direction and stays beyond BOS level",
+            "entry_at": "second_5m_close",
+        }
+    if strategy == "v3a_m5_bos_body_50":
+        return {
+            "setup_timeframe": "5m",
+            "confirmation_timeframe": "5m",
+            "uses_15m": False,
+            "event_type": "BOS",
+            "minimum_bos_body_ratio": v3a_m5_bos_body_50.MIN_BOS_BODY_RATIO,
+            "confirmation": "immediate next 5m candle closes same direction and stays beyond BOS level",
+            "entry_at": "second_5m_close",
+        }
+    if strategy == "v3b_m5_frozen_candidate":
+        return {
+            "frozen_research_candidate": True,
+            "setup_timeframe": "5m",
+            "confirmation_timeframe": "5m",
+            "uses_15m": False,
+            "event_type": "BOS",
+            "minimum_bos_body_ratio": v3b_m5_frozen_candidate.MIN_BOS_BODY_RATIO,
+            "sl_buffer_points": v3b_m5_frozen_candidate.SL_BUFFER_POINTS,
+            "minimum_sl_points": v3b_m5_frozen_candidate.MIN_SL_POINTS,
+            "target_rr": v3b_m5_frozen_candidate.TARGET_RR,
+            "protection_trigger_tp2_fraction": v3b_m5_frozen_candidate.PROTECTION_TRIGGER_TP2_FRACTION,
+            "protected_stop_tp2_fraction": v3b_m5_frozen_candidate.PROTECTED_STOP_TP2_FRACTION,
+            "confirmation": "immediate next 5m candle closes same direction and stays beyond BOS level",
+            "entry_at": "second_5m_close",
+        }
+    return None
+
+
+def _parity_rules(strategy):
+    if strategy in PURE_5M_STRATEGIES:
+        rules = [
+            "5m BOS only",
+            "immediate next closed 5m candle must close in the BOS direction",
+            "second 5m close must remain beyond the broken BOS level",
+            "entry at second 5m close",
+            "no 15m structure, EMA, consolidation, or confirmation dependency",
+            "event-owned 5m structural SL",
+            "one active position",
+            "previous-position-close freshness",
+        ]
+        if strategy in {"v3a_m5_bos_body_50", "v3b_m5_frozen_candidate"}:
+            rules.insert(1, "5m BOS candle body must cover at least 50% of candle range")
+        if strategy == "v3b_m5_frozen_candidate":
+            rules.extend([
+                "SL buffer fixed at 50 EURUSD points with 100-point minimum stop distance",
+                "TP2 fixed at 1.90R; runtime RR settings do not alter this candidate",
+                "arm protection at 70% of TP2 path (1.33R)",
+                "protected stop locks 60% of TP2 path (1.14R)",
+                "no partial close at protection trigger",
+                "ambiguous intrabar ordering is not assumed favorable",
+            ])
+        else:
+            rules.insert(6, "opposing valid 5m swing TP2 with replay 2R fallback")
+        return rules
+    return [
+        "EMA 9/21 permission", "ATR/floor BOS buffer", "production consolidation gate",
+        "100-point structure qualification", "exact internal two-BOS exception",
+        "60-minute remembered-event window", "event-owned structural SL",
+        "opposing valid 15m swing TP2 with production 2R fallback",
+        "one active position", "previous-position-close freshness",
+    ]
+
+
 def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frames=None, settings=None):
-    if symbol != "EURUSD" or strategy != "baseline_v1":
-        raise ValueError("Phase 1 supports only EURUSD baseline_v1")
+    if symbol != "EURUSD" or strategy not in AVAILABLE_STRATEGIES:
+        raise ValueError(
+            "Strategy Lab currently supports EURUSD baseline and experiment variants"
+        )
+    strategy_candidates, strategy_evaluate_event, strategy_resolve_trade = _strategy_engine(strategy)
     start, end = _utc(start), _utc(end or datetime.now(timezone.utc))
     if end <= start or end-start > pd.Timedelta(days=MAX_SPAN_DAYS):
         raise ValueError(f"replay range must be between 1 second and {MAX_SPAN_DAYS} days")
     if settings is None:
         loaded = get_strategy_settings(session_factory) if session_factory else get_strategy_settings()
         settings = {**defaults(), **(loaded.get("current", loaded) if isinstance(loaded, dict) else {})}
+        settings_source = "runtime_strategy_settings"
     else:
         settings = {**defaults(), **settings}
+        settings_source = "explicit_replay_settings"
+
+    pure_5m = strategy in PURE_5M_STRATEGIES
     if frames is None:
         kwargs = {"session_factory": session_factory} if session_factory else {}
-        frame15 = load_candles(symbol, "15m", start.to_pydatetime(), end.to_pydatetime(), **kwargs)
-        frame5 = load_candles(symbol, "5m", start.to_pydatetime(), end.to_pydatetime(), **kwargs)
+        frame15 = pd.DataFrame()
+        if not pure_5m:
+            frame15 = load_candles(
+                symbol, "15m", start.to_pydatetime(), end.to_pydatetime(), **kwargs
+            )
+        frame5 = load_candles(
+            symbol, "5m", start.to_pydatetime(), end.to_pydatetime(), **kwargs
+        )
     else:
         frame15, frame5 = frames
-    if frame15.empty or frame5.empty:
+
+    if frame5.empty or (not pure_5m and frame15.empty):
+        if pure_5m:
+            raise ValueError("historical EURUSD 5m indicator candles are required")
         raise ValueError("historical EURUSD 15m and 5m indicator candles are required")
 
     counts = {key: 0 for key in (
         "rejected_by_structure", "rejected_by_m15_buffer", "rejected_by_ema",
         "rejected_by_consolidation", "rejected_by_m5_confirmation_expired",
-        "rejected_by_risk_rr", "skipped_active_trade",
+        "rejected_by_m5_quality", "rejected_by_m15_quality", "rejected_by_second_5m",
+        "rejected_by_5m_bos_body", "rejected_by_risk_rr", "skipped_active_trade",
         "skipped_previous_position_close_freshness",
     )}
     events, trades, trace, active, previous_close = [], [], [], None, None
-    for event, timestamp, prefix, side, leg, structure_ok, exception in candidates(frame15, frame5, start, end, settings):
+    for event, timestamp, prefix, side, leg, structure_ok, exception in strategy_candidates(
+        frame15, frame5, start, end, settings
+    ):
         events.append(event)
+        qualification = exception.get("reason")
+        if strategy not in PURE_5M_STRATEGIES and leg is not None and leg >= .001:
+            qualification = "external_100_point_leg"
         event_trace = {
             "event_time": timestamp.isoformat(), "event_type": event["event_type"],
             "direction": event["direction"],
             "structural_leg_points": None if leg is None else leg / 0.00001,
             "structure_qualified": bool(structure_ok),
-            "structure_qualification": (
-                "external_100_point_leg" if leg is not None and leg >= .001
-                else exception.get("reason")
-            ),
+            "structure_qualification": qualification,
             "buffered_m15": None, "ema_allowed": None,
             "consolidation_allowed": None, "m5_confirmation_time": None,
             "risk_result": None, "entry": None, "sl": None, "tp1": None,
@@ -68,7 +225,8 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
             event_trace["final_action"] = "REJECT_STRUCTURE"
             trace.append(event_trace)
             continue
-        event_close = timestamp + pd.Timedelta(minutes=15)
+        event_close_minutes = int(exception.get("event_close_minutes", 15))
+        event_close = timestamp + pd.Timedelta(minutes=event_close_minutes)
         active_exit = pd.Timestamp(active["exit_timestamp"]) if active and active.get("exit_timestamp") else None
         if active and (active_exit is None or active_exit > event_close):
             counts["skipped_active_trade"] += 1
@@ -78,7 +236,7 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
         if active_exit is not None:
             previous_close = active_exit
             active = None
-        trade, rejection, event_trace = evaluate_event(
+        trade, rejection, event_trace = strategy_evaluate_event(
             event, timestamp, prefix, frame5, side, leg, settings, end,
             previous_close=previous_close,
         )
@@ -87,7 +245,7 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
             trace.append(event_trace)
             continue
         active = trade
-        resolve_trade(active, frame5, end)
+        strategy_resolve_trade(active, frame5, end)
         trades.append(active)
         trace.append(event_trace)
 
@@ -107,23 +265,22 @@ def run_replay(symbol, strategy, start, end=None, *, session_factory=None, frame
     return {
         "strategy_version": strategy, "symbol": symbol,
         "start": start.isoformat(), "end": end.isoformat(),
-        "candle_counts": {"15m": int(((frame15.index+pd.Timedelta(minutes=15) >= start)&(frame15.index+pd.Timedelta(minutes=15) <= end)).sum()),
-                          "5m": int(((frame5.index+pd.Timedelta(minutes=5) >= start)&(frame5.index+pd.Timedelta(minutes=5) <= end)).sum())},
+        "candle_counts": {
+            "15m": 0 if frame15.empty else int(((frame15.index+pd.Timedelta(minutes=15) >= start)&(frame15.index+pd.Timedelta(minutes=15) <= end)).sum()),
+            "5m": int(((frame5.index+pd.Timedelta(minutes=5) >= start)&(frame5.index+pd.Timedelta(minutes=5) <= end)).sum()),
+        },
         "summary": summary, "trades": trades, "event_trace": trace,
         "diagnostics": {
             "analysis_only": True, "isolated_in_memory_state": True,
             "data_source": "indicator_candles_read_only", "spread_slippage_included": False,
             "future_candle_access": False,
+            "settings_source": settings_source,
+            "settings_used": dict(settings),
+            "strategy_parameters": _strategy_parameters(strategy),
             "unsupported_or_approximated": [
                 "historical spread, slippage, and tick ordering are unavailable",
                 "runtime broker position state is represented by isolated simulated trades",
             ],
-            "parity_rules": [
-                "EMA 9/21 permission", "ATR/floor BOS buffer", "production consolidation gate",
-                "100-point structure qualification", "exact internal two-BOS exception",
-                "60-minute remembered-event window", "event-owned structural SL",
-                "opposing valid 15m swing TP2 with production 2R fallback",
-                "one active position", "previous-position-close freshness",
-            ],
+            "parity_rules": _parity_rules(strategy),
         },
     }
