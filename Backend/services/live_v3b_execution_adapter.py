@@ -143,8 +143,14 @@ def dispatch_v3b_to_live_core(
     strategy_enabled=None,
     broker_handoff_enabled=None,
     execution_profile_supported=False,
+    authoritative_live_state_loader=None,
 ):
-    """Call an injected LIVE executor only after every independent gate passes."""
+    """Call an injected LIVE executor only after every independent gate passes.
+
+    The optional state loader exists so tests can prove fail-closed semantics
+    without touching a real database. Production defaults to the durable Neon-
+    backed auto-trade state service and explicitly bypasses its read cache.
+    """
     strategy_on = (
         live_v3b_enabled()
         if strategy_enabled is None
@@ -177,10 +183,9 @@ def dispatch_v3b_to_live_core(
             payload=prepared.get("payload"),
         )
 
-    # Safety-critical final authority. Ordinary status/panel calls may use the
-    # one-second state cache, but an actual broker handoff never does.
-    durable_state = load_auto_trade_state(force_refresh=True)
-    if not bool(durable_state.get("live_enabled")):
+    loader = authoritative_live_state_loader or load_auto_trade_state
+    durable_state = loader(force_refresh=True)
+    if not bool((durable_state or {}).get("live_enabled")):
         return _blocked(
             "LIVE_AUTO_OFF",
             payload=prepared.get("payload"),
