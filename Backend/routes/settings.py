@@ -12,6 +12,42 @@ from routes.password_reset import router as password_reset_router
 # source of truth becomes the active V3B production profile.
 install_v3b_strategy_settings_sync()
 
+# V3B's 1.90R target is still coupled to the legacy broker-core RR guard. Keep
+# that one value fixed until the broker core is migrated too. The protection
+# trigger and protected-stop percentages are fully synchronized/editable now.
+from services import strategy_settings_service as _strategy_settings_compat
+
+_synced_get_strategy_settings = _strategy_settings_compat.get_strategy_settings
+_synced_save_strategy_settings = _strategy_settings_compat.save_strategy_settings
+
+
+def _get_strategy_settings_with_editability(*args, **kwargs):
+    data = _synced_get_strategy_settings(*args, **kwargs)
+    if isinstance(data, dict):
+        data = dict(data)
+        data["editable"] = [
+            "protection_trigger_percent",
+            "protected_stop_percent",
+        ]
+    return data
+
+
+def _save_strategy_settings_with_v3b_rr_guard(payload, *args, **kwargs):
+    if isinstance(payload, dict) and "target_rr" in payload:
+        requested = float(payload.get("target_rr"))
+        expected = float(active_strategy_config.defaults()["target_rr"])
+        if abs(requested - expected) > 1e-9:
+            raise _strategy_settings_compat.StrategySettingsValidationError(
+                "target_rr is fixed at 1.90R for the current V3B broker profile"
+            )
+        payload = dict(payload)
+        payload.pop("target_rr", None)
+    return _synced_save_strategy_settings(payload, *args, **kwargs)
+
+
+_strategy_settings_compat.get_strategy_settings = _get_strategy_settings_with_editability
+_strategy_settings_compat.save_strategy_settings = _save_strategy_settings_with_v3b_rr_guard
+
 router = APIRouter()
 # api.py already mounts this router. Include the database-backed auth routers
 # here so customer signup/login/verification/session/password reset are exposed.
