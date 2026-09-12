@@ -12,7 +12,8 @@ true:
 
 The fourth gate prevents the frozen 5m candidate from accidentally falling into
 legacy V1 15m EMA/TP1/protection assumptions while the runtime integration is
-still being completed.
+still being completed. The current production executor must therefore remain
+unreachable from this adapter until the profile-aware runtime hook is installed.
 """
 from __future__ import annotations
 
