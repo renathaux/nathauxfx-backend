@@ -241,3 +241,16 @@ def _install_paper_entry_shape_guard():
 
 _install_ctrader_sparse_trendbar_policy()
 _install_paper_entry_shape_guard()
+
+# Observer-only Neon traffic optimization. Failure to install this optional
+# throttle must never prevent FlowSignal from starting or trading.
+try:
+    from .neon_observer_optimization import install_neon_lifecycle_observer_throttle
+
+    install_neon_lifecycle_observer_throttle()
+except Exception as exc:
+    print("NEON_OBSERVER_OPTIMIZATION_WARNING =", {
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+        "execution_blocked": False,
+    })
