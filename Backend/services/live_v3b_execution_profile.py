@@ -1,8 +1,12 @@
 """Pure execution-profile rules for the frozen V3B LIVE candidate.
 
 This module does not import the broker connector, mutate account state, or send
-orders.  It defines the profile-specific rules that the existing LIVE core must
-use when it is eventually wired for V3B.  V1 remains the default path.
+orders. It defines the profile-specific rules that the existing LIVE core must
+use when it is eventually wired for V3B. V1 remains the default path.
+
+Important: defining this profile does not install it into the running server.
+Until the runtime integration explicitly declares profile support, the V3B
+broker adapter remains fail-closed and cannot reach the injected LIVE executor.
 """
 from __future__ import annotations
 
@@ -128,7 +132,7 @@ def validate_v3b_locked_entry_state(
 ):
     """Profile-specific replacement for the V1 15m/EMA locked entry gate.
 
-    V3B intentionally has no 15m EMA or consolidation requirement.  This gate
+    V3B intentionally has no 15m EMA or consolidation requirement. This gate
     preserves execution safety: exact durable identity, closed 5m ordering,
     post-close freshness/cooldown, lifecycle availability, and one-position
     protection.
