@@ -254,3 +254,45 @@ except Exception as exc:
         "error": str(exc),
         "execution_blocked": False,
     })
+
+
+# Legacy Strategy V2 shadow/research is not part of the V3B trading path.
+# Keep its read-only summary/history endpoints available, but allow production
+# to disable all new shadow evaluation/link writes. The switch defaults ON so
+# existing tests and non-production environments retain their prior behavior.
+def _install_v2_shadow_observer_policy():
+    enabled = str(
+        __import__("os").getenv("V2_SHADOW_OBSERVER_ENABLED", "true")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if enabled:
+        return False
+
+    from . import v2_shadow_service as _shadow
+
+    def _disabled_evaluate_cycle_safely(symbol, result, data_5m=None, data_15m=None, *, now=None):
+        return {
+            "ok": True,
+            "shadow_only": True,
+            "disabled": True,
+            "reason": "V2_SHADOW_OBSERVER_DISABLED",
+            "symbol": str(symbol or "").upper(),
+        }
+
+    def _disabled_link_v1_execution_safely(symbol, setup_fingerprint, broker_result, trade_payload=None):
+        return False
+
+    _shadow.evaluate_cycle_safely = _disabled_evaluate_cycle_safely
+    _shadow.link_v1_execution_safely = _disabled_link_v1_execution_safely
+    _shadow._V2_SHADOW_OBSERVER_DISABLED = True
+    return True
+
+
+try:
+    if _install_v2_shadow_observer_policy():
+        print("V2_SHADOW_OBSERVER = DISABLED")
+except Exception as exc:
+    print("V2_SHADOW_OBSERVER_POLICY_WARNING =", {
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+        "execution_blocked": False,
+    })
