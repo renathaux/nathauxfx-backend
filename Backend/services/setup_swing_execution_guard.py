@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import sys
 
 from indicators.smc import detect_confirmed_swings
 from services.indicator_event_stream_service import read_authoritative_event
@@ -216,6 +217,7 @@ def validate_fresh_setup_swing_identity(
     if matching_swing is not None:
         details.update({
             "fresh_setup_swing_match_method": "legacy_raw_pivot_identity",
+            "fresh_setup_swing_matched": True,
             "fresh_setup_matched_swing": {
                 "type": matching_swing.get("type"),
                 "time": matching_swing.get("time"),
@@ -230,3 +232,42 @@ def validate_fresh_setup_swing_identity(
         "reason": None if matching_swing is not None else SWING_CHANGED_REASON,
         "details": details,
     }
+
+
+def _register_v3b_runtime_startup_install():
+    """Install the dormant profile after app_bootstrap finishes its V1 wrappers.
+
+    This module is imported by app_bootstrap after ``api`` already exists.  We
+    register only a startup callback here; no execution function is replaced at
+    import time and no trading switch is changed.
+    """
+    api_module = sys.modules.get("api")
+    if api_module is None or not hasattr(api_module, "app"):
+        return False
+    marker = "_V3B_RUNTIME_STARTUP_INSTALL_REGISTERED"
+    if getattr(api_module, marker, False):
+        return True
+
+    @api_module.app.on_event("startup")
+    def _install_v3b_runtime_profile():
+        try:
+            from services.live_v3b_runtime_install import install_live_v3b_runtime
+
+            result = install_live_v3b_runtime(api_module)
+            print("V3B_RUNTIME_PROFILE_INSTALL =", result)
+        except Exception as exc:
+            # Fail closed: an installation failure leaves the legacy V1 runtime
+            # in place and cannot enable V3B or LIVE.
+            api_module.ENGINE_RUNTIME_STATE["v3b_runtime_profile"] = {
+                "installed": False,
+                "error": str(exc),
+            }
+            print("V3B_RUNTIME_PROFILE_INSTALL_FAILED =", {
+                "error": str(exc),
+            })
+
+    setattr(api_module, marker, True)
+    return True
+
+
+_register_v3b_runtime_startup_install()
