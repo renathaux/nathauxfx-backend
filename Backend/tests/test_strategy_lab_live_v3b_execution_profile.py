@@ -1,6 +1,6 @@
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from services.live_v3b_execution_adapter import (
     build_v3b_broker_core_payload,
@@ -91,16 +91,21 @@ class FrozenV3BProfileTests(unittest.TestCase):
 
     def test_profile_aware_executor_can_only_be_reached_after_all_four_gates(self):
         executor = Mock(return_value={"ok": True, "position_id": "demo-only"})
-        result = dispatch_v3b_to_live_core(
-            candidate(),
-            executor=executor,
-            live_auto_enabled=True,
-            strategy_enabled=True,
-            broker_handoff_enabled=True,
-            execution_profile_supported=True,
-        )
+        with patch(
+            "services.live_v3b_execution_adapter.load_auto_trade_state",
+            return_value={"paper_enabled": False, "live_enabled": True},
+        ) as durable_state:
+            result = dispatch_v3b_to_live_core(
+                candidate(),
+                executor=executor,
+                live_auto_enabled=True,
+                strategy_enabled=True,
+                broker_handoff_enabled=True,
+                execution_profile_supported=True,
+            )
         self.assertTrue(result["ok"])
         self.assertTrue(result["submitted"])
+        durable_state.assert_called_once_with(force_refresh=True)
         executor.assert_called_once()
         payload = executor.call_args.args[0]
         self.assertEqual(payload["strategy_execution_profile"], V3B_EXECUTION_PROFILE)
