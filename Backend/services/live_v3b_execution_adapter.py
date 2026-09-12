@@ -1,25 +1,26 @@
 """Double-gated broker handoff adapter for the frozen V3B LIVE candidate.
 
-This module is intentionally dependency-injected: it never imports cTrader or the
-broker execution core. A runtime caller must explicitly provide the existing
-LIVE executor, and the handoff remains blocked unless all four conditions are
-true:
+This module is intentionally dependency-injected for broker execution: it never
+imports cTrader or the broker execution core. A runtime caller must explicitly
+provide the existing LIVE executor, and the handoff remains blocked unless all
+four conditions are true:
 
 1. V3B strategy evaluation is explicitly enabled.
 2. The separate V3B broker-handoff kill switch is explicitly enabled.
 3. The normal durable LIVE Auto preference is already enabled.
 4. The supplied executor is explicitly declared V3B-profile-aware.
 
-The fourth gate prevents the frozen 5m candidate from accidentally falling into
-legacy V1 15m EMA/TP1/protection assumptions while the runtime integration is
-still being completed. The current production executor must therefore remain
-unreachable from this adapter until the profile-aware runtime hook is installed.
+Immediately before broker submission, the adapter re-reads the durable LIVE Auto
+preference with cache bypassed. That final authoritative check lets ordinary UI
+and status reads use a tiny read-through cache to reduce Neon traffic without
+allowing a stale in-memory LIVE preference to authorize an order.
 """
 from __future__ import annotations
 
 import copy
 import os
 
+from services.auto_trade_state_service import load_state as load_auto_trade_state
 from services.live_v3b_execution_profile import (
     V3B_EXECUTION_PROFILE,
     V3B_PROTECTED_STOP_FRACTION,
@@ -142,13 +143,13 @@ def dispatch_v3b_to_live_core(
     strategy_enabled=None,
     broker_handoff_enabled=None,
     execution_profile_supported=False,
+    authoritative_live_state_loader=None,
 ):
     """Call an injected LIVE executor only after every independent gate passes.
 
-    `execution_profile_supported` must be passed explicitly by the runtime
-    integration after the LIVE core has learned the V3B-specific 5m locked
-    entry and management rules. Until then, even enabling every environment
-    switch cannot make the legacy executor reachable.
+    The optional state loader exists so tests can prove fail-closed semantics
+    without touching a real database. Production defaults to the durable Neon-
+    backed auto-trade state service and explicitly bypasses its read cache.
     """
     strategy_on = (
         live_v3b_enabled()
@@ -180,6 +181,15 @@ def dispatch_v3b_to_live_core(
         return _blocked(
             "WAIT_V3B_LIVE_EXECUTOR_UNAVAILABLE",
             payload=prepared.get("payload"),
+        )
+
+    loader = authoritative_live_state_loader or load_auto_trade_state
+    durable_state = loader(force_refresh=True)
+    if not bool((durable_state or {}).get("live_enabled")):
+        return _blocked(
+            "LIVE_AUTO_OFF",
+            payload=prepared.get("payload"),
+            details={"authoritative_live_auto_check": True},
         )
 
     # Exceptions are intentionally not swallowed here. The existing LIVE core

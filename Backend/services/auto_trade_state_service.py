@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
 
 from db import SessionLocal, engine
@@ -15,6 +17,55 @@ PAPER_SETTING = "paper_auto_trade_enabled"
 LIVE_SETTING = "live_auto_trade_enabled"
 SETTING_NAMES = {"paper": PAPER_SETTING, "live": LIVE_SETTING}
 _LOCK = threading.RLock()
+_CACHE_LOCK = threading.RLock()
+_STATE_CACHE = {"state": None, "loaded_monotonic": 0.0}
+
+
+def _cache_ttl_seconds():
+    """Keep UI/status reads cheap without making trading state meaningfully stale.
+
+    The default one-second TTL collapses bursts of repeated dashboard/status reads.
+    Production broker submission performs its own authoritative refresh before a
+    V3B order can be sent, so this cache is never the final LIVE safety authority.
+    """
+    try:
+        value = float(os.getenv("AUTO_TRADE_STATE_CACHE_SECONDS", "1.0"))
+    except (TypeError, ValueError):
+        value = 1.0
+    return max(0.0, min(value, 5.0))
+
+
+def _cache_allowed(session_factory):
+    # Tests and dependency-injected callers must keep exact database semantics.
+    return session_factory is None
+
+
+def _read_cached_state():
+    ttl = _cache_ttl_seconds()
+    if ttl <= 0:
+        return None
+    with _CACHE_LOCK:
+        state = _STATE_CACHE.get("state")
+        loaded_at = float(_STATE_CACHE.get("loaded_monotonic") or 0.0)
+        if state is None or (time.monotonic() - loaded_at) > ttl:
+            return None
+        return copy.deepcopy(state)
+
+
+def _store_cached_state(state):
+    if not isinstance(state, dict):
+        return
+    with _CACHE_LOCK:
+        _STATE_CACHE["state"] = copy.deepcopy(state)
+        _STATE_CACHE["loaded_monotonic"] = time.monotonic()
+
+
+def clear_state_cache():
+    """Invalidate the process-local read-through cache."""
+    with _CACHE_LOCK:
+        _STATE_CACHE["state"] = None
+        _STATE_CACHE["loaded_monotonic"] = 0.0
+
 
 def _as_bool(value, default=False):
     if isinstance(value, bool):
@@ -64,17 +115,33 @@ def _legacy_values(legacy_path):
         return None
 
 
-def load_state(legacy_path=None, session_factory=None):
+def load_state(legacy_path=None, session_factory=None, force_refresh=False):
+    use_cache = _cache_allowed(session_factory)
+    if use_cache and not force_refresh:
+        cached = _read_cached_state()
+        if cached is not None:
+            return cached
+
     factory = session_factory or SessionLocal
     with factory() as session:
+        # Read both preferences in one round trip instead of two session.get()
+        # calls. Runtime settings are tiny but this path is hit frequently by
+        # dashboard/status polling, so collapsing the reads materially reduces
+        # Neon traffic without changing trading semantics.
+        found = (
+            session.query(RuntimeSetting)
+            .filter(RuntimeSetting.setting_name.in_(tuple(SETTING_NAMES.values())))
+            .all()
+        )
+        by_name = {row.setting_name: row for row in found}
         rows = {
-            mode: session.get(RuntimeSetting, setting_name)
+            mode: by_name.get(setting_name)
             for mode, setting_name in SETTING_NAMES.items()
         }
         if any(rows.values()):
             timestamps = [row.updated_at for row in rows.values() if row is not None]
             latest = max(timestamps) if timestamps else None
-            return {
+            state = {
                 "paper_enabled": _as_bool(
                     rows["paper"].setting_value if rows["paper"] else False
                 ),
@@ -89,10 +156,13 @@ def load_state(legacy_path=None, session_factory=None):
                 "source": "runtime_setting",
                 "persistence": persistence_info(),
             }
+            if use_cache:
+                _store_cached_state(state)
+            return state
 
     legacy = _legacy_values(legacy_path)
     if legacy is not None:
-        return save_state(
+        state = save_state(
             paper_enabled=legacy["paper"],
             live_enabled=legacy["live"],
             updated_by="legacy_migration",
@@ -100,8 +170,11 @@ def load_state(legacy_path=None, session_factory=None):
             reason="Migrated auto_trade_state.json to RuntimeSetting",
             session_factory=factory,
         )
+        if use_cache:
+            _store_cached_state(state)
+        return state
 
-    return {
+    state = {
         "paper_enabled": _as_bool(os.getenv("PAPER_AUTO_TRADE_ENABLED", False)),
         "live_enabled": _as_bool(os.getenv("LIVE_AUTO_TRADE_ENABLED", False)),
         "updated_at": None,
@@ -115,6 +188,9 @@ def load_state(legacy_path=None, session_factory=None):
         ) else "default",
         "persistence": persistence_info(),
     }
+    if use_cache:
+        _store_cached_state(state)
+    return state
 
 
 def save_state(
@@ -164,7 +240,7 @@ def save_state(
                 ))
             session.commit()
 
-    return {
+    state = {
         "paper_enabled": requested["paper"],
         "live_enabled": requested["live"],
         "updated_at": _utc_iso(updated_at),
@@ -174,6 +250,9 @@ def save_state(
         "reason": reason,
         "persistence": persistence_info(),
     }
+    if _cache_allowed(session_factory):
+        _store_cached_state(state)
+    return state
 
 
 def save_mode(
@@ -226,7 +305,11 @@ def save_mode(
                 ))
             session.commit()
 
-    state = load_state(session_factory=factory)
+    # A mode update is rare and safety-sensitive. Refresh once authoritatively
+    # so the returned state includes the untouched mode, then refresh the cache.
+    state = load_state(session_factory=factory, force_refresh=True)
+    if _cache_allowed(session_factory):
+        _store_cached_state(state)
     return {
         **state,
         "request_source": str(request_source or "api"),

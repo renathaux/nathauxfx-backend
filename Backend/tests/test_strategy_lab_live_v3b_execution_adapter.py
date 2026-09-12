@@ -74,6 +74,11 @@ def _candidate(symbol="EURUSD", side="BUY"):
     }
 
 
+def _live_on_loader(**kwargs):
+    assert kwargs.get("force_refresh") is True
+    return {"live_enabled": True}
+
+
 def test_broker_handoff_kill_switch_defaults_off():
     assert v3b_broker_handoff_enabled({}) is False
     assert v3b_broker_handoff_enabled({V3B_BROKER_HANDOFF_ENV: "false"}) is False
@@ -109,6 +114,7 @@ def test_executor_is_unreachable_until_all_four_gates_are_true(
         broker_handoff_enabled=broker_handoff_enabled,
         live_auto_enabled=live_auto_enabled,
         execution_profile_supported=profile_supported,
+        authoritative_live_state_loader=_live_on_loader,
     )
 
     assert result["ok"] is False
@@ -150,11 +156,40 @@ def test_frozen_contract_mismatch_fails_closed_before_executor():
         broker_handoff_enabled=True,
         live_auto_enabled=True,
         execution_profile_supported=True,
+        authoritative_live_state_loader=_live_on_loader,
     )
 
     assert result["ok"] is False
     assert result["reason"] == "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT"
     assert called is False
+
+
+def test_authoritative_live_state_can_still_block_stale_in_memory_true():
+    calls = []
+
+    def executor(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"ok": True}
+
+    def durable_off(**kwargs):
+        assert kwargs.get("force_refresh") is True
+        return {"live_enabled": False}
+
+    result = dispatch_v3b_to_live_core(
+        _candidate(),
+        executor=executor,
+        strategy_enabled=True,
+        broker_handoff_enabled=True,
+        live_auto_enabled=True,
+        execution_profile_supported=True,
+        authoritative_live_state_loader=durable_off,
+    )
+
+    assert result["ok"] is False
+    assert result["submitted"] is False
+    assert result["reason"] == "LIVE_AUTO_OFF"
+    assert result["details"]["authoritative_live_auto_check"] is True
+    assert calls == []
 
 
 def test_all_gates_true_hands_exact_payload_to_injected_live_core_once():
@@ -172,6 +207,7 @@ def test_all_gates_true_hands_exact_payload_to_injected_live_core_once():
         broker_handoff_enabled=True,
         live_auto_enabled=True,
         execution_profile_supported=True,
+        authoritative_live_state_loader=_live_on_loader,
     )
 
     assert result["ok"] is True
