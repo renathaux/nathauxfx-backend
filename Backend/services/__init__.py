@@ -153,6 +153,19 @@ def _install_ctrader_sparse_trendbar_policy():
 
     @wraps(original_initialize)
     def initialize_indicator_stream(frame, symbol, timeframe, point_size, *args, **kwargs):
+        # V3B uses 5m only and the chart/execution authority still uses 15m.
+        # The 1h durable stream is unused, so do not read or write its Neon
+        # candle/event state during startup. This saves DB transfer without
+        # changing market-data collection or any trading-critical timeframe.
+        normalized_timeframe = _stream._normal_timeframe(timeframe)
+        if normalized_timeframe == "1h":
+            return {
+                "status": "DISABLED_UNUSED_TIMEFRAME",
+                "symbol": str(symbol or "").upper().replace("/", ""),
+                "timeframe": "1h",
+                "durable_persistence": False,
+            }
+
         # The first startup fetch is force-refreshed provider data. Install the
         # cache guard before any later cache hit can persist a synthetic row.
         _install_ctrader_provider_cache_guard()
