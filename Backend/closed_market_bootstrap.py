@@ -68,4 +68,10 @@ def _panel_cache_validity_with_closed_market_fallback(panel_data):
 
 
 api._panel_cache_validity = _panel_cache_validity_with_closed_market_fallback
+
+# Install the second compatibility layer after the closed-market wrapper so
+# partially-open sessions are evaluated per symbol instead of globally. This
+# lets EURUSD refresh normally while XAUUSD is still waiting for its own feed.
+import production_panel_compat  # noqa: E402,F401
+
 app = api.app
