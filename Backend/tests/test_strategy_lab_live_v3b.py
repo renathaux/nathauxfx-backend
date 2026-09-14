@@ -11,6 +11,7 @@ from services.live_v3b_service import (
     build_live_v3b_execution_payload,
     live_v3b_enabled,
 )
+from services.paper_v3b_bridge import build_paper_v3b_candidate
 
 
 class _Strict:
@@ -246,3 +247,36 @@ def test_live_v3b_service_has_no_broker_execution_imports_or_calls():
         "modify_position_stop_loss",
         "close_position",
     } & called
+
+
+def test_paper_and_live_share_the_same_refreshed_authoritative_event_source():
+    frame = _eur_frame()
+    event = _event("EURUSD")
+    calls = []
+
+    def updater(source, symbol, timeframe, point_size, **kwargs):
+        calls.append((symbol, timeframe, source.index[-1], kwargs.get("analyzer")))
+        return {
+            "events": [event],
+            "source": "authoritative_indicator_event_stream",
+            "stream_status": "READY",
+            "stream_last_candle": source.index[-1].isoformat(),
+        }
+
+    paper = build_paper_v3b_candidate(
+        "EURUSD", frame, strict_trader_module=_Strict,
+        authoritative_updater=updater,
+    )
+    live = build_live_v3b_candidate(
+        "EURUSD", frame, strict_trader_module=_Strict,
+        setup_id_builder=_setup_id,
+        authoritative_updater=updater,
+        enabled=True,
+    )
+
+    assert paper["paper_entry_ready"] is True
+    assert live["live_v3b_ready"] is True
+    assert paper["source_indicator_event_id"] == live["source_indicator_event_id"]
+    assert paper["m5_confirmation_id"] == live["m5_confirmation_id"]
+    assert [call[:2] for call in calls] == [("EURUSD", "5m"), ("EURUSD", "5m")]
+    assert all(call[3] is not None for call in calls)

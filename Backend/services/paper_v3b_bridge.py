@@ -7,28 +7,36 @@ execution safety layer.
 
 Safety properties:
 - EURUSD and XAUUSD use their separately frozen V3B point/risk math.
+- Closed source candles advance the existing durable 5m authority before read.
 - Only durable, tradable 5m BOS events are eligible.
 - No 15m, EMA, consolidation, or wick-quality rule is introduced.
 - No broker call is made here.
 - No PAPER/LIVE mode state is changed here.
-- Lifecycle mutation is opt-in through an injected updater; the default is
-  observation-only.
+- Indicator candle/event persistence uses the existing immutable stream path;
+  lifecycle mutation remains opt-in through an injected updater.
 """
 from __future__ import annotations
 
 import copy
 import hashlib
 import json
+import logging
 
 import pandas as pd
 
-from services.indicator_event_stream_service import read_authoritative_structure
+from indicators.smc import analyze_structure
+from services.indicator_event_stream_service import (
+    get_authoritative_structure,
+    read_authoritative_structure,
+)
 from services.strategy_lab import v3b_m5_frozen_candidate as eur_v3b
 from services.strategy_lab import v3b_xauusd_frozen_candidate as gold_v3b
 from services.strategy_lab.v3a_m5_bos_body_50 import _bos_body_ratio
 
 
 PAPER_V3B_MODEL = "PAPER_V3B_M5_FROZEN"
+RECENT_BOS_RECOVERY_CANDLES = 1
+logger = logging.getLogger(__name__)
 SUPPORTED = {
     "EURUSD": eur_v3b,
     "XAUUSD": gold_v3b,
@@ -81,9 +89,15 @@ def _confirmation_identity(symbol, event_id, side, candle_open, candle_close, br
     return payload, "m5v3b_" + digest
 
 
-def _event_at(events, timestamp):
-    target = _utc(timestamp)
-    matches = []
+def _recent_bos_pairs(events, frame):
+    """Return newest-first BOS/next-candle pairs with at most one-cycle recovery.
+
+    Recovery exists only so a missed evaluation can still be diagnosed. A pair
+    that is already one closed candle old is never allowed to become a live or
+    PAPER execution candidate at its historical confirmation price.
+    """
+    latest_open = _utc(frame.index[-1])
+    rows = []
     for event in events or []:
         if not isinstance(event, dict):
             continue
@@ -95,9 +109,35 @@ def _event_at(events, timestamp):
             event_time = _utc(event.get("timestamp"))
         except Exception:
             continue
-        if event_time == target:
-            matches.append(event)
-    return matches[-1] if matches else None
+        second_open = event_time + pd.Timedelta(minutes=5)
+        if event_time not in frame.index or second_open not in frame.index:
+            continue
+        lag_candles = int((latest_open - second_open) / pd.Timedelta(minutes=5))
+        if 0 <= lag_candles <= RECENT_BOS_RECOVERY_CANDLES:
+            rows.append((event_time, second_open, lag_candles, event))
+    return sorted(rows, key=lambda item: (item[0], str(item[3].get("event_id") or "")), reverse=True)
+
+
+def _freshness_details(symbol, latest_source, authority, *, error=None):
+    durable_value = (authority or {}).get("stream_last_candle")
+    try:
+        latest_durable = _utc(durable_value)
+    except Exception:
+        latest_durable = None
+    lag_minutes = (
+        float((latest_source - latest_durable) / pd.Timedelta(minutes=1))
+        if latest_durable is not None
+        else None
+    )
+    return {
+        "symbol": symbol,
+        "latest_source_closed_candle": latest_source.isoformat(),
+        "latest_durable_candle": latest_durable.isoformat() if latest_durable is not None else None,
+        "lag_minutes": lag_minutes,
+        "lag_candles": (int(lag_minutes / 5) if lag_minutes is not None else None),
+        "authority_status": (authority or {}).get("stream_status"),
+        "error": str(error) if error else None,
+    }
 
 
 def build_paper_v3b_candidate(
@@ -105,15 +145,17 @@ def build_paper_v3b_candidate(
     data_5m,
     *,
     strict_trader_module,
-    authoritative_reader=read_authoritative_structure,
+    authoritative_reader=None,
+    authoritative_updater=None,
     final_gate=None,
     lifecycle_updater=None,
 ):
     """Build one V3B PAPER candidate without opening a trade.
 
-    ``authoritative_reader`` is dependency-injected for tests but defaults to the
-    read-only durable indicator event reader. ``lifecycle_updater`` defaults to
-    ``None`` so merely evaluating this bridge cannot mutate PAPER lifecycle.
+    Production calls refresh the durable event stream with closed candles before
+    reading it. Injected readers remain observation-only for unit tests.
+    ``lifecycle_updater`` defaults to ``None`` so candidate evaluation never
+    mutates PAPER/LIVE lifecycle state.
     """
     normalized = _normalize_symbol(symbol)
     strategy = SUPPORTED.get(normalized)
@@ -128,69 +170,136 @@ def build_paper_v3b_candidate(
         return _wait(normalized, "WAIT_V3B_PAPER_5M_DATA")
 
     frame = closed.tail(250).copy()
-    bos_open = _utc(frame.index[-2])
-    second_open = _utc(frame.index[-1])
-    if second_open != bos_open + pd.Timedelta(minutes=5):
-        return _wait(normalized, "WAIT_V3B_PAPER_IMMEDIATE_SECOND_5M")
+    frame.index = pd.DatetimeIndex([_utc(value) for value in frame.index])
+    latest_source = _utc(frame.index[-1])
 
     try:
         point_size = float(
             strategy.POINT_SIZE if normalized == "XAUUSD" else strict_trader_module.point_size(normalized)
         )
-        authority = authoritative_reader(
-            frame,
-            normalized,
-            "5m",
-            point_size,
-        )
+        reader = authoritative_reader or read_authoritative_structure
+        updater = authoritative_updater
+        if authoritative_reader is None and updater is None:
+            updater = get_authoritative_structure
+        if updater is not None:
+            authority = updater(
+                closed,
+                normalized,
+                "5m",
+                point_size,
+                analyzer=analyze_structure,
+            )
+            logger.info("V3B_5M_AUTHORITY_REFRESH %s", {
+                "symbol": normalized,
+                "latest_source_closed_candle": latest_source.isoformat(),
+                "latest_durable_candle": (authority or {}).get("stream_last_candle"),
+                "authority_status": (authority or {}).get("stream_status"),
+            })
+        else:
+            authority = reader(frame, normalized, "5m", point_size)
     except Exception as exc:
+        details = _freshness_details(normalized, latest_source, None, error=exc)
+        logger.warning("V3B_5M_AUTHORITY_STALE %s", details)
         return _wait(
             normalized,
-            "WAIT_V3B_PAPER_AUTHORITATIVE_5M_EVENT",
-            {"error": str(exc)},
+            "WAIT_V3B_5M_AUTHORITY_STALE",
+            details,
         )
 
-    event = _event_at((authority or {}).get("events"), bos_open)
-    if event is None:
+    # A production refresh must prove that the durable stream reached the exact
+    # latest closed source candle. Injected test readers without stream metadata
+    # keep their existing observation-only contract.
+    if authoritative_reader is None or (authority or {}).get("stream_last_candle") is not None:
+        freshness = _freshness_details(normalized, latest_source, authority)
+        if freshness["latest_durable_candle"] is None or freshness["authority_status"] != "READY":
+            logger.warning("V3B_5M_AUTHORITY_STALE %s", freshness)
+            return _wait(normalized, "WAIT_V3B_5M_AUTHORITY_STALE", freshness)
+        if freshness["lag_minutes"] < 0.0:
+            logger.warning("V3B_5M_AUTHORITY_DESYNC %s", freshness)
+            return _wait(normalized, "WAIT_V3B_5M_AUTHORITY_DESYNC", freshness)
+        if freshness["lag_minutes"] > 0.0:
+            logger.warning("V3B_5M_AUTHORITY_STALE %s", freshness)
+            return _wait(normalized, "WAIT_V3B_5M_AUTHORITY_STALE", freshness)
+
+    pairs = _recent_bos_pairs((authority or {}).get("events"), frame)
+    logger.info("V3B_RECENT_BOS_SCAN %s", {
+        "symbol": normalized,
+        "latest_source_closed_candle": latest_source.isoformat(),
+        "recovery_candles": RECENT_BOS_RECOVERY_CANDLES,
+        "candidate_event_ids": [item[3].get("event_id") for item in pairs],
+    })
+    if not pairs:
         return _wait(normalized, "WAIT_V3B_PAPER_5M_BOS")
-
-    side = "BUY" if str(event.get("direction") or "").upper() == "BULLISH" else "SELL"
-    try:
-        bos_candle = frame.iloc[-2]
-        second = frame.iloc[-1]
-        body_ratio = float(_bos_body_ratio(bos_candle))
-        second_open_price = float(second["Open"])
-        second_close = float(second["Close"])
-        broken_level = float(event["broken_level"])
-    except Exception:
-        return _wait(normalized, "WAIT_V3B_PAPER_5M_DATA_SHAPE")
-
-    if body_ratio < float(strategy.MIN_BOS_BODY_RATIO):
-        return _wait(
-            normalized,
-            "WAIT_V3B_PAPER_BOS_BODY",
-            {
+    rejection = None
+    selected = None
+    for bos_open, second_open, lag_candles, event in pairs:
+        try:
+            bos_candle = frame.loc[bos_open]
+            second = frame.loc[second_open]
+            side = "BUY" if str(event.get("direction") or "").upper() == "BULLISH" else "SELL"
+            body_ratio = float(_bos_body_ratio(bos_candle))
+            second_open_price = float(second["Open"])
+            second_close = float(second["Close"])
+            broken_level = float(event["broken_level"])
+        except Exception:
+            rejection = _wait(normalized, "WAIT_V3B_PAPER_5M_DATA_SHAPE")
+            continue
+        if body_ratio < float(strategy.MIN_BOS_BODY_RATIO):
+            rejection = rejection or _wait(normalized, "WAIT_V3B_PAPER_BOS_BODY", {
                 "bos_body_ratio": body_ratio,
                 "minimum_bos_body_ratio": float(strategy.MIN_BOS_BODY_RATIO),
-            },
-        )
-
-    same_direction = (
-        second_close > second_open_price if side == "BUY" else second_close < second_open_price
-    )
-    stays_beyond = (
-        second_close > broken_level if side == "BUY" else second_close < broken_level
-    )
-    if not (same_direction and stays_beyond):
-        return _wait(
-            normalized,
-            "WAIT_V3B_PAPER_SECOND_5M",
-            {
+                "source_indicator_event_id": event.get("event_id"),
+            })
+            continue
+        same_direction = second_close > second_open_price if side == "BUY" else second_close < second_open_price
+        stays_beyond = second_close > broken_level if side == "BUY" else second_close < broken_level
+        if not (same_direction and stays_beyond):
+            rejection = rejection or _wait(normalized, "WAIT_V3B_PAPER_SECOND_5M", {
                 "side": side,
                 "second_5m_same_direction": bool(same_direction),
                 "second_5m_stays_beyond_bos_level": bool(stays_beyond),
-            },
-        )
+                "bos_body_ratio": body_ratio,
+                "minimum_bos_body_ratio": float(strategy.MIN_BOS_BODY_RATIO),
+                "source_indicator_event_id": event.get("event_id"),
+            })
+            continue
+        selected = (bos_open, second_open, lag_candles, event, side, body_ratio, second_close, broken_level)
+        break
+    if selected is None:
+        return rejection or _wait(normalized, "WAIT_V3B_PAPER_5M_BOS")
+    bos_open, second_open, lag_candles, event, side, body_ratio, second_close, broken_level = selected
+    logger.info("V3B_CANDIDATE_SELECTED %s", {
+        "symbol": normalized,
+        "event_id": event.get("event_id"),
+        "bos_candle": bos_open.isoformat(),
+        "confirmation_candle": second_open.isoformat(),
+        "recovery_lag_candles": lag_candles,
+    })
+
+    # A recovered pair can prove that a historical V3B setup existed, but it is
+    # no longer executable at the old confirmation close. Fail closed rather
+    # than fabricating a retroactive PAPER fill or LIVE broker entry.
+    if lag_candles > 0:
+        recovery_details = {
+            "source_indicator_event_id": event.get("event_id"),
+            "historically_valid_setup": True,
+            "side": side,
+            "bos_candle_time": bos_open.isoformat(),
+            "confirmation_candle_time": second_open.isoformat(),
+            "confirmation_close_time": (second_open + pd.Timedelta(minutes=5)).isoformat(),
+            "historical_confirmation_close": second_close,
+            "broken_level": broken_level,
+            "bos_body_ratio": body_ratio,
+            "minimum_bos_body_ratio": float(strategy.MIN_BOS_BODY_RATIO),
+            "second_5m_same_direction": True,
+            "second_5m_stays_beyond_bos_level": True,
+            "recovery_lag_candles": lag_candles,
+        }
+        logger.warning("V3B_RECOVERY_ENTRY_EXPIRED %s", {
+            "symbol": normalized,
+            **recovery_details,
+        })
+        return _wait(normalized, "WAIT_V3B_RECOVERY_ENTRY_EXPIRED", recovery_details)
 
     levels = strategy._fixed_levels(
         side,
@@ -290,6 +399,7 @@ def build_paper_v3b_candidate(
             "minimum_bos_body_ratio": float(strategy.MIN_BOS_BODY_RATIO),
             "second_5m_same_direction": True,
             "second_5m_stays_beyond_bos_level": True,
+            "recovery_lag_candles": lag_candles,
             "entry_at": "second_5m_close",
             "target_rr": float(strategy.TARGET_RR),
             "protection_trigger_tp2_fraction": float(strategy.PROTECTION_TRIGGER_TP2_FRACTION),

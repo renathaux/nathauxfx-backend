@@ -59,6 +59,7 @@ def build_live_v3b_candidate(
     strict_trader_module,
     setup_id_builder,
     authoritative_reader=None,
+    authoritative_updater=None,
     final_gate=None,
     enabled=None,
 ):
@@ -82,6 +83,8 @@ def build_live_v3b_candidate(
     }
     if authoritative_reader is not None:
         kwargs["authoritative_reader"] = authoritative_reader
+    if authoritative_updater is not None:
+        kwargs["authoritative_updater"] = authoritative_updater
 
     candidate = build_paper_v3b_candidate(symbol, data_5m, **kwargs)
     if not isinstance(candidate, dict) or not candidate.get("paper_entry_ready"):

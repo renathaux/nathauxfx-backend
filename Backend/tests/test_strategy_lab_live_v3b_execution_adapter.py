@@ -11,6 +11,7 @@ from services.live_v3b_execution_adapter import (
     v3b_broker_handoff_enabled,
 )
 from services.live_v3b_service import LIVE_V3B_MODEL
+from services.v3b_strategy_settings_sync import install_v3b_strategy_settings_sync
 
 
 def _candidate(symbol="EURUSD", side="BUY"):
@@ -140,6 +141,7 @@ def test_frozen_payload_carries_exact_v3b_management_contract():
 
 
 def test_frozen_contract_mismatch_fails_closed_before_executor():
+    install_v3b_strategy_settings_sync()
     candidate = _candidate()
     candidate["protected_stop_tp2_fraction"] = 0.50
     called = False
@@ -161,6 +163,33 @@ def test_frozen_contract_mismatch_fails_closed_before_executor():
 
     assert result["ok"] is False
     assert result["reason"] == "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT"
+    assert called is False
+
+
+def test_stamped_strategy_config_mismatch_fails_closed_before_executor():
+    install_v3b_strategy_settings_sync()
+    candidate = _candidate()
+    candidate["strategy_config_profile"] = "stale-profile"
+    called = False
+
+    def executor(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    result = dispatch_v3b_to_live_core(
+        candidate,
+        executor=executor,
+        strategy_enabled=True,
+        broker_handoff_enabled=True,
+        live_auto_enabled=True,
+        execution_profile_supported=True,
+        authoritative_live_state_loader=_live_on_loader,
+    )
+
+    assert result["ok"] is False
+    assert result["submitted"] is False
+    assert result["reason"] == "WAIT_V3B_STRATEGY_CONFIG_STALE"
     assert called is False
 
 
