@@ -41,9 +41,17 @@ activation watermark and cannot become strategy candidates.
 Identical duplicate candles are idempotent. A previously missing late candle
 is inserted and replayed. If it changes any immutable accepted event, the
 stream enters `RECONCILIATION_REQUIRED`. Conflicting OHLC for an already stored
-closed candle also enters reconciliation. Short missing intervals block
-watermark advancement; known venue and weekend closures are not inferred as
-missing candles.
+closed candle also enters reconciliation by default. The sole controlled
+exception is an authoritative cTrader correction on the active account-scoped
+EURUSD/XAUUSD 5m V3B stream. Under the existing per-stream transaction lock,
+that stream may delete and replay only the suffix beginning at the corrected
+candle after proving that every affected lifecycle is still safely mutable and
+that no affected event has a submission claim. Any consumed/in-flight/unknown
+lifecycle or submission attempt leaves the stream blocked without rewriting
+history. Legacy/global streams and all other timeframes retain the original
+immutable fail-closed behavior. Short missing intervals block watermark
+advancement; known venue and weekend closures are not inferred as missing
+candles.
 
 ## Retention/checkpoint policy
 

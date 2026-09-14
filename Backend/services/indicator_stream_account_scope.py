@@ -151,6 +151,12 @@ def account_scoped_get_authoritative_structure(
         # cTrader creates trendbars only when ticks exist. Account-scoped streams
         # must therefore permit sparse broker bars but never synthesize OHLC.
         "allow_sparse_trendbars": True,
+        # This wrapper resolves the active cTrader account. Keep the controlled
+        # correction exception on its V3B 5m storage key only.
+        "allow_authoritative_correction_repair": (
+            public in {"EURUSD", "XAUUSD"}
+            and stream._normal_timeframe(timeframe) == "5m"
+        ),
     }
     try:
         result = original(frame, storage, timeframe, point_size, **kwargs)
