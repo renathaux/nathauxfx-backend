@@ -30,7 +30,7 @@ jobs:
 
       - name: Run Phase 1.2 focused safety suite
         run: |
-          python -m pytest -q --junitxml=pytest-results.xml \
+          python -m pytest -q \
             tests/test_phase12_ctrader_rollover_gap.py \
             tests/test_indicator_event_stream.py \
             tests/test_indicator_stream_account_scope.py \
@@ -40,11 +40,3 @@ jobs:
             tests/test_xauusd_risk_guard.py \
             tests/test_neon_observer_optimization.py \
             tests/test_v3b_strategy_settings_sync.py
-
-      - name: Upload focused test report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: phase12-pytest-report
-          path: Backend/pytest-results.xml
-          if-no-files-found: ignore
