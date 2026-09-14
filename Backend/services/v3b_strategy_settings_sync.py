@@ -241,8 +241,16 @@ def _install_live_adapter(profile):
                 _matches(stamped.get(key), values[key]) for key in active_config.FIELD_DEFINITIONS
             )
         if not all(declared_checks.values()):
+            config_stale = any(
+                declared_checks.get(name) is False
+                for name in ("strategy_profile", "strategy_config_current")
+            )
             return adapter._blocked(
-                "WAIT_V3B_STRATEGY_CONFIG_STALE",
+                (
+                    "WAIT_V3B_STRATEGY_CONFIG_STALE"
+                    if config_stale
+                    else "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT"
+                ),
                 details={
                     "declared_checks": declared_checks,
                     "active_profile": active_config.ACTIVE_STRATEGY_PROFILE,
