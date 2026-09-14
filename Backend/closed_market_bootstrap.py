@@ -9,8 +9,18 @@ from __future__ import annotations
 
 import math
 
-import api
+from services.monthly_history_window import (
+    guarded_import_api,
+    install_monthly_history_window,
+)
+
+# Import api through a read-only compatibility guard so the legacy import-time
+# weekly LIVE reset cannot prune history before the monthly window is installed.
+api = guarded_import_api()
 import app_bootstrap  # noqa: F401 - installs the production bootstrap hooks
+from strategies import shared as paper_shared
+
+install_monthly_history_window(api, paper_shared)
 
 _ORIGINAL_PANEL_CACHE_VALIDITY = api._panel_cache_validity
 
