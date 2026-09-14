@@ -133,13 +133,18 @@ def validate_frozen_management_contract(payload):
         raw_tp2 = entry + sign * V3B_TARGET_RR * risk
         raw_trigger = entry + (raw_tp2 - entry) * V3B_PROTECTION_TRIGGER_FRACTION
         raw_protected = entry + (raw_tp2 - entry) * V3B_PROTECTED_STOP_FRACTION
+        declared_target_rr = (
+            payload.get("risk_reward_ratio")
+            if payload.get("risk_reward_ratio") is not None
+            else payload.get("v3b_frozen_target_rr")
+        )
 
         checks = {
             "profile": is_v3b_execution_profile(payload),
             "supported_symbol_precision": digits is not None,
             "directional_levels": directional,
             "declared_target_rr": _same_declared_ratio(
-                payload.get("risk_reward_ratio"), V3B_TARGET_RR
+                declared_target_rr, V3B_TARGET_RR
             ),
             "declared_trigger_fraction": _same_declared_ratio(
                 payload.get("protection_trigger_tp2_fraction"),
