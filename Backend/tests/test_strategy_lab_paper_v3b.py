@@ -197,3 +197,149 @@ def test_bridge_final_gate_can_fail_closed_without_opening_any_trade():
     assert result["signal"] == "WAIT"
     assert result["paper_entry_ready"] is False
     assert result["paper_entry_reason"] == "WAIT_TEST_BLOCK"
+
+
+def _historical_sell_case(event_time, bos, second, broken_level, invalidation=1.15955):
+    index = pd.to_datetime([event_time, pd.Timestamp(event_time) + pd.Timedelta(minutes=5)])
+    frame = pd.DataFrame(
+        {
+            "Open": [bos[0], second[0]],
+            "High": [bos[1], second[1]],
+            "Low": [bos[2], second[2]],
+            "Close": [bos[3], second[3]],
+        },
+        index=index,
+    )
+    event = {
+        "event_id": "smc1_" + pd.Timestamp(event_time).strftime("%H%M"),
+        "symbol": "EURUSD",
+        "timeframe": "5m",
+        "timestamp": index[0].isoformat(),
+        "event_type": "BOS",
+        "direction": "BEARISH",
+        "broken_level": broken_level,
+        "broken_swing_timestamp": (index[0] - pd.Timedelta(minutes=20)).isoformat(),
+        "event_invalidation_swing": {"type": "HIGH", "price": invalidation},
+        "event_identity": {"fixture": pd.Timestamp(event_time).isoformat()},
+        "tradable": True,
+    }
+    return frame, event
+
+
+@pytest.mark.parametrize(
+    "event_time,bos,second,broken_level,expected",
+    [
+        (
+            "2026-09-14T00:25:00Z",
+            (1.15893, 1.15896, 1.15852, 1.15857),
+            (1.15858, 1.15879, 1.15854, 1.15862),
+            1.15886,
+            "WAIT_V3B_PAPER_SECOND_5M",
+        ),
+        (
+            "2026-09-14T01:05:00Z",
+            (1.15858, 1.15865, 1.15838, 1.15845),
+            (1.15843, 1.15853, 1.15837, 1.15840),
+            1.15851,
+            "WAIT_V3B_PAPER_BOS_BODY",
+        ),
+        (
+            "2026-09-14T04:05:00Z",
+            (1.15702, 1.15704, 1.15669, 1.15679),
+            (1.15678, 1.15687, 1.15678, 1.15680),
+            1.15690,
+            "WAIT_V3B_PAPER_SECOND_5M",
+        ),
+    ],
+)
+def test_verified_sep14_rejections_keep_their_exact_v3b_reason(
+    event_time, bos, second, broken_level, expected
+):
+    frame, event = _historical_sell_case(event_time, bos, second, broken_level)
+    result = build_paper_v3b_candidate(
+        "EURUSD", frame, strict_trader_module=_Strict,
+        authoritative_reader=_authority(event),
+    )
+    assert result["paper_entry_ready"] is False
+    assert result["paper_entry_reason"] == expected
+
+
+def test_verified_sep14_0250_bos_and_0255_confirmation_are_selected():
+    frame, event = _historical_sell_case(
+        "2026-09-14T02:50:00Z",
+        (1.15851, 1.15853, 1.15832, 1.15833),
+        (1.15832, 1.15837, 1.15811, 1.15816),
+        1.15835,
+        invalidation=1.15879,
+    )
+    result = build_paper_v3b_candidate(
+        "EURUSD", frame, strict_trader_module=_Strict,
+        authoritative_reader=_authority(event),
+    )
+    assert result["paper_entry_ready"] is True
+    assert result["signal"] == "SELL"
+    assert result["five_m_break_time"] == "2026-09-14T02:50:00+00:00"
+    assert result["five_m_closed_candle_time"] == "2026-09-14T03:00:00+00:00"
+    assert result["paper_entry_details"]["bos_body_ratio"] == pytest.approx(6 / 7)
+
+
+def test_stale_authority_is_blocked_with_freshness_diagnostics():
+    frame, event = _historical_sell_case(
+        "2026-09-14T02:50:00Z",
+        (1.15851, 1.15853, 1.15832, 1.15833),
+        (1.15832, 1.15837, 1.15811, 1.15816),
+        1.15835,
+    )
+
+    def stale_updater(*args, **kwargs):
+        assert kwargs.get("analyzer") is not None
+        return {
+            "events": [event],
+            "stream_status": "READY",
+            "stream_last_candle": "2026-09-13T21:40:00Z",
+        }
+
+    result = build_paper_v3b_candidate(
+        "EURUSD", frame, strict_trader_module=_Strict,
+        authoritative_updater=stale_updater,
+    )
+    assert result["paper_entry_reason"] == "WAIT_V3B_5M_AUTHORITY_STALE"
+    assert result["paper_entry_details"]["latest_source_closed_candle"] == "2026-09-14T02:55:00+00:00"
+    assert result["paper_entry_details"]["latest_durable_candle"] == "2026-09-13T21:40:00+00:00"
+    assert result["paper_entry_details"]["lag_candles"] > 0
+
+
+def test_recent_scan_recovers_one_missed_cycle_but_never_an_old_bos():
+    frame, event = _historical_sell_case(
+        "2026-09-14T02:50:00Z",
+        (1.15851, 1.15853, 1.15832, 1.15833),
+        (1.15832, 1.15837, 1.15811, 1.15816),
+        1.15835,
+    )
+    one_late = pd.concat([
+        frame,
+        pd.DataFrame(
+            {"Open": [1.15816], "High": [1.15822], "Low": [1.15810], "Close": [1.15818]},
+            index=pd.to_datetime(["2026-09-14T03:00:00Z"]),
+        ),
+    ])
+    recovered = build_paper_v3b_candidate(
+        "EURUSD", one_late, strict_trader_module=_Strict,
+        authoritative_reader=_authority(event),
+    )
+    assert recovered["paper_entry_ready"] is True
+    assert recovered["paper_entry_details"]["recovery_lag_candles"] == 1
+
+    too_late = pd.concat([
+        one_late,
+        pd.DataFrame(
+            {"Open": [1.15818], "High": [1.15825], "Low": [1.15812], "Close": [1.15820]},
+            index=pd.to_datetime(["2026-09-14T03:05:00Z"]),
+        ),
+    ])
+    expired = build_paper_v3b_candidate(
+        "EURUSD", too_late, strict_trader_module=_Strict,
+        authoritative_reader=_authority(event),
+    )
+    assert expired["paper_entry_ready"] is False
+    assert expired["paper_entry_reason"] == "WAIT_V3B_PAPER_5M_BOS"
