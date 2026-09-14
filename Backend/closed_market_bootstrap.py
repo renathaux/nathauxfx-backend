@@ -9,11 +9,17 @@ from __future__ import annotations
 
 import math
 
+from services.indicator_stream_account_scope import install_account_scoped_indicator_stream
 from services.monthly_history_window import (
     guarded_import_api,
     install_monthly_history_window,
     trade_is_current_month,
 )
+
+# Install the account/feed stream namespace before api.py imports strategy
+# modules that bind indicator stream functions. This keeps cTrader account
+# switches from sharing one immutable candle history.
+install_account_scoped_indicator_stream()
 
 # Import api through a read-only compatibility guard so the legacy import-time
 # weekly LIVE reset cannot prune history before the monthly window is installed.
