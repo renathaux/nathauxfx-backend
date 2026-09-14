@@ -12,6 +12,7 @@ import math
 from services.monthly_history_window import (
     guarded_import_api,
     install_monthly_history_window,
+    trade_is_current_month,
 )
 
 # Import api through a read-only compatibility guard so the legacy import-time
@@ -21,6 +22,33 @@ import app_bootstrap  # noqa: F401 - installs the production bootstrap hooks
 from strategies import shared as paper_shared
 
 install_monthly_history_window(api, paper_shared)
+
+# The legacy panel fallback still filtered local LIVE history to the current
+# week. Keep broker history/month fallback aligned to the calendar-month window.
+def _get_live_recent_history_for_panel_monthly():
+    api.run_weekly_live_reset()
+    broker_history = api.get_live_broker_closed_history()
+    if broker_history:
+        return broker_history[: api.MAX_LIVE_TRADE_HISTORY]
+
+    active_ids = {
+        str(api.get_live_trade_match_key(trade))
+        for trade in api.LIVE_ACTIVE_ORDERS.values()
+        if trade and api.get_live_trade_match_key(trade)
+    }
+    cleaned = []
+    for trade in api.LIVE_TRADE_HISTORY:
+        if str(api.get_live_trade_match_key(trade)) in active_ids:
+            continue
+        if not api.is_usable_local_live_history_trade(trade):
+            continue
+        if not trade_is_current_month(trade, api.get_live_month_start_ts()):
+            continue
+        cleaned.append(trade)
+    return cleaned[: api.MAX_LIVE_TRADE_HISTORY]
+
+
+api.get_live_recent_history_for_panel = _get_live_recent_history_for_panel_monthly
 
 _ORIGINAL_PANEL_CACHE_VALIDITY = api._panel_cache_validity
 
