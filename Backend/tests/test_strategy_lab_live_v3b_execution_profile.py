@@ -60,6 +60,31 @@ def candidate():
     }
 
 
+def rounded_contract_payload(symbol, entry, sl, tp1, tp2, protected):
+    side = "BUY" if tp2 > entry else "SELL"
+    return {
+        "symbol": symbol,
+        "side": side,
+        "action": side,
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "protection_trigger_price": tp1,
+        "tp2": tp2,
+        "protected_sl_price": protected,
+        "risk_reward": "1:1.9",
+        "risk_reward_ratio": 1.90,
+        "protection_trigger_tp2_fraction": 0.70,
+        "protected_stop_tp2_fraction": 0.60,
+        "no_partial_close_at_protection_trigger": True,
+        "strategy_execution_profile": V3B_EXECUTION_PROFILE,
+        "setup_identity": {
+            "strategy_execution_profile": V3B_EXECUTION_PROFILE,
+            "setup_timeframe": "5m",
+        },
+    }
+
+
 class FrozenV3BProfileTests(unittest.TestCase):
     def test_broker_payload_is_explicitly_stamped_and_frozen(self):
         result = build_v3b_broker_core_payload(candidate())
@@ -74,6 +99,66 @@ class FrozenV3BProfileTests(unittest.TestCase):
         self.assertEqual(payload["protected_sl_price"], 1.1114)
         self.assertTrue(payload["no_partial_close_at_protection_trigger"])
         self.assertTrue(validate_frozen_management_contract(payload)["ok"])
+
+    def test_real_eurusd_rounded_levels_pass_frozen_contract(self):
+        payload = rounded_contract_payload(
+            "EURUSD",
+            entry=1.15482,
+            sl=1.15628,
+            tp1=1.15288,
+            tp2=1.15205,
+            protected=1.15316,
+        )
+        result = validate_frozen_management_contract(payload)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            result["details"]["expected_rounded_levels"]["tp2"],
+            1.15205,
+        )
+
+    def test_real_xauusd_rounded_levels_pass_frozen_contract(self):
+        payload = rounded_contract_payload(
+            "XAUUSD",
+            entry=4305.99,
+            sl=4318.57,
+            tp1=4289.26,
+            tp2=4282.09,
+            protected=4291.65,
+        )
+        result = validate_frozen_management_contract(payload)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            result["details"]["expected_rounded_levels"]["tp2"],
+            4282.09,
+        )
+
+    def test_rounded_contract_still_rejects_real_geometry_drift(self):
+        payload = rounded_contract_payload(
+            "EURUSD",
+            entry=1.15482,
+            sl=1.15628,
+            tp1=1.15288,
+            tp2=1.15205,
+            protected=1.15316,
+        )
+        payload["tp2"] = 1.15180
+        result = validate_frozen_management_contract(payload)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["details"]["checks"]["tp2_rounded_geometry"])
+
+    def test_rounded_contract_rejects_declared_strategy_drift(self):
+        payload = rounded_contract_payload(
+            "XAUUSD",
+            entry=4305.99,
+            sl=4318.57,
+            tp1=4289.26,
+            tp2=4282.09,
+            protected=4291.65,
+        )
+        payload["risk_reward_ratio"] = 2.0
+        result = validate_frozen_management_contract(payload)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["details"]["checks"]["declared_target_rr"])
 
     def test_all_legacy_switches_still_cannot_reach_unaware_executor(self):
         executor = Mock(return_value={"ok": True})
