@@ -5,7 +5,7 @@ import io
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 MARKET_TIMEZONE = ZoneInfo("America/New_York")
@@ -46,8 +46,15 @@ def _timestamp_from_trade(trade):
             ts = float(value)
             return ts / 1000 if ts > 10_000_000_000 else ts
         except (TypeError, ValueError):
+            text = str(value).strip()
             try:
-                dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                return dt.timestamp()
+            except Exception:
+                pass
+            # PAPER V1 stores opened_at/closed_at in this legacy form.
+            try:
+                dt = datetime.strptime(text, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
                 return dt.timestamp()
             except Exception:
                 continue
