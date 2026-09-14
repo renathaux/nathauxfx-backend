@@ -92,9 +92,9 @@ def _confirmation_identity(symbol, event_id, side, candle_open, candle_close, br
 def _recent_bos_pairs(events, frame):
     """Return newest-first BOS/next-candle pairs with at most one-cycle recovery.
 
-    The recovery allowance is deliberately one closed 5m candle.  It lets a
-    restart or delayed evaluation recover the immediately completed pair, but
-    it cannot turn an old BOS into a late entry.
+    Recovery exists only so a missed evaluation can still be diagnosed. A pair
+    that is already one closed candle old is never allowed to become a live or
+    PAPER execution candidate at its historical confirmation price.
     """
     latest_open = _utc(frame.index[-1])
     rows = []
@@ -125,7 +125,7 @@ def _freshness_details(symbol, latest_source, authority, *, error=None):
     except Exception:
         latest_durable = None
     lag_minutes = (
-        max(0.0, float((latest_source - latest_durable) / pd.Timedelta(minutes=1)))
+        float((latest_source - latest_durable) / pd.Timedelta(minutes=1))
         if latest_durable is not None
         else None
     )
@@ -134,7 +134,7 @@ def _freshness_details(symbol, latest_source, authority, *, error=None):
         "latest_source_closed_candle": latest_source.isoformat(),
         "latest_durable_candle": latest_durable.isoformat() if latest_durable is not None else None,
         "lag_minutes": lag_minutes,
-        "lag_candles": (int(lag_minutes // 5) if lag_minutes is not None else None),
+        "lag_candles": (int(lag_minutes / 5) if lag_minutes is not None else None),
         "authority_status": (authority or {}).get("stream_status"),
         "error": str(error) if error else None,
     }
@@ -153,7 +153,7 @@ def build_paper_v3b_candidate(
     """Build one V3B PAPER candidate without opening a trade.
 
     Production calls refresh the durable event stream with closed candles before
-    reading it.  Injected readers remain observation-only for unit tests.
+    reading it. Injected readers remain observation-only for unit tests.
     ``lifecycle_updater`` defaults to ``None`` so candidate evaluation never
     mutates PAPER/LIVE lifecycle state.
     """
@@ -211,11 +211,13 @@ def build_paper_v3b_candidate(
     # keep their existing observation-only contract.
     if authoritative_reader is None or (authority or {}).get("stream_last_candle") is not None:
         freshness = _freshness_details(normalized, latest_source, authority)
-        if (
-            freshness["latest_durable_candle"] is None
-            or freshness["lag_minutes"] != 0.0
-            or freshness["authority_status"] != "READY"
-        ):
+        if freshness["latest_durable_candle"] is None or freshness["authority_status"] != "READY":
+            logger.warning("V3B_5M_AUTHORITY_STALE %s", freshness)
+            return _wait(normalized, "WAIT_V3B_5M_AUTHORITY_STALE", freshness)
+        if freshness["lag_minutes"] < 0.0:
+            logger.warning("V3B_5M_AUTHORITY_DESYNC %s", freshness)
+            return _wait(normalized, "WAIT_V3B_5M_AUTHORITY_DESYNC", freshness)
+        if freshness["lag_minutes"] > 0.0:
             logger.warning("V3B_5M_AUTHORITY_STALE %s", freshness)
             return _wait(normalized, "WAIT_V3B_5M_AUTHORITY_STALE", freshness)
 
@@ -273,6 +275,31 @@ def build_paper_v3b_candidate(
         "confirmation_candle": second_open.isoformat(),
         "recovery_lag_candles": lag_candles,
     })
+
+    # A recovered pair can prove that a historical V3B setup existed, but it is
+    # no longer executable at the old confirmation close. Fail closed rather
+    # than fabricating a retroactive PAPER fill or LIVE broker entry.
+    if lag_candles > 0:
+        recovery_details = {
+            "source_indicator_event_id": event.get("event_id"),
+            "historically_valid_setup": True,
+            "side": side,
+            "bos_candle_time": bos_open.isoformat(),
+            "confirmation_candle_time": second_open.isoformat(),
+            "confirmation_close_time": (second_open + pd.Timedelta(minutes=5)).isoformat(),
+            "historical_confirmation_close": second_close,
+            "broken_level": broken_level,
+            "bos_body_ratio": body_ratio,
+            "minimum_bos_body_ratio": float(strategy.MIN_BOS_BODY_RATIO),
+            "second_5m_same_direction": True,
+            "second_5m_stays_beyond_bos_level": True,
+            "recovery_lag_candles": lag_candles,
+        }
+        logger.warning("V3B_RECOVERY_ENTRY_EXPIRED %s", {
+            "symbol": normalized,
+            **recovery_details,
+        })
+        return _wait(normalized, "WAIT_V3B_RECOVERY_ENTRY_EXPIRED", recovery_details)
 
     levels = strategy._fixed_levels(
         side,
