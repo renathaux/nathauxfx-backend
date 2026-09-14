@@ -72,8 +72,8 @@ def test_different_ctrader_accounts_get_isolated_streams_for_same_symbol():
     Session, engine = _session_factory()
     install_account_scoped_indicator_stream()
     try:
-        scope_a = "CTRADER:DEMO:account-a"
-        scope_b = "CTRADER:DEMO:account-b"
+        scope_a = "CTRADER:DEMO:ACCOUNT-A"
+        scope_b = "CTRADER:DEMO:ACCOUNT-B"
         base = _frame()
 
         first = stream.get_authoritative_structure(
@@ -144,7 +144,7 @@ def test_same_account_still_fails_closed_on_a_historical_candle_correction():
     Session, engine = _session_factory()
     install_account_scoped_indicator_stream()
     try:
-        scope = "CTRADER:DEMO:account-a"
+        scope = "CTRADER:DEMO:ACCOUNT-A"
         stream.get_authoritative_structure(
             _frame(),
             "XAUUSD",
