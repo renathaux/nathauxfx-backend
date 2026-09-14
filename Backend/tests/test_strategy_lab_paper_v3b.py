@@ -309,7 +309,33 @@ def test_stale_authority_is_blocked_with_freshness_diagnostics():
     assert result["paper_entry_details"]["lag_candles"] > 0
 
 
-def test_recent_scan_recovers_one_missed_cycle_but_never_an_old_bos():
+def test_future_authority_is_blocked_as_desync_with_signed_lag():
+    frame, event = _historical_sell_case(
+        "2026-09-14T02:50:00Z",
+        (1.15851, 1.15853, 1.15832, 1.15833),
+        (1.15832, 1.15837, 1.15811, 1.15816),
+        1.15835,
+    )
+
+    def future_updater(*args, **kwargs):
+        assert kwargs.get("analyzer") is not None
+        return {
+            "events": [event],
+            "stream_status": "READY",
+            "stream_last_candle": "2026-09-14T03:00:00Z",
+        }
+
+    result = build_paper_v3b_candidate(
+        "EURUSD", frame, strict_trader_module=_Strict,
+        authoritative_updater=future_updater,
+    )
+    assert result["paper_entry_ready"] is False
+    assert result["paper_entry_reason"] == "WAIT_V3B_5M_AUTHORITY_DESYNC"
+    assert result["paper_entry_details"]["lag_minutes"] == pytest.approx(-5.0)
+    assert result["paper_entry_details"]["lag_candles"] == -1
+
+
+def test_recent_scan_recovers_one_missed_cycle_for_audit_but_never_executes_late():
     frame, event = _historical_sell_case(
         "2026-09-14T02:50:00Z",
         (1.15851, 1.15853, 1.15832, 1.15833),
@@ -327,8 +353,13 @@ def test_recent_scan_recovers_one_missed_cycle_but_never_an_old_bos():
         "EURUSD", one_late, strict_trader_module=_Strict,
         authoritative_reader=_authority(event),
     )
-    assert recovered["paper_entry_ready"] is True
+    assert recovered["paper_entry_ready"] is False
+    assert recovered["signal"] == "WAIT"
+    assert recovered["paper_entry_reason"] == "WAIT_V3B_RECOVERY_ENTRY_EXPIRED"
+    assert recovered["paper_entry_details"]["historically_valid_setup"] is True
     assert recovered["paper_entry_details"]["recovery_lag_candles"] == 1
+    assert recovered["paper_entry_details"]["historical_confirmation_close"] == pytest.approx(1.15816)
+    assert "entry_price" not in recovered
 
     too_late = pd.concat([
         one_late,
