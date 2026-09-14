@@ -15,6 +15,7 @@ from services.monthly_history_window import (
     install_monthly_history_window,
     trade_is_current_month,
 )
+from services.v3b_dashboard_state import install_v3b_dashboard_state_middleware
 
 # Install the account/feed stream namespace before api.py imports strategy
 # modules that bind indicator stream functions. This keeps cTrader account
@@ -117,5 +118,10 @@ api._panel_cache_validity = _panel_cache_validity_with_closed_market_fallback
 # partially-open sessions are evaluated per symbol instead of globally. This
 # lets EURUSD refresh normally while XAUUSD is still waiting for its own feed.
 import production_panel_compat  # noqa: E402,F401
+
+# The execution engine already owns the authoritative per-symbol V3B runtime
+# status. Expose that status on dashboard JSON responses so the V3B UI does not
+# fall back to the legacy 15m block reason. This middleware is display-only.
+install_v3b_dashboard_state_middleware(api.app, api)
 
 app = api.app
