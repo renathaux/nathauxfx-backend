@@ -1,10 +1,10 @@
 """V3B frozen Strategy Lab research candidate for EURUSD.
 
 Exact rules frozen from the current EURUSD research pass:
-- 5m BOS only; no 15m dependency.
-- BOS candle body >= 50% of its full range.
-- The immediately following 5m candle must close in the BOS direction and
-  remain beyond the broken BOS level; enter at that candle close.
+- 5m BOS or CHOCH; no 15m dependency.
+- Structure-break candle body >= 50% of its full range.
+- The immediately following 5m candle must close in the break direction and
+  remain beyond the broken structure level; enter at that candle close.
 - Event-owned 5m invalidation swing with a fixed 50-point EURUSD buffer.
 - Minimum stop distance 100 EURUSD points.
 - Fixed TP2 = 1.90R.
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from indicators.smc import analyze_structure
 from . import v3_m5_two_close as base
 from .v3a_m5_bos_body_50 import _bos_body_ratio
 
@@ -33,8 +34,33 @@ TARGET_RR = 1.90
 PROTECTION_TRIGGER_TP2_FRACTION = 0.70
 PROTECTED_STOP_TP2_FRACTION = 0.60
 
-candidates = base.candidates
 _second_candle = base._second_candle
+
+
+def candidates(frame15, frame5, start, end, settings):
+    del frame15, settings
+    analysis = analyze_structure(
+        frame5.loc[frame5.index <= end],
+        timeframe="5m",
+        point_size=base.calc.POINT_SIZE,
+    )
+    for event in analysis.get("events", []):
+        event_type = str(event.get("event_type", "")).upper()
+        if event_type not in {"BOS", "CHOCH"}:
+            continue
+        timestamp = base.calc.utc(event["timestamp"])
+        close_time = timestamp + pd.Timedelta(minutes=5)
+        if close_time < start or close_time > end:
+            continue
+        prefix5 = frame5.loc[frame5.index <= timestamp]
+        side = "BUY" if event["direction"] == "BULLISH" else "SELL"
+        leg = base.calc.event_leg(event)
+        meta = {
+            "qualified": True,
+            "reason": f"five_minute_{event_type.lower()}",
+            "event_close_minutes": base.EVENT_CLOSE_MINUTES,
+        }
+        yield event, timestamp, prefix5, side, leg, True, meta
 
 
 def _fixed_levels(side, entry, invalidation):
@@ -90,6 +116,7 @@ def evaluate_event(
     previous_close=None,
 ):
     del settings
+    event_type = str(event.get("event_type") or "BOS").upper()
     try:
         bos_candle = prefix5.loc[timestamp]
         if hasattr(bos_candle, "iloc") and getattr(bos_candle, "ndim", 1) > 1:
@@ -100,11 +127,11 @@ def evaluate_event(
 
     trace = {
         "event_time": base._iso(timestamp),
-        "event_type": "BOS",
+        "event_type": event_type,
         "direction": event["direction"],
         "structural_leg_points": None if leg is None else leg / base.calc.POINT_SIZE,
         "structure_qualified": True,
-        "structure_qualification": "five_minute_bos",
+        "structure_qualification": f"five_minute_{event_type.lower()}",
         "buffered_m15": None,
         "ema_allowed": None,
         "consolidation_allowed": None,
@@ -170,7 +197,7 @@ def evaluate_event(
     )
     trade = {
         "event_timestamp": base._iso(timestamp),
-        "event_type": "BOS",
+        "event_type": event_type,
         "side": side,
         "broken_level": float(event["broken_level"]),
         "event_structural_leg_size": leg,
@@ -201,7 +228,7 @@ def evaluate_event(
         "protected_stop_tp2_fraction": PROTECTED_STOP_TP2_FRACTION,
         "source_event_identity": base._identity(event),
         "filters_passed": [
-            "5m_bos",
+            f"5m_{event_type.lower()}",
             "5m_bos_body_50",
             "immediate_second_5m_same_direction",
             "second_5m_stays_beyond_bos_level",

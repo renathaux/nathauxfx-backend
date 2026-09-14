@@ -98,7 +98,7 @@ def strategies(request: Request):
                 "experimental": True,
                 "frozen_research_candidate": True,
                 "description": (
-                    "Frozen EURUSD research candidate: pure 5m BOS, BOS body >=50%, "
+                    "Frozen EURUSD research candidate: 5m BOS or CHOCH, break-candle body >=50%, "
                     "immediate next-candle confirmation, fixed 1.90R target, protection "
                     "armed at 70% of target path and stop locked at 60% of target path. "
                     "No 15m logic and no partial close."
