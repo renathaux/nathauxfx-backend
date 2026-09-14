@@ -65,10 +65,50 @@ def stamp_v3b_identity(identity):
     return stamped
 
 
+def _v3b_price_precision(symbol):
+    """Return the frozen strategy's output precision for supported symbols."""
+    normalized = str(symbol or "").upper().replace("/", "")
+    if normalized == "EURUSD":
+        return 5
+    if normalized == "XAUUSD":
+        return 2
+    return None
+
+
+def _same_declared_ratio(value, expected):
+    try:
+        return abs(float(value) - float(expected)) <= 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
+def _same_rounded_price(actual, expected, digits):
+    """Compare levels in the exact price space produced by frozen V3B math."""
+    if digits is None:
+        return False
+    try:
+        quantum = 10.0 ** (-int(digits))
+        return abs(float(actual) - round(float(expected), int(digits))) <= quantum / 2.0 + 1e-12
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def validate_frozen_management_contract(payload):
-    """Fail closed if the broker payload drifts from the frozen V3B geometry."""
+    """Fail closed if the broker payload drifts from the frozen V3B geometry.
+
+    Frozen V3B computes TP2/protection from 1.90R and then rounds the executable
+    prices to the strategy's symbol precision (5 dp EURUSD, 2 dp XAUUSD).  The
+    previous guard recomputed ratios from those already-rounded prices and
+    demanded equality to 1e-6, which incorrectly rejected valid setups solely
+    because normal price rounding changes the recomputed ratio slightly.
+
+    Validate the declared frozen constants exactly, then validate the actual
+    executable levels against the levels produced by the same frozen math after
+    symbol-price rounding.  This remains fail-closed for real geometry drift.
+    """
     payload = payload if isinstance(payload, dict) else {}
     checks = {}
+    details = {}
     try:
         entry = float(payload.get("entry"))
         sl = float(payload.get("sl"))
@@ -80,40 +120,71 @@ def validate_frozen_management_contract(payload):
         tp2 = float(payload.get("tp2"))
         protected = float(payload.get("protected_sl_price"))
         side = str(payload.get("side") or payload.get("action") or "").upper()
+        symbol = str(payload.get("symbol") or "").upper().replace("/", "")
+        digits = _v3b_price_precision(symbol)
         risk = abs(entry - sl)
-        reward = abs(tp2 - entry)
-        trigger_path = abs(trigger - entry)
-        protected_path = abs(protected - entry)
         directional = (
             side == "BUY" and sl < entry < protected <= trigger < tp2
         ) or (
             side == "SELL" and sl > entry > protected >= trigger > tp2
         )
+
+        sign = 1.0 if side == "BUY" else -1.0 if side == "SELL" else 0.0
+        raw_tp2 = entry + sign * V3B_TARGET_RR * risk
+        raw_trigger = entry + (raw_tp2 - entry) * V3B_PROTECTION_TRIGGER_FRACTION
+        raw_protected = entry + (raw_tp2 - entry) * V3B_PROTECTED_STOP_FRACTION
+
         checks = {
             "profile": is_v3b_execution_profile(payload),
+            "supported_symbol_precision": digits is not None,
             "directional_levels": directional,
-            "target_rr": risk > 0 and abs((reward / risk) - V3B_TARGET_RR) <= 1e-6,
-            "trigger_fraction": reward > 0 and abs(
-                (trigger_path / reward) - V3B_PROTECTION_TRIGGER_FRACTION
-            ) <= 1e-6,
-            "protected_fraction": reward > 0 and abs(
-                (protected_path / reward) - V3B_PROTECTED_STOP_FRACTION
-            ) <= 1e-6,
+            "declared_target_rr": _same_declared_ratio(
+                payload.get("risk_reward_ratio"), V3B_TARGET_RR
+            ),
+            "declared_trigger_fraction": _same_declared_ratio(
+                payload.get("protection_trigger_tp2_fraction"),
+                V3B_PROTECTION_TRIGGER_FRACTION,
+            ),
+            "declared_protected_fraction": _same_declared_ratio(
+                payload.get("protected_stop_tp2_fraction"),
+                V3B_PROTECTED_STOP_FRACTION,
+            ),
+            "tp2_rounded_geometry": risk > 0
+            and _same_rounded_price(tp2, raw_tp2, digits),
+            "trigger_rounded_geometry": risk > 0
+            and _same_rounded_price(trigger, raw_trigger, digits),
+            "protected_rounded_geometry": risk > 0
+            and _same_rounded_price(protected, raw_protected, digits),
             "no_partial_close": payload.get(
                 "no_partial_close_at_protection_trigger"
             ) is True,
         }
-    except (TypeError, ValueError, ZeroDivisionError):
+        details = {
+            "symbol": symbol,
+            "price_digits": digits,
+            "expected_rounded_levels": {
+                "tp2": None if digits is None else round(raw_tp2, digits),
+                "protection_trigger_price": None
+                if digits is None
+                else round(raw_trigger, digits),
+                "protected_sl_price": None
+                if digits is None
+                else round(raw_protected, digits),
+            },
+            "actual_levels": {
+                "tp2": tp2,
+                "protection_trigger_price": trigger,
+                "protected_sl_price": protected,
+            },
+        }
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
         checks = {"numeric_levels": False}
 
+    ok = bool(checks) and all(checks.values())
     return {
-        "ok": bool(checks) and all(checks.values()),
-        "reason": (
-            None
-            if checks and all(checks.values())
-            else "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT"
-        ),
-        "details": {"checks": checks},
+        "ok": ok,
+        "reason": None if ok else "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT",
+        "details": {"checks": checks, **details},
     }
 
 
