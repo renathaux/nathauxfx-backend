@@ -1,14 +1,14 @@
 """Controlled PAPER promotion bridge for the frozen V3B candidates.
 
 This module is deliberately not wired into the running PAPER loop yet. It turns
-an authoritative, persisted 5m BOS plus its immediately following closed 5m
-candle into the PAPER-shaped candidate payload expected by the existing
+an authoritative, persisted 5m BOS or CHOCH plus its immediately following closed
+5m candle into the PAPER-shaped candidate payload expected by the existing
 execution safety layer.
 
 Safety properties:
 - EURUSD and XAUUSD use their separately frozen V3B point/risk math.
 - Closed source candles advance the existing durable 5m authority before read.
-- Only durable, tradable 5m BOS events are eligible.
+- Only durable, tradable 5m BOS or CHOCH events are eligible.
 - No 15m, EMA, consolidation, or wick-quality rule is introduced.
 - No broker call is made here.
 - No PAPER/LIVE mode state is changed here.
@@ -90,18 +90,14 @@ def _confirmation_identity(symbol, event_id, side, candle_open, candle_close, br
 
 
 def _recent_bos_pairs(events, frame):
-    """Return newest-first BOS/next-candle pairs with at most one-cycle recovery.
-
-    Recovery exists only so a missed evaluation can still be diagnosed. A pair
-    that is already one closed candle old is never allowed to become a live or
-    PAPER execution candidate at its historical confirmation price.
-    """
+    """Return newest-first BOS/CHOCH next-candle pairs with one-cycle recovery."""
     latest_open = _utc(frame.index[-1])
     rows = []
     for event in events or []:
         if not isinstance(event, dict):
             continue
-        if str(event.get("event_type") or "").upper() != "BOS":
+        event_type = str(event.get("event_type") or "").upper()
+        if event_type not in {"BOS", "CHOCH"}:
             continue
         if event.get("tradable") is not True:
             continue
@@ -206,9 +202,6 @@ def build_paper_v3b_candidate(
             details,
         )
 
-    # A production refresh must prove that the durable stream reached the exact
-    # latest closed source candle. Injected test readers without stream metadata
-    # keep their existing observation-only contract.
     if authoritative_reader is None or (authority or {}).get("stream_last_candle") is not None:
         freshness = _freshness_details(normalized, latest_source, authority)
         if freshness["latest_durable_candle"] is None or freshness["authority_status"] != "READY":
@@ -227,6 +220,7 @@ def build_paper_v3b_candidate(
         "latest_source_closed_candle": latest_source.isoformat(),
         "recovery_candles": RECENT_BOS_RECOVERY_CANDLES,
         "candidate_event_ids": [item[3].get("event_id") for item in pairs],
+        "candidate_event_types": [item[3].get("event_type") for item in pairs],
     })
     if not pairs:
         return _wait(normalized, "WAIT_V3B_PAPER_5M_BOS")
@@ -271,14 +265,12 @@ def build_paper_v3b_candidate(
     logger.info("V3B_CANDIDATE_SELECTED %s", {
         "symbol": normalized,
         "event_id": event.get("event_id"),
+        "event_type": event.get("event_type"),
         "bos_candle": bos_open.isoformat(),
         "confirmation_candle": second_open.isoformat(),
         "recovery_lag_candles": lag_candles,
     })
 
-    # A recovered pair can prove that a historical V3B setup existed, but it is
-    # no longer executable at the old confirmation close. Fail closed rather
-    # than fabricating a retroactive PAPER fill or LIVE broker entry.
     if lag_candles > 0:
         recovery_details = {
             "source_indicator_event_id": event.get("event_id"),
@@ -344,13 +336,14 @@ def build_paper_v3b_candidate(
         "setup_timeframe": "5m",
     }
 
+    event_type = str(event.get("event_type") or "BOS").upper()
     candidate = {
         "symbol": normalized,
         "signal": side,
         "final_signal": side,
         "signal_before_filters": side,
         "signal_after_filters": side,
-        "signal_text": f"{side} (V3B frozen 5m BOS + next 5m close)",
+        "signal_text": f"{side} (V3B frozen 5m {event_type} + next 5m close)",
         "strategy_setup_complete": True,
         "strategy_model": "v3b_m5_frozen_candidate",
         "strategy_setup_type": f"PAPER_{side}_V3B_M5",
@@ -373,6 +366,7 @@ def build_paper_v3b_candidate(
         "paper_risk_timeframe": "5m",
         "source_indicator_event_id": str(event_id),
         "indicator_event_identity": event_identity,
+        "source_structure_event_type": event_type,
         "m5_confirmation_id": confirmation_id,
         "m5_confirmation_identity": confirmation_identity,
         "setup_identity": setup_identity,
@@ -395,6 +389,7 @@ def build_paper_v3b_candidate(
             "qualification_source": "authoritative_5m_indicator_event",
             "frozen_v3b": True,
             "side": side,
+            "structure_event_type": event_type,
             "bos_body_ratio": body_ratio,
             "minimum_bos_body_ratio": float(strategy.MIN_BOS_BODY_RATIO),
             "second_5m_same_direction": True,
