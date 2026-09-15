@@ -16,6 +16,7 @@ from services.indicator_stream_account_scope import (
 
 _VALID_SCOPE = re.compile(r"^CTRADER:(?:DEMO|LIVE):[^:\s]+$")
 _TIMEFRAME_MINUTES = {"5m": 5, "15m": 15, "1h": 60}
+_MEMORY_MAX_AGE_SECONDS = {"5m": 15 * 60, "15m": 45 * 60, "1h": 150 * 60}
 _MEMORY_SOURCE = "in_memory_ctrader_closed_candles"
 _DURABLE_SOURCE = "persisted_ctrader_closed_candles"
 
@@ -57,6 +58,15 @@ def _latest_iso(frame):
     if frame is None or frame.empty:
         return None
     return _utc(frame.index[-1]).isoformat()
+
+
+def _closed_frame_age_seconds(frame, closed_before):
+    if frame is None or frame.empty:
+        return None
+    return max(
+        0.0,
+        (_utc(closed_before) - _utc(frame.index[-1])).total_seconds(),
+    )
 
 
 def load_durable_indicator_candles(
@@ -133,8 +143,9 @@ def load_dashboard_display_candles(
     """Return display-only candles, preferring usable in-memory cTrader frames.
 
     No cTrader market-data function is called here. The function snapshots only
-    existing process memory, strips forming candles, and fills missing streams
-    from the scoped immutable candle table.
+    existing process memory, strips forming candles, then validates freshness on
+    the remaining CLOSED frame before filling unavailable streams from the
+    account-scoped immutable candle table.
     """
     scope = _valid_scope(stream_scope or active_ctrader_stream_scope())
     if not scope:
@@ -162,10 +173,22 @@ def load_dashboard_display_candles(
             cached = cache.get(cache_key) if isinstance(cache, dict) else None
             health = health_reader(public_symbol, timeframe) or {}
             frame = None
+            closed_age_seconds = None
+            max_age_seconds = float(
+                health.get("max_recovery_age_seconds")
+                or _MEMORY_MAX_AGE_SECONDS[timeframe]
+            )
             if isinstance(cached, dict) and bool(health.get("usable")):
-                frame = _closed_frame_copy(
+                candidate = _closed_frame_copy(
                     cached.get("data"), minutes, closed_before, maximum
                 )
+                closed_age_seconds = _closed_frame_age_seconds(candidate, closed_before)
+                if (
+                    candidate is not None
+                    and closed_age_seconds is not None
+                    and closed_age_seconds <= max_age_seconds
+                ):
+                    frame = candidate
             if frame is None:
                 missing.setdefault(public_symbol, []).append(timeframe)
                 continue
@@ -175,7 +198,8 @@ def load_dashboard_display_candles(
                 "source": _MEMORY_SOURCE,
                 "latest_candle_time": _latest_iso(frame),
                 "usable": True,
-                "last_candle_age_seconds": health.get("last_candle_age_seconds"),
+                "last_candle_age_seconds": round(closed_age_seconds, 1),
+                "max_recovery_age_seconds": max_age_seconds,
                 "recovery_mode": bool(health.get("recovery_mode", False)),
             }
 
