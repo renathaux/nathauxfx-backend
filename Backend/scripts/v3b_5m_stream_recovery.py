@@ -20,7 +20,7 @@ def _json_default(value):
     return str(value)
 
 
-def _load_state(storage_key, timeframe):
+def _load_state(storage_key, timeframe, explicit=None):
     session = recovery.SessionLocal()
     try:
         state = session.query(IndicatorStreamState).filter_by(
@@ -31,7 +31,11 @@ def _load_state(storage_key, timeframe):
         events = session.query(IndicatorEvent).filter_by(
             symbol=storage_key, timeframe=timeframe
         ).all()
-        earliest = recovery.infer_earliest_rebuild_timestamp(state, events)
+        earliest = recovery.infer_earliest_rebuild_timestamp(
+            state,
+            events,
+            explicit=explicit,
+        )
         if state.last_processed_candle is None:
             raise SystemExit("stream has no durable watermark")
         return earliest, pd.Timestamp(state.last_processed_candle)
@@ -56,7 +60,14 @@ def main(argv=None):
         raise SystemExit("choose exactly one of --dry-run or --apply")
 
     explicit = args.earliest_required_at
-    inferred, old_watermark = _load_state(args.storage_key, args.timeframe)
+    if explicit:
+        inferred, old_watermark = _load_state(
+            args.storage_key,
+            args.timeframe,
+            explicit,
+        )
+    else:
+        inferred, old_watermark = _load_state(args.storage_key, args.timeframe)
     earliest = pd.Timestamp(explicit) if explicit else inferred
     start = recovery.history_start_for_recovery(
         earliest,
