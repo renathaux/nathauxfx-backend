@@ -39,4 +39,6 @@ jobs:
             tests/test_smc_strategy_authority.py \
             tests/test_xauusd_risk_guard.py \
             tests/test_neon_observer_optimization.py \
-            tests/test_v3b_strategy_settings_sync.py
+            tests/test_v3b_strategy_settings_sync.py \
+            tests/test_v3b_5m_stream_recovery.py \
+            tests/test_v3b_5m_stream_recovery_rollover_gaps.py

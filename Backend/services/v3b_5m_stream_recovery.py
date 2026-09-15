@@ -126,7 +126,29 @@ def normalize_authoritative_closed_frame(frame):
     return closed.sort_index()
 
 
-def validate_closed_history_coverage(frame, earliest, old_watermark):
+def _recognized_ctrader_sparse_gap(public_symbol, previous, following):
+    """Allow only broker gaps that are already understood by production policy."""
+    previous = _utc(previous)
+    following = _utc(following)
+    public = _public_symbol(public_symbol)
+
+    if stream._known_market_closure(public, previous, following):
+        return True
+
+    # cTrader can omit EURUSD trendbars when no tick arrives around the daily
+    # rollover. Recovery is intentionally stricter than normal sparse ingestion:
+    # only a short same-day hole around the 21/22 UTC rollover is accepted.
+    if public == "EURUSD" and previous.date() == following.date():
+        gap = following - previous
+        if gap <= pd.Timedelta(minutes=30):
+            previous_minutes = previous.hour * 60 + previous.minute
+            following_minutes = following.hour * 60 + following.minute
+            if previous_minutes >= 20 * 60 + 30 and following_minutes <= 22 * 60 + 30:
+                return True
+    return False
+
+
+def validate_closed_history_coverage(frame, earliest, old_watermark, public_symbol=None):
     if old_watermark is None:
         raise V3B5MRecoveryBlocked("old durable watermark is unavailable")
     earliest = _utc(earliest)
@@ -149,19 +171,39 @@ def validate_closed_history_coverage(frame, earliest, old_watermark):
             "authoritative CLOSED history does not reach old durable watermark "
             f"{_iso(old_watermark)}; latest closed is {_iso(latest)}"
         )
-
-    expected = [_utc(value) for value in pd.date_range(
-        start=earliest, end=latest, freq="5min", tz="UTC"
-    )]
-    if available != expected:
-        missing = [value for value in expected if value not in set(available)]
-        unexpected = [value for value in available if value not in set(expected)]
-        detail = (
-            f"missing {missing[0].isoformat()}" if missing
-            else f"off-grid timestamp {unexpected[0].isoformat()}"
+    if earliest not in available:
+        raise V3B5MRecoveryBlocked(
+            f"authoritative CLOSED history gap: missing {earliest.isoformat()}"
         )
-        raise V3B5MRecoveryBlocked(f"authoritative CLOSED history gap: {detail}")
-    return {"earliest": earliest, "latest": latest, "count": len(available)}
+
+    interval = pd.Timedelta(minutes=5)
+    sparse_gaps = []
+    for timestamp in available:
+        if (timestamp - earliest) % interval != pd.Timedelta(0):
+            raise V3B5MRecoveryBlocked(
+                f"authoritative CLOSED history gap: off-grid timestamp {timestamp.isoformat()}"
+            )
+
+    for previous, following in zip(available, available[1:]):
+        if following - previous <= interval:
+            continue
+        missing = []
+        cursor = previous + interval
+        while cursor < following:
+            missing.append(cursor)
+            cursor += interval
+        if not _recognized_ctrader_sparse_gap(public_symbol, previous, following):
+            raise V3B5MRecoveryBlocked(
+                f"authoritative CLOSED history gap: missing {missing[0].isoformat()}"
+            )
+        sparse_gaps.extend(value.isoformat() for value in missing)
+
+    return {
+        "earliest": earliest,
+        "latest": latest,
+        "count": len(available),
+        "allowed_sparse_gaps": sparse_gaps,
+    }
 
 
 def _event_ids_for_rebuild(events, lifecycles, earliest):
@@ -225,7 +267,7 @@ def _build_plan(session, request, closed_frame):
     )
     closed = normalize_authoritative_closed_frame(closed_frame)
     coverage = validate_closed_history_coverage(
-        closed, earliest, state.last_processed_candle
+        closed, earliest, state.last_processed_candle, public_symbol=public
     )
     affected_event_ids = _event_ids_for_rebuild(event_rows, lifecycle_rows, earliest)
     affected_lifecycle = [row for row in lifecycle_rows if row.event_id in affected_event_ids]
@@ -290,6 +332,7 @@ def _build_plan(session, request, closed_frame):
         "replacement_suffix_start": coverage["earliest"].isoformat(),
         "replacement_suffix_end": coverage["latest"].isoformat(),
         "replacement_suffix_count": coverage["count"],
+        "allowed_sparse_gaps": coverage["allowed_sparse_gaps"],
         "candles_to_replace": replace_candles,
         "events_to_remove": sorted(affected_event_ids),
         "events_to_rebuild": sorted(set(rebuilt_event_ids)),
