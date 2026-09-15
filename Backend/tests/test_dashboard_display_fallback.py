@@ -20,11 +20,16 @@ def _closed_frame(base):
 
 
 def test_startup_panel_uses_persisted_candles_for_display_only(monkeypatch):
-    frames = {
-        (symbol, timeframe): _closed_frame(1.0 if symbol == "EURUSD" else 3600.0)
+    expected_streams = {
+        (symbol, timeframe)
         for symbol in ("EURUSD", "XAUUSD")
         for timeframe in ("5m", "15m", "1h")
     }
+    frames = {
+        (symbol, timeframe): _closed_frame(1.0 if symbol == "EURUSD" else 3600.0)
+        for symbol, timeframe in expected_streams
+    }
+    loaded_streams = []
     monkeypatch.setattr(api, "PANEL_CACHE", {"data": api.default_panel(), "last_update": 0})
     monkeypatch.setattr(
         api,
@@ -40,11 +45,11 @@ def test_startup_panel_uses_persisted_candles_for_display_only(monkeypatch):
         },
     )
     monkeypatch.setattr(api, "LIVE_PANEL_META_CACHE", {})
-    monkeypatch.setattr(
-        ctrader_connector,
-        "load_persisted_ctrader_candle_cache",
-        lambda symbol, timeframe: {"data": frames[(symbol, timeframe)].copy()},
-    )
+    def load_persisted(symbol, timeframe):
+        loaded_streams.append((symbol, timeframe))
+        return {"data": frames[(symbol, timeframe)].copy()}
+
+    monkeypatch.setattr(ctrader_connector, "load_persisted_ctrader_candle_cache", load_persisted)
 
     result = ctrader.nonblocking_dashboard_feed()
 
@@ -55,8 +60,16 @@ def test_startup_panel_uses_persisted_candles_for_display_only(monkeypatch):
     assert result["EURUSD"]["signal"] == "WAIT"
     assert result["EURUSD"]["market_condition"] == "DISPLAY_ONLY"
     assert result["XAUUSD"]["signal"] == "WAIT"
-    assert len(result["candles"]["EURUSD"]["5m"]) == 3
-    assert len(result["candles"]["XAUUSD"]["1h"]) == 3
+    assert set(loaded_streams) == expected_streams
+    assert {
+        (symbol, timeframe)
+        for symbol, timeframes in result["candles"].items()
+        for timeframe in timeframes
+    } == expected_streams
+    assert all(
+        len(result["candles"][symbol][timeframe]) == 3
+        for symbol, timeframe in expected_streams
+    )
     assert result["candles"]["EURUSD"]["5m"][-1]["time"] == 1789474200
 
 
