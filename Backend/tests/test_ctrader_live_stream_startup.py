@@ -4,6 +4,7 @@ from services.indicator_event_stream_service import IndicatorStreamUnavailable
 
 
 def test_live_price_stream_starts_even_if_indicator_stream_startup_fails(monkeypatch):
+    """A strategy reconciliation fence must not suppress the read-only tick feed."""
     starts = []
 
     monkeypatch.setattr(
