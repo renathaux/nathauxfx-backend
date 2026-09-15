@@ -672,6 +672,28 @@ def chart_smc_structure(symbol: str = "EURUSD", timeframe: str = "15m", limit: i
         market_data,
         timeframe_minutes[normalized_timeframe],
     )
+    display_data_source = "ctrader_market_data"
+    if closed is None or closed.empty:
+        # Display-only fallback: a stale/missing live tick must not erase the
+        # last valid chart.  Execution freshness gates continue to use the
+        # normal cTrader market-data path and are intentionally unchanged.
+        from ctrader_connector import load_persisted_ctrader_candle_cache
+
+        persisted = load_persisted_ctrader_candle_cache(
+            normalized_symbol,
+            canonical_timeframe,
+        )
+        persisted_frame = (
+            persisted.get("data")
+            if isinstance(persisted, dict)
+            else None
+        )
+        closed = strict_trader.closed_frame(
+            persisted_frame,
+            timeframe_minutes[normalized_timeframe],
+        )
+        if closed is not None and not closed.empty:
+            display_data_source = "persisted_ctrader_closed_candles"
     if closed is None or closed.empty:
         raise HTTPException(status_code=503, detail="Closed SMC candles unavailable")
     try:
@@ -689,6 +711,8 @@ def chart_smc_structure(symbol: str = "EURUSD", timeframe: str = "15m", limit: i
         ) from exc
     structure["display_enabled_independent"] = True
     structure["backend_uses_indicator_when_display_off"] = True
+    structure["display_data_source"] = display_data_source
+    structure["display_closed_candles_available"] = True
     return structure
 
 
