@@ -1,6 +1,7 @@
 import pandas as pd
 
 import app_bootstrap
+import ctrader_connector
 
 
 def _closed_frame():
@@ -32,10 +33,9 @@ def test_chart_uses_persisted_closed_candles_when_live_market_data_unavailable(m
         lambda *args, **kwargs: pd.DataFrame(),
     )
     monkeypatch.setattr(
-        app_bootstrap,
+        ctrader_connector,
         "load_persisted_ctrader_candle_cache",
         lambda symbol, timeframe: {"data": persisted.copy()},
-        raising=False,
     )
 
     captured = {}
