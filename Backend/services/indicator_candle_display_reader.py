@@ -59,7 +59,7 @@ def _latest_iso(frame):
     return _utc(frame.index[-1]).isoformat()
 
 
-def load_closed_indicator_candles(
+def load_durable_indicator_candles(
     symbols,
     timeframes,
     *,
@@ -68,11 +68,7 @@ def load_closed_indicator_candles(
     session_factory=SessionLocal,
     stream_scope=None,
 ):
-    """Return latest closed, account-scoped immutable candles without writes.
-
-    An absent or malformed scope deliberately returns no data. Display fallback
-    must never borrow legacy/unscoped rows from another cTrader account.
-    """
+    """Return latest closed, account-scoped immutable candles without writes."""
     scope = _valid_scope(stream_scope or active_ctrader_stream_scope())
     if not scope:
         return {}
@@ -136,9 +132,9 @@ def load_dashboard_display_candles(
 ):
     """Return display-only candles, preferring usable in-memory cTrader frames.
 
-    This function never calls cTrader market-data APIs. It only snapshots the
-    already-populated process cache, filters it to closed candles, and fills any
-    missing/unusable streams from the account-scoped immutable candle table.
+    No cTrader market-data function is called here. The function snapshots only
+    existing process memory, strips forming candles, and fills missing streams
+    from the scoped immutable candle table.
     """
     scope = _valid_scope(stream_scope or active_ctrader_stream_scope())
     if not scope:
@@ -184,7 +180,7 @@ def load_dashboard_display_candles(
             }
 
     for public_symbol, missing_timeframes in missing.items():
-        durable = load_closed_indicator_candles(
+        durable = load_durable_indicator_candles(
             (public_symbol,),
             tuple(missing_timeframes),
             limit=maximum,
@@ -204,3 +200,28 @@ def load_dashboard_display_candles(
             }
 
     return {"frames": frames, "streams": streams}
+
+
+def load_closed_indicator_candles(
+    symbols,
+    timeframes,
+    *,
+    limit=500,
+    now=None,
+    session_factory=SessionLocal,
+    stream_scope=None,
+):
+    """Compatibility entry point used by the dashboard route.
+
+    The route already imports this name. Returning only ``frames`` preserves its
+    existing contract while upgrading the source selection to memory-first,
+    durable-second without touching strategy or broker paths.
+    """
+    return load_dashboard_display_candles(
+        symbols,
+        timeframes,
+        limit=limit,
+        now=now,
+        session_factory=session_factory,
+        stream_scope=stream_scope,
+    )["frames"]
