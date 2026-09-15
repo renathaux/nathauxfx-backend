@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 
+from services.ctrader_live_stream_startup import install_ctrader_live_stream_startup
 from services.indicator_stream_account_scope import install_account_scoped_indicator_stream
 from services.monthly_history_window import (
     guarded_import_api,
@@ -28,46 +29,16 @@ api = guarded_import_api()
 import app_bootstrap  # noqa: F401 - installs the production bootstrap hooks
 from strategies import shared as paper_shared
 
-
-def _start_ctrader_live_price_stream_before_indicator_fences():
-    """Start the read-only spot feed before strategy startup can fail closed.
-
-    The strategy bootstrap intentionally returns when any authoritative
-    indicator stream is fenced. The live spot subscription is independent of
-    that strategy readiness and must still run so the broker/feed status can
-    recover while analysis remains safely paused.
-    """
-    try:
-        app_bootstrap._restore_ctrader_selection_before_market_data()
-    except Exception as exc:
-        print("CTRADER_LIVE_STREAM_ACCOUNT_RESTORE_ERROR =", str(exc))
-
-    try:
-        result = api.start_ctrader_live_price_stream()
-    except Exception as exc:
-        result = {"ok": False, "status": "not_started", "reason": str(exc)}
-        print("CTRADER_LIVE_STREAM_START_ERROR =", str(exc))
-    else:
-        print("CTRADER_LIVE_STREAM_START =", result)
-    return result
-
-
-# Preserve all previously registered startup ordering, but make the read-only
-# tick feed start immediately before the strategy bootstrap. The later call in
-# app_bootstrap is idempotent and acts as a harmless retry when strategy startup
-# reaches it.
-if _start_ctrader_live_price_stream_before_indicator_fences not in api.app.router.on_startup:
-    try:
-        _strategy_startup_index = api.app.router.on_startup.index(
-            app_bootstrap._start_forex_background_task
-        )
-    except ValueError:
-        _strategy_startup_index = len(api.app.router.on_startup)
-    api.app.router.on_startup.insert(
-        _strategy_startup_index,
-        _start_ctrader_live_price_stream_before_indicator_fences,
-    )
-
+# The strategy bootstrap intentionally returns when an authoritative indicator
+# stream is fenced. Start the read-only spot feed first so broker/feed status can
+# recover independently while analysis and execution remain fail-closed. The
+# later app_bootstrap call is idempotent and acts as a harmless retry.
+install_ctrader_live_stream_startup(
+    api.app,
+    api,
+    app_bootstrap._start_forex_background_task,
+    app_bootstrap._restore_ctrader_selection_before_market_data,
+)
 
 install_monthly_history_window(api, paper_shared)
 
