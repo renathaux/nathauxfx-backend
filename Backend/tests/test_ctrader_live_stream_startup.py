@@ -1,11 +1,14 @@
 import api
 import app_bootstrap
-import closed_market_bootstrap
 from services.indicator_event_stream_service import IndicatorStreamUnavailable
 
 
 def test_production_startup_starts_live_price_stream_before_indicator_fence(monkeypatch):
     """A strategy reconciliation fence must not suppress the read-only tick feed."""
+    # Import the production entrypoint only for this test so its compatibility
+    # installers do not mutate indicator-stream globals during test collection.
+    import closed_market_bootstrap
+
     starts = []
 
     monkeypatch.setattr(
