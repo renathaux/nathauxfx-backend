@@ -42,6 +42,7 @@ jobs:
             tests/test_v3b_strategy_settings_sync.py \
             tests/test_v3b_5m_stream_recovery.py \
             tests/test_v3b_5m_stream_recovery_rollover_gaps.py \
+            tests/test_v3b_15m_stream_recovery.py \
             tests/test_chart_closed_candle_fallback.py \
             tests/test_dashboard_display_fallback.py \
             tests/test_indicator_candle_display_reader.py
