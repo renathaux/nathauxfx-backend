@@ -180,6 +180,199 @@ def _rows_for(db, model, symbol, timeframe):
     ).all()
 
 
+def _durable_reconciliation_snapshot(Session, storage):
+    with Session() as db:
+        state = db.query(IndicatorStreamState).filter_by(
+            symbol=storage, timeframe="5m"
+        ).one()
+        return {
+            "candles": [
+                (row.candle_timestamp, row.open_price, row.high_price,
+                 row.low_price, row.close_price)
+                for row in _rows_for(db, IndicatorCandle, storage, "5m")
+            ],
+            "events": [
+                (row.event_id, row.candle_timestamp, row.payload)
+                for row in _rows_for(db, IndicatorEvent, storage, "5m")
+            ],
+            "lifecycles": [
+                (row.id, row.event_id, row.status, row.m5_confirmation_id)
+                for row in db.query(IndicatorEventLifecycle).order_by(
+                    IndicatorEventLifecycle.id
+                ).all()
+            ],
+            "last_processed_candle": state.last_processed_candle,
+        }
+
+
+def _corrected_suffix_case(incoming_builder, *, succeeds):
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        scope = "CTRADER:LIVE:ACCOUNT-A"
+        storage = storage_symbol_for_scope("EURUSD", scope)
+        created = stream.get_authoritative_structure(
+            _frame(), "EURUSD", "5m", 0.00001,
+            analyzer=_analysis_before_conflict,
+            session_factory=Session, stream_scope=scope,
+        )
+        event_id = created["events"][0]["event_id"]
+        assert stream.update_event_lifecycle(
+            event_id, "PAPER", "ELIGIBLE", owner_id="OWNER",
+            account_id="ACCOUNT-A", session_factory=Session,
+        )
+        before = _durable_reconciliation_snapshot(Session, storage)
+        incoming = incoming_builder(_frame(close_shift=0.00003))
+
+        if succeeds:
+            result = stream.get_authoritative_structure(
+                incoming, "EURUSD", "5m", 0.00001,
+                analyzer=_analysis_before_conflict,
+                session_factory=Session, stream_scope=scope,
+            )
+            assert result["stream_status"] == "READY"
+            with Session() as db:
+                state = db.query(IndicatorStreamState).filter_by(
+                    symbol=storage, timeframe="5m"
+                ).one()
+                assert state.status == "READY"
+                assert state.last_processed_candle >= before["last_processed_candle"]
+            return result, Session, storage
+
+        with pytest.raises(
+            stream.IndicatorStreamUnavailable,
+            match="automatic V3B 5m reconciliation blocked",
+        ):
+            stream.get_authoritative_structure(
+                incoming, "EURUSD", "5m", 0.00001,
+                analyzer=_analysis_before_conflict,
+                session_factory=Session, stream_scope=scope,
+            )
+        after = _durable_reconciliation_snapshot(Session, storage)
+        assert after == before
+        with Session() as db:
+            state = db.query(IndicatorStreamState).filter_by(
+                symbol=storage, timeframe="5m"
+            ).one()
+            assert state.status == "RECONCILIATION_REQUIRED"
+            assert "authoritative CLOSED 5m" in state.reconciliation_reason
+        return None, Session, storage
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
+def test_corrected_suffix_truncated_before_old_watermark_fails_without_mutation():
+    _corrected_suffix_case(lambda corrected: corrected.loc[:"2026-09-14T12:15:00Z"], succeeds=False)
+
+
+def test_corrected_suffix_complete_through_old_watermark_succeeds():
+    _corrected_suffix_case(lambda corrected: corrected, succeeds=True)
+
+
+def test_corrected_suffix_extending_beyond_old_watermark_succeeds():
+    def extended(corrected):
+        result = corrected.copy()
+        result.loc[pd.Timestamp("2026-09-14T12:40:00Z")] = {
+            "Open": 1.1510, "High": 1.1512, "Low": 1.1509, "Close": 1.1511,
+        }
+        return result
+
+    _corrected_suffix_case(extended, succeeds=True)
+
+
+def test_corrected_suffix_gap_fails_without_mutation():
+    _corrected_suffix_case(
+        lambda corrected: corrected.drop(pd.Timestamp("2026-09-14T12:25:00Z")),
+        succeeds=False,
+    )
+
+
+def test_corrected_suffix_duplicate_timestamp_fails_without_mutation():
+    def duplicated(corrected):
+        return pd.concat([corrected, corrected.loc[[pd.Timestamp("2026-09-14T12:20:00Z")]]])
+
+    _corrected_suffix_case(duplicated, succeeds=False)
+
+
+def test_open_synthetic_row_cannot_complete_corrected_closed_suffix():
+    # Production closed_frame removes the current/synthetic row before durable
+    # reconciliation. Its timestamp cannot satisfy the old durable watermark.
+    corrected = _frame(close_shift=0.00003).loc[:"2026-09-14T12:15:00Z"]
+    synthetic = corrected.copy()
+    synthetic.loc[pd.Timestamp("2026-09-14T12:35:00Z")] = corrected.iloc[-1]
+
+    class ClosedStrict:
+        @staticmethod
+        def closed_frame(_data, minutes):
+            assert minutes == 5
+            return corrected
+
+        @staticmethod
+        def point_size(symbol):
+            assert symbol == "EURUSD"
+            return 0.00001
+
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        scope = "CTRADER:LIVE:ACCOUNT-A"
+        storage = storage_symbol_for_scope("EURUSD", scope)
+        stream.get_authoritative_structure(
+            _frame(), "EURUSD", "5m", 0.00001,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope,
+        )
+        before = _durable_reconciliation_snapshot(Session, storage)
+
+        def updater(source, symbol, timeframe, point_size, **_kwargs):
+            return stream.get_authoritative_structure(
+                source, symbol, timeframe, point_size,
+                analyzer=_analysis, session_factory=Session, stream_scope=scope,
+            )
+
+        candidate = build_paper_v3b_candidate(
+            "EURUSD", synthetic, strict_trader_module=ClosedStrict,
+            authoritative_updater=updater,
+        )
+        assert candidate["paper_entry_reason"] == "WAIT_V3B_5M_AUTHORITY_STALE"
+        assert _durable_reconciliation_snapshot(Session, storage) == before
+        with Session() as db:
+            state = db.query(IndicatorStreamState).one()
+            assert state.status == "RECONCILIATION_REQUIRED"
+            assert "latest incoming closed candle is 2026-09-14T12:15:00+00:00" in state.reconciliation_reason
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
+def test_successful_corrected_suffix_reconciliation_is_idempotent():
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        scope = "CTRADER:DEMO:ACCOUNT-A"
+        storage = storage_symbol_for_scope("EURUSD", scope)
+        stream.get_authoritative_structure(
+            _frame(), "EURUSD", "5m", 0.00001,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope,
+        )
+        corrected = _frame(close_shift=0.00003)
+        first = stream.get_authoritative_structure(
+            corrected, "EURUSD", "5m", 0.00001,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope,
+        )
+        first_snapshot = _durable_reconciliation_snapshot(Session, storage)
+        second = stream.get_authoritative_structure(
+            corrected, "EURUSD", "5m", 0.00001,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope,
+        )
+        assert second["new_event_ids"] == []
+        assert second["events"] == first["events"]
+        assert _durable_reconciliation_snapshot(Session, storage) == first_snapshot
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
 def test_account_scoped_v3b_5m_correction_rolls_back_and_replays(caplog):
     Session, engine = _session_factory()
     install_account_scoped_indicator_stream()

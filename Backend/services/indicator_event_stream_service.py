@@ -68,6 +68,65 @@ def _automatic_correction_repair_allowed(symbol, timeframe, enabled):
     )
 
 
+def _correction_coverage_failure(frame, incoming, conflict_time, durable_watermark):
+    """Return why a corrected suffix cannot safely replace durable 5m history."""
+    if durable_watermark is None:
+        return "previous durable watermark is unavailable"
+
+    conflict_time = _utc(conflict_time)
+    durable_watermark = _utc(durable_watermark)
+    if durable_watermark < conflict_time:
+        return (
+            f"previous durable watermark {durable_watermark.isoformat()} is before "
+            f"correction {conflict_time.isoformat()}"
+        )
+
+    # Inspect the original index because canonicalization deliberately collapses
+    # identical timestamps for normal ingestion. A reconciliation replacement
+    # must be unambiguous, including when duplicate rows have identical OHLC.
+    raw_times = pd.DatetimeIndex([_utc(value) for value in frame.index])
+    duplicates = raw_times[raw_times.duplicated(keep=False)]
+    if len(duplicates):
+        duplicate_time = _utc(duplicates[0])
+        return f"duplicate authoritative CLOSED 5m timestamp {duplicate_time.isoformat()}"
+
+    available_suffix = sorted(
+        {_utc(value) for value in incoming.index if _utc(value) >= conflict_time}
+    )
+    latest = available_suffix[-1] if available_suffix else None
+    if latest is None or latest < durable_watermark:
+        return (
+            "authoritative CLOSED 5m coverage is incomplete from "
+            f"{conflict_time.isoformat()} through previous durable watermark "
+            f"{durable_watermark.isoformat()}; latest incoming closed candle is "
+            f"{latest.isoformat() if latest else 'none'}"
+        )
+
+    interval = pd.Timedelta(minutes=5)
+    expected = pd.date_range(
+        start=conflict_time,
+        end=latest,
+        freq=interval,
+        tz="UTC",
+    )
+    expected_times = [_utc(value) for value in expected]
+    if available_suffix != expected_times:
+        expected_set = set(expected_times)
+        missing = [value for value in expected_times if value not in available_suffix]
+        unexpected = [value for value in available_suffix if value not in expected_set]
+        detail = (
+            f"missing {missing[0].isoformat()}" if missing
+            else f"unexpected off-grid timestamp {unexpected[0].isoformat()}"
+        )
+        return (
+            "authoritative CLOSED 5m coverage is incomplete from "
+            f"{conflict_time.isoformat()} through previous durable watermark "
+            f"{durable_watermark.isoformat()}; {detail}; latest incoming closed "
+            f"candle is {latest.isoformat()}"
+        )
+    return None
+
+
 def _block_corrected_candle_repair(
     session,
     state,
@@ -512,8 +571,13 @@ def get_authoritative_structure(
                 state.status in {"READY", "GAP_BLOCKED"}
                 or (
                     state.status == "RECONCILIATION_REQUIRED"
-                    and str(state.reconciliation_reason or "").startswith(
-                        "conflicting closed candle correction at "
+                    and (
+                        str(state.reconciliation_reason or "").startswith(
+                            "conflicting closed candle correction at "
+                        )
+                        or "authoritative CLOSED 5m coverage" in str(
+                            state.reconciliation_reason or ""
+                        )
                     )
                 )
             )
@@ -522,8 +586,39 @@ def get_authoritative_structure(
                 normalized_timeframe,
                 allow_authoritative_correction_repair,
             ):
+                previous_durable_watermark = (
+                    _utc(state.last_processed_candle)
+                    if state.last_processed_candle else None
+                )
+                conflict_time = min(correction_times)
+                coverage_failure = _correction_coverage_failure(
+                    frame,
+                    incoming,
+                    conflict_time,
+                    previous_durable_watermark,
+                )
+                if coverage_failure:
+                    affected_candle_count = sum(
+                        1 for timestamp in existing if timestamp >= conflict_time
+                    )
+                    affected_event_count = session.query(IndicatorEvent).filter(
+                        IndicatorEvent.symbol == normalized_symbol,
+                        IndicatorEvent.timeframe == normalized_timeframe,
+                        IndicatorEvent.candle_timestamp >= _db_datetime(conflict_time),
+                    ).count()
+                    _block_corrected_candle_repair(
+                        session,
+                        state,
+                        symbol=normalized_symbol,
+                        conflict_time=conflict_time,
+                        rollback_time=None,
+                        affected_candle_count=affected_candle_count,
+                        affected_event_count=affected_event_count,
+                        reason=coverage_failure,
+                        now=now,
+                    )
                 reconciliation = _rollback_corrected_candle_range(
-                    session, state, normalized_symbol, min(correction_times), now
+                    session, state, normalized_symbol, conflict_time, now
                 )
                 existing_rows = session.query(IndicatorCandle).filter(
                     IndicatorCandle.symbol == normalized_symbol,
