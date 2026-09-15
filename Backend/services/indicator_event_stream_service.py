@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from models import (
     IndicatorEvent,
     IndicatorEventLifecycle,
     IndicatorStreamState,
+    TradeSubmissionAttempt,
 )
 
 
@@ -31,6 +33,8 @@ TEMPORARY_STATUSES = {"WAITING", "BLOCKED", "ELIGIBLE"}
 IN_FLIGHT_STATUSES = {"SUBMITTING", "RECONCILIATION_REQUIRED"}
 TERMINAL_STATUSES = {"CONSUMED", "EXPIRED", "INVALIDATED"}
 ALL_LIFECYCLE_STATUSES = TEMPORARY_STATUSES | IN_FLIGHT_STATUSES | TERMINAL_STATUSES
+SAFE_REBUILD_LIFECYCLE_STATUSES = TEMPORARY_STATUSES | {"EXPIRED", "INVALIDATED"}
+ACCOUNT_SCOPED_V3B_5M_SYMBOL = re.compile(r"^(?:EURUSD|XAUUSD)~[0-9A-F]{10}$")
 
 
 class IndicatorStreamUnavailable(RuntimeError):
@@ -53,6 +57,255 @@ def _database_lock(session, symbol, timeframe):
 def _event_signature(event, symbol, timeframe, point_size):
     identity, event_id = build_event_identity(event, symbol, timeframe, point_size)
     return event_id, identity
+
+
+def _automatic_correction_repair_allowed(symbol, timeframe, enabled):
+    """Keep the mutable exception narrower than the normal immutable stream."""
+    return bool(
+        enabled
+        and timeframe == "5m"
+        and ACCOUNT_SCOPED_V3B_5M_SYMBOL.fullmatch(symbol)
+    )
+
+
+def _correction_coverage_failure(frame, incoming, conflict_time, durable_watermark):
+    """Return why a corrected suffix cannot safely replace durable 5m history."""
+    if durable_watermark is None:
+        return "previous durable watermark is unavailable"
+
+    conflict_time = _utc(conflict_time)
+    durable_watermark = _utc(durable_watermark)
+    if durable_watermark < conflict_time:
+        return (
+            f"previous durable watermark {durable_watermark.isoformat()} is before "
+            f"correction {conflict_time.isoformat()}"
+        )
+
+    # Inspect the original index because canonicalization deliberately collapses
+    # identical timestamps for normal ingestion. A reconciliation replacement
+    # must be unambiguous, including when duplicate rows have identical OHLC.
+    raw_times = pd.DatetimeIndex([_utc(value) for value in frame.index])
+    duplicates = raw_times[raw_times.duplicated(keep=False)]
+    if len(duplicates):
+        duplicate_time = _utc(duplicates[0])
+        return f"duplicate authoritative CLOSED 5m timestamp {duplicate_time.isoformat()}"
+
+    available_suffix = sorted(
+        {_utc(value) for value in incoming.index if _utc(value) >= conflict_time}
+    )
+    latest = available_suffix[-1] if available_suffix else None
+    if latest is None or latest < durable_watermark:
+        return (
+            "authoritative CLOSED 5m coverage is incomplete from "
+            f"{conflict_time.isoformat()} through previous durable watermark "
+            f"{durable_watermark.isoformat()}; latest incoming closed candle is "
+            f"{latest.isoformat() if latest else 'none'}"
+        )
+
+    interval = pd.Timedelta(minutes=5)
+    expected = pd.date_range(
+        start=conflict_time,
+        end=latest,
+        freq=interval,
+        tz="UTC",
+    )
+    expected_times = [_utc(value) for value in expected]
+    if available_suffix != expected_times:
+        expected_set = set(expected_times)
+        missing = [value for value in expected_times if value not in available_suffix]
+        unexpected = [value for value in available_suffix if value not in expected_set]
+        detail = (
+            f"missing {missing[0].isoformat()}" if missing
+            else f"unexpected off-grid timestamp {unexpected[0].isoformat()}"
+        )
+        return (
+            "authoritative CLOSED 5m coverage is incomplete from "
+            f"{conflict_time.isoformat()} through previous durable watermark "
+            f"{durable_watermark.isoformat()}; {detail}; latest incoming closed "
+            f"candle is {latest.isoformat()}"
+        )
+    return None
+
+
+def _block_corrected_candle_repair(
+    session,
+    state,
+    *,
+    symbol,
+    conflict_time,
+    rollback_time,
+    affected_candle_count,
+    affected_event_count,
+    reason,
+    now,
+):
+    state.status = "RECONCILIATION_REQUIRED"
+    state.reconciliation_reason = f"automatic V3B 5m reconciliation blocked: {reason}"
+    state.updated_at = now
+    session.commit()
+    logger.error("V3B_5M_RECONCILIATION_BLOCKED_IRREVERSIBLE_EVENT %s", {
+        "symbol": symbol,
+        "conflict_timestamp": conflict_time.isoformat(),
+        "rollback_timestamp": rollback_time.isoformat() if rollback_time is not None else None,
+        "affected_candle_count": affected_candle_count,
+        "affected_event_count": affected_event_count,
+        "final_last_processed_candle": (
+            _utc(state.last_processed_candle).isoformat()
+            if state.last_processed_candle else None
+        ),
+        "final_stream_status": state.status,
+        "reason": reason,
+    })
+    raise IndicatorStreamUnavailable(state.reconciliation_reason)
+
+
+def _lifecycle_uses_corrected_range(row, conflict_time, parent_event_affected):
+    if parent_event_affected:
+        return True
+    if not row.m5_confirmation_id:
+        return False
+    identity = row.m5_confirmation_identity or {}
+    for key in ("candle_open_time", "candle_close_time", "confirmation_timestamp"):
+        value = identity.get(key) if isinstance(identity, dict) else None
+        if not value:
+            continue
+        try:
+            return _utc(value) >= conflict_time
+        except Exception:
+            return True
+    # A confirmation without its timestamp cannot be proven independent of the
+    # corrected candle. Fail closed instead of silently treating it as old.
+    return True
+
+
+def _rollback_corrected_candle_range(session, state, symbol, conflict_time, now):
+    """Delete only a safely replayable suffix of one locked V3B 5m stream."""
+    rollback_row = session.query(IndicatorCandle).filter(
+        IndicatorCandle.symbol == symbol,
+        IndicatorCandle.timeframe == "5m",
+        IndicatorCandle.candle_timestamp < _db_datetime(conflict_time),
+    ).order_by(
+        IndicatorCandle.candle_timestamp.desc(), IndicatorCandle.id.desc()
+    ).first()
+    rollback_time = _utc(rollback_row.candle_timestamp) if rollback_row else None
+    affected_candle_count = session.query(IndicatorCandle).filter(
+        IndicatorCandle.symbol == symbol,
+        IndicatorCandle.timeframe == "5m",
+        IndicatorCandle.candle_timestamp >= _db_datetime(conflict_time),
+    ).count()
+    stream_events = session.query(IndicatorEvent).filter(
+        IndicatorEvent.symbol == symbol,
+        IndicatorEvent.timeframe == "5m",
+    ).with_for_update().all()
+    replay_event_ids = {
+        row.event_id for row in stream_events
+        if _utc(row.candle_timestamp) >= conflict_time
+    }
+    stream_event_ids = [row.event_id for row in stream_events]
+    lifecycle_rows = []
+    if stream_event_ids:
+        lifecycle_rows = session.query(IndicatorEventLifecycle).filter(
+            IndicatorEventLifecycle.event_id.in_(stream_event_ids)
+        ).with_for_update().all()
+    affected_lifecycle_rows = [
+        row for row in lifecycle_rows
+        if _lifecycle_uses_corrected_range(
+            row, conflict_time, row.event_id in replay_event_ids
+        )
+    ]
+    affected_execution_event_ids = replay_event_ids | {
+        row.event_id for row in affected_lifecycle_rows
+    }
+    affected_event_count = len(affected_execution_event_ids)
+
+    logger.warning("V3B_5M_RECONCILIATION_START %s", {
+        "symbol": symbol,
+        "conflict_timestamp": conflict_time.isoformat(),
+        "rollback_timestamp": rollback_time.isoformat() if rollback_time is not None else None,
+        "affected_candle_count": affected_candle_count,
+        "affected_event_count": affected_event_count,
+        "final_last_processed_candle": None,
+        "final_stream_status": "RECONCILING",
+    })
+
+    if rollback_time is None:
+        _block_corrected_candle_repair(
+            session, state, symbol=symbol, conflict_time=conflict_time,
+            rollback_time=None, affected_candle_count=affected_candle_count,
+            affected_event_count=affected_event_count,
+            reason="no known-good candle exists before the correction", now=now,
+        )
+
+    submission_rows = []
+    if affected_execution_event_ids:
+        submission_rows = session.query(TradeSubmissionAttempt).filter(
+            TradeSubmissionAttempt.event_id.in_(affected_execution_event_ids)
+        ).with_for_update().all()
+
+    unsafe_lifecycle = next((
+        row for row in affected_lifecycle_rows
+        if str(row.status or "").upper() not in SAFE_REBUILD_LIFECYCLE_STATUSES
+        or row.consumed_at is not None
+    ), None)
+    if unsafe_lifecycle is not None:
+        _block_corrected_candle_repair(
+            session, state, symbol=symbol, conflict_time=conflict_time,
+            rollback_time=rollback_time,
+            affected_candle_count=affected_candle_count,
+            affected_event_count=affected_event_count,
+            reason=(
+                f"event {unsafe_lifecycle.event_id} lifecycle "
+                f"{str(unsafe_lifecycle.status or 'UNKNOWN').upper()} is irreversible"
+            ), now=now,
+        )
+    if submission_rows:
+        attempt = submission_rows[0]
+        broker_linked = bool(attempt.broker_order_id or attempt.broker_position_id)
+        _block_corrected_candle_repair(
+            session, state, symbol=symbol, conflict_time=conflict_time,
+            rollback_time=rollback_time,
+            affected_candle_count=affected_candle_count,
+            affected_event_count=affected_event_count,
+            reason=(
+                f"event {attempt.event_id} has a claimed {attempt.mode} submission "
+                f"({attempt.attempt_status}{', broker-linked' if broker_linked else ''})"
+            ), now=now,
+        )
+
+    affected_lifecycle_ids = [row.id for row in affected_lifecycle_rows]
+    if affected_lifecycle_ids:
+        session.query(IndicatorEventLifecycle).filter(
+            IndicatorEventLifecycle.id.in_(affected_lifecycle_ids)
+        ).delete(synchronize_session=False)
+    if replay_event_ids:
+        session.query(IndicatorEvent).filter(
+            IndicatorEvent.event_id.in_(replay_event_ids)
+        ).delete(synchronize_session=False)
+    session.query(IndicatorCandle).filter(
+        IndicatorCandle.symbol == symbol,
+        IndicatorCandle.timeframe == "5m",
+        IndicatorCandle.candle_timestamp >= _db_datetime(conflict_time),
+    ).delete(synchronize_session=False)
+    state.last_processed_candle = _db_datetime(rollback_time)
+    state.status = "READY"
+    state.reconciliation_reason = None
+    state.updated_at = now
+    session.flush()
+    logger.warning("V3B_5M_RECONCILIATION_ROLLBACK %s", {
+        "symbol": symbol,
+        "conflict_timestamp": conflict_time.isoformat(),
+        "rollback_timestamp": rollback_time.isoformat(),
+        "affected_candle_count": affected_candle_count,
+        "affected_event_count": affected_event_count,
+        "final_last_processed_candle": rollback_time.isoformat(),
+        "final_stream_status": state.status,
+    })
+    return {
+        "conflict_timestamp": conflict_time,
+        "rollback_timestamp": rollback_time,
+        "affected_candle_count": affected_candle_count,
+        "affected_event_count": affected_event_count,
+    }
 
 
 def initialize_indicator_stream(
@@ -242,6 +495,7 @@ def get_authoritative_structure(
     session_factory=None,
     initialize=False,
     allow_sparse_trendbars=False,
+    allow_authoritative_correction_repair=False,
 ):
     """Merge closed candles and return the immutable event stream.
 
@@ -279,10 +533,6 @@ def get_authoritative_structure(
                 session.flush()
             if state.configuration_version != CONFIGURATION_VERSION:
                 raise IndicatorStreamUnavailable("indicator stream configuration version changed")
-            if state.status == "RECONCILIATION_REQUIRED":
-                raise IndicatorStreamUnavailable(state.reconciliation_reason or "indicator stream requires reconciliation")
-            if not initialize and state.status not in {"READY", "GAP_BLOCKED"}:
-                raise IndicatorStreamUnavailable(f"indicator stream is {state.status}")
             try:
                 incoming = _canonical_input(frame)
             except IncomingCandleConflict as exc:
@@ -297,6 +547,104 @@ def get_authoritative_structure(
                 IndicatorCandle.timeframe == normalized_timeframe,
             ).all()
             existing = {_utc(row.candle_timestamp): row for row in existing_rows}
+            correction_times = []
+            for timestamp, candle in incoming.iterrows():
+                candle_time = _utc(timestamp)
+                prior = existing.get(candle_time)
+                if prior is None:
+                    continue
+                incoming_values = tuple(
+                    float(candle[key]) for key in ("Open", "High", "Low", "Close")
+                )
+                stored_values = (
+                    prior.open_price, prior.high_price,
+                    prior.low_price, prior.close_price,
+                )
+                if any(
+                    abs(float(a) - float(b)) > 1e-12
+                    for a, b in zip(incoming_values, stored_values)
+                ):
+                    correction_times.append(candle_time)
+
+            reconciliation = None
+            correction_repair_state = (
+                state.status in {"READY", "GAP_BLOCKED"}
+                or (
+                    state.status == "RECONCILIATION_REQUIRED"
+                    and (
+                        str(state.reconciliation_reason or "").startswith(
+                            "conflicting closed candle correction at "
+                        )
+                        or "authoritative CLOSED 5m coverage" in str(
+                            state.reconciliation_reason or ""
+                        )
+                    )
+                )
+            )
+            if correction_times and correction_repair_state and _automatic_correction_repair_allowed(
+                normalized_symbol,
+                normalized_timeframe,
+                allow_authoritative_correction_repair,
+            ):
+                previous_durable_watermark = (
+                    _utc(state.last_processed_candle)
+                    if state.last_processed_candle else None
+                )
+                conflict_time = min(correction_times)
+                coverage_failure = _correction_coverage_failure(
+                    frame,
+                    incoming,
+                    conflict_time,
+                    previous_durable_watermark,
+                )
+                if coverage_failure:
+                    affected_candle_count = sum(
+                        1 for timestamp in existing if timestamp >= conflict_time
+                    )
+                    affected_event_count = session.query(IndicatorEvent).filter(
+                        IndicatorEvent.symbol == normalized_symbol,
+                        IndicatorEvent.timeframe == normalized_timeframe,
+                        IndicatorEvent.candle_timestamp >= _db_datetime(conflict_time),
+                    ).count()
+                    _block_corrected_candle_repair(
+                        session,
+                        state,
+                        symbol=normalized_symbol,
+                        conflict_time=conflict_time,
+                        rollback_time=None,
+                        affected_candle_count=affected_candle_count,
+                        affected_event_count=affected_event_count,
+                        reason=coverage_failure,
+                        now=now,
+                    )
+                reconciliation = _rollback_corrected_candle_range(
+                    session, state, normalized_symbol, conflict_time, now
+                )
+                existing_rows = session.query(IndicatorCandle).filter(
+                    IndicatorCandle.symbol == normalized_symbol,
+                    IndicatorCandle.timeframe == normalized_timeframe,
+                ).all()
+                existing = {_utc(row.candle_timestamp): row for row in existing_rows}
+            elif correction_times:
+                if state.status == "RECONCILIATION_REQUIRED":
+                    raise IndicatorStreamUnavailable(
+                        state.reconciliation_reason
+                        or "indicator stream requires reconciliation"
+                    )
+                conflict_time = min(correction_times)
+                state.status = "RECONCILIATION_REQUIRED"
+                state.reconciliation_reason = f"conflicting closed candle correction at {conflict_time.isoformat()}"
+                state.updated_at = now
+                session.commit()
+                raise IndicatorStreamUnavailable(state.reconciliation_reason)
+            elif state.status == "RECONCILIATION_REQUIRED":
+                raise IndicatorStreamUnavailable(
+                    state.reconciliation_reason
+                    or "indicator stream requires reconciliation"
+                )
+            if not initialize and state.status not in {"READY", "GAP_BLOCKED"}:
+                raise IndicatorStreamUnavailable(f"indicator stream is {state.status}")
+
             latest_stored = max(existing) if existing else None
             late_insert = False
 
@@ -308,11 +656,9 @@ def get_authoritative_structure(
                 if prior is not None:
                     stored = (prior.open_price, prior.high_price, prior.low_price, prior.close_price)
                     if any(abs(float(a) - float(b)) > 1e-12 for a, b in zip(values, stored)):
-                        state.status = "RECONCILIATION_REQUIRED"
-                        state.reconciliation_reason = f"conflicting closed candle correction at {candle_time.isoformat()}"
-                        state.updated_at = now
-                        session.commit()
-                        raise IndicatorStreamUnavailable(state.reconciliation_reason)
+                        raise IndicatorStreamUnavailable(
+                            f"conflicting closed candle correction at {candle_time.isoformat()}"
+                        )
                     continue
                 if latest_stored is not None and candle_time < latest_stored:
                     late_insert = True
@@ -444,6 +790,17 @@ def get_authoritative_structure(
             state.updated_at = now
             session.commit()
 
+            if reconciliation is not None:
+                logger.warning("V3B_5M_RECONCILIATION_REPLAY_COMPLETE %s", {
+                    "symbol": normalized_symbol,
+                    "conflict_timestamp": reconciliation["conflict_timestamp"].isoformat(),
+                    "rollback_timestamp": reconciliation["rollback_timestamp"].isoformat(),
+                    "affected_candle_count": reconciliation["affected_candle_count"],
+                    "affected_event_count": reconciliation["affected_event_count"],
+                    "final_last_processed_candle": _utc(last_candle).isoformat(),
+                    "final_stream_status": state.status,
+                })
+
             event_rows = session.query(IndicatorEvent).filter(
                 IndicatorEvent.symbol == normalized_symbol,
                 IndicatorEvent.timeframe == normalized_timeframe,
@@ -478,6 +835,7 @@ def get_authoritative_structure(
                     session_factory=factory,
                     initialize=False,
                     allow_sparse_trendbars=allow_sparse_trendbars,
+                    allow_authoritative_correction_repair=allow_authoritative_correction_repair,
                 )
             raise IndicatorStreamUnavailable(str(exc)) from exc
         except Exception as exc:
