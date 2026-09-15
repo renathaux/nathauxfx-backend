@@ -22,6 +22,7 @@ from ctrader_connector import (
     start_ctrader_live_price_stream,
 )
 from services.customer_forex_guard import _bearer
+from services.indicator_candle_display_reader import load_closed_indicator_candles
 from services.user_auth_service import require_admin
 from indicators.smc import analyze_structure as analyze_xauusd_structure
 from indicators.smc.legacy_engine import analyze_structure as analyze_legacy_structure
@@ -86,17 +87,19 @@ def _serialize_closed_candles(frame, start_utc, end_utc, period_minutes):
     ]
 
 
-def _load_persisted_dashboard_candles(limit=500):
+def _load_durable_dashboard_candles(limit=500):
     """Build a bounded chart snapshot without invoking strategy or execution code."""
-    from ctrader_connector import load_persisted_ctrader_candle_cache
-
+    frames = load_closed_indicator_candles(
+        sorted(_ALLOWED_SYMBOLS),
+        _TIMEFRAME_MINUTES.keys(),
+        limit=limit,
+    )
     candles = {}
-    for symbol in sorted(_ALLOWED_SYMBOLS):
+    for symbol, symbol_frames in frames.items():
         symbol_candles = {}
         for timeframe, period_minutes in _TIMEFRAME_MINUTES.items():
             try:
-                persisted = load_persisted_ctrader_candle_cache(symbol, timeframe)
-                frame = persisted.get("data") if isinstance(persisted, dict) else persisted
+                frame = symbol_frames.get(timeframe)
                 if frame is None or frame.empty:
                     continue
                 data = frame.copy()
@@ -121,7 +124,7 @@ def _load_persisted_dashboard_candles(limit=500):
                     for timestamp, row in data.iterrows()
                 ]
             except Exception as exc:
-                print("DASHBOARD_DISPLAY_FALLBACK_SKIPPED =", {
+                print("DASHBOARD_DURABLE_DISPLAY_FALLBACK_SKIPPED =", {
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "error_type": type(exc).__name__,
@@ -295,7 +298,7 @@ def nonblocking_dashboard_feed(force: int = 0):
         age = max(now - last_update, 0) if last_update else 0
         display_only_fallback = False
         if not last_update and not isinstance(data.get("candles"), dict):
-            display_candles = _load_persisted_dashboard_candles()
+            display_candles = _load_durable_dashboard_candles()
             if display_candles:
                 data["candles"] = display_candles
                 display_only_fallback = True
