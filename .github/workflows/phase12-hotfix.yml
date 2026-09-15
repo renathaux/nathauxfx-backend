@@ -45,6 +45,7 @@ jobs:
             tests/test_v3b_15m_stream_recovery.py \
             tests/test_v3b_1h_stream_recovery.py \
             tests/test_v3b_recovery_cli.py \
+            tests/test_ctrader_live_stream_startup.py \
             tests/test_chart_closed_candle_fallback.py \
             tests/test_dashboard_display_fallback.py \
             tests/test_indicator_candle_display_reader.py

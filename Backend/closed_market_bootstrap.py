@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 
+from services.ctrader_live_stream_startup import install_ctrader_live_stream_startup
 from services.indicator_stream_account_scope import install_account_scoped_indicator_stream
 from services.monthly_history_window import (
     guarded_import_api,
@@ -27,6 +28,17 @@ install_account_scoped_indicator_stream()
 api = guarded_import_api()
 import app_bootstrap  # noqa: F401 - installs the production bootstrap hooks
 from strategies import shared as paper_shared
+
+# The strategy bootstrap intentionally returns when an authoritative indicator
+# stream is fenced. Start the read-only spot feed first so broker/feed status can
+# recover independently while analysis and execution remain fail-closed. The
+# later app_bootstrap call is idempotent and acts as a harmless retry.
+install_ctrader_live_stream_startup(
+    api.app,
+    api,
+    app_bootstrap._start_forex_background_task,
+    app_bootstrap._restore_ctrader_selection_before_market_data,
+)
 
 install_monthly_history_window(api, paper_shared)
 
