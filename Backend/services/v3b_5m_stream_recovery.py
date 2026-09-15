@@ -32,7 +32,7 @@ from services.indicator_stream_account_scope import (
 
 
 SUPPORTED_PUBLIC_SYMBOLS = {"EURUSD", "XAUUSD"}
-SUPPORTED_TIMEFRAMES = {"5m": 5, "15m": 15}
+SUPPORTED_TIMEFRAMES = {"5m": 5, "15m": 15, "1h": 60}
 RECOVERY_SOURCE = "v3b_5m_admin_recovery"
 IRREVERSIBLE_LIFECYCLE_STATUSES = {"SUBMITTING", "CONSUMED"}
 
