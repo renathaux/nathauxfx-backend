@@ -1,49 +1,61 @@
-import api
-import app_bootstrap
-from services.indicator_event_stream_service import IndicatorStreamUnavailable
+from types import SimpleNamespace
+
+from services.ctrader_live_stream_startup import install_ctrader_live_stream_startup
 
 
-def test_production_startup_starts_live_price_stream_before_indicator_fence(monkeypatch):
-    """A strategy reconciliation fence must not suppress the read-only tick feed."""
-    # Import the production entrypoint only for this test so its compatibility
-    # installers do not mutate indicator-stream globals during test collection.
-    import closed_market_bootstrap
+def test_live_stream_handler_is_installed_before_strategy_fence():
+    calls = []
 
-    starts = []
+    def strategy_startup():
+        calls.append("strategy")
+        raise RuntimeError("forced indicator fence")
 
-    monkeypatch.setattr(
-        app_bootstrap,
-        "_restore_ctrader_selection_before_market_data",
-        lambda: {"ok": True, "restored": False},
+    app = SimpleNamespace(
+        router=SimpleNamespace(on_startup=[strategy_startup]),
     )
-    monkeypatch.setattr(app_bootstrap, "verify_execution_protocol", lambda: True)
-    monkeypatch.setattr(
-        app_bootstrap,
-        "reconcile_incomplete_submissions",
-        lambda **_kwargs: {"ok": True, "reconciled": 0},
-    )
-    monkeypatch.setattr(
-        api,
-        "start_ctrader_live_price_stream",
-        lambda: starts.append("started") or {"ok": True, "status": "started"},
+    api_module = SimpleNamespace(
+        start_ctrader_live_price_stream=(
+            lambda: calls.append("live_stream")
+            or {"ok": True, "status": "started"}
+        ),
     )
 
-    def fail_indicator_startup(*_args, **_kwargs):
-        raise IndicatorStreamUnavailable("forced reconciliation fence")
-
-    monkeypatch.setattr(api, "get_ctrader_market_data", fail_indicator_startup)
-
-    live_handler = (
-        closed_market_bootstrap
-        ._start_ctrader_live_price_stream_before_indicator_fences
-    )
-    handlers = api.app.router.on_startup
-    assert handlers.index(live_handler) < handlers.index(
-        app_bootstrap._start_forex_background_task
+    handler = install_ctrader_live_stream_startup(
+        app,
+        api_module,
+        strategy_startup,
+        lambda: calls.append("restore_account"),
     )
 
-    live_handler()
-    app_bootstrap._start_forex_background_task()
+    assert app.router.on_startup == [handler, strategy_startup]
+    assert handler() == {"ok": True, "status": "started"}
+    assert calls == ["restore_account", "live_stream"]
 
-    assert starts == ["started"]
-    assert api.ENGINE_RUNTIME_STATE["indicator_stream_startup"]["ready"] is False
+    try:
+        strategy_startup()
+    except RuntimeError:
+        pass
+
+    assert calls == ["restore_account", "live_stream", "strategy"]
+
+
+def test_live_stream_startup_installer_is_idempotent():
+    def strategy_startup():
+        return None
+
+    app = SimpleNamespace(
+        router=SimpleNamespace(on_startup=[strategy_startup]),
+    )
+    api_module = SimpleNamespace(
+        start_ctrader_live_price_stream=lambda: {"ok": True},
+    )
+
+    first = install_ctrader_live_stream_startup(
+        app, api_module, strategy_startup, lambda: None
+    )
+    second = install_ctrader_live_stream_startup(
+        app, api_module, strategy_startup, lambda: None
+    )
+
+    assert first is second
+    assert app.router.on_startup == [first, strategy_startup]
