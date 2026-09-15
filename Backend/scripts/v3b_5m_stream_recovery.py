@@ -45,7 +45,7 @@ def main(argv=None):
     )
     parser.add_argument("--account-id", required=True)
     parser.add_argument("--symbol", required=True, choices=["EURUSD", "XAUUSD"])
-    parser.add_argument("--timeframe", default="5m", choices=["5m", "15m"])
+    parser.add_argument("--timeframe", default="5m", choices=["5m", "15m", "1h"])
     parser.add_argument("--storage-key", required=True)
     parser.add_argument("--earliest-required-at")
     parser.add_argument("--dry-run", action="store_true", default=False)
