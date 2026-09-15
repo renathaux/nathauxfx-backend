@@ -1,9 +1,10 @@
 import api
 import app_bootstrap
+import closed_market_bootstrap
 from services.indicator_event_stream_service import IndicatorStreamUnavailable
 
 
-def test_live_price_stream_starts_even_if_indicator_stream_startup_fails(monkeypatch):
+def test_production_startup_starts_live_price_stream_before_indicator_fence(monkeypatch):
     """A strategy reconciliation fence must not suppress the read-only tick feed."""
     starts = []
 
@@ -29,6 +30,16 @@ def test_live_price_stream_starts_even_if_indicator_stream_startup_fails(monkeyp
 
     monkeypatch.setattr(api, "get_ctrader_market_data", fail_indicator_startup)
 
+    live_handler = (
+        closed_market_bootstrap
+        ._start_ctrader_live_price_stream_before_indicator_fences
+    )
+    handlers = api.app.router.on_startup
+    assert handlers.index(live_handler) < handlers.index(
+        app_bootstrap._start_forex_background_task
+    )
+
+    live_handler()
     app_bootstrap._start_forex_background_task()
 
     assert starts == ["started"]
