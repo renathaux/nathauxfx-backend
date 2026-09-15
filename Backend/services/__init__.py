@@ -151,6 +151,62 @@ def _install_ctrader_sparse_trendbar_policy():
                 f"cTrader 15m settle filter unavailable: {exc}"
             ) from exc
 
+    def _durable_origin(symbol, timeframe, session_factory=None):
+        """Read the immutable replay boundary for an already-created stream."""
+        factory = session_factory or _stream.SessionLocal
+        session = factory()
+        try:
+            state = session.query(_stream.IndicatorStreamState).filter(
+                _stream.IndicatorStreamState.symbol == _stream._normal_symbol(symbol),
+                _stream.IndicatorStreamState.timeframe == _stream._normal_timeframe(timeframe),
+            ).one_or_none()
+            if state is None or state.origin_candle is None:
+                return None
+            return _stream._utc(state.origin_candle)
+        except Exception as exc:
+            raise _stream.IndicatorStreamUnavailable(
+                f"durable indicator origin unavailable: {exc}"
+            ) from exc
+        finally:
+            session.close()
+
+    def _anchor_existing_stream_to_origin(frame, symbol, timeframe, kwargs):
+        """Never let a deeper restart fetch expand an existing stream backwards."""
+        origin = _durable_origin(
+            symbol,
+            timeframe,
+            session_factory=kwargs.get("session_factory"),
+        )
+        if origin is None:
+            return frame, kwargs
+        try:
+            keep = [_stream._utc(value) >= origin for value in frame.index]
+            anchored_frame = frame.loc[keep].copy()
+        except Exception as exc:
+            raise _stream.IndicatorStreamUnavailable(
+                f"durable indicator origin filter unavailable: {exc}"
+            ) from exc
+
+        anchored_kwargs = dict(kwargs)
+        analyzer = anchored_kwargs.get("analyzer", _stream.legacy_analyze_structure)
+
+        @wraps(analyzer)
+        def analyzer_from_durable_origin(canonical, *args, **analyzer_kwargs):
+            try:
+                canonical_keep = [
+                    _stream._utc(value) >= origin
+                    for value in canonical.index
+                ]
+                canonical = canonical.loc[canonical_keep].copy()
+            except Exception as exc:
+                raise _stream.IndicatorStreamUnavailable(
+                    f"durable indicator replay origin filter unavailable: {exc}"
+                ) from exc
+            return analyzer(canonical, *args, **analyzer_kwargs)
+
+        anchored_kwargs["analyzer"] = analyzer_from_durable_origin
+        return anchored_frame, anchored_kwargs
+
     @wraps(original_initialize)
     def initialize_indicator_stream(frame, symbol, timeframe, point_size, *args, **kwargs):
         # V3B uses 5m only and the chart/execution authority still uses 15m.
@@ -197,6 +253,12 @@ def _install_ctrader_sparse_trendbar_policy():
             if is_ctrader
             else frame
         )
+        provider_frame, kwargs = _anchor_existing_stream_to_origin(
+            provider_frame,
+            symbol,
+            timeframe,
+            kwargs,
+        )
         return original_get(
             provider_frame,
             symbol,
@@ -213,6 +275,8 @@ def _install_ctrader_sparse_trendbar_policy():
     _stream._ctrader_now = _ctrader_now
     _stream._ctrader_provider_snapshot = _ctrader_provider_snapshot
     _stream._ctrader_mature_frame = _ctrader_mature_frame
+    _stream._durable_origin = _durable_origin
+    _stream._anchor_existing_stream_to_origin = _anchor_existing_stream_to_origin
     _stream.CTRADER_15M_SETTLE_SECONDS = CTRADER_15M_SETTLE_SECONDS
 
 
