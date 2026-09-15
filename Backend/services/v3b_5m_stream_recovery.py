@@ -1,8 +1,8 @@
-"""Purpose-built non-executing recovery for account-scoped V3B 5m streams.
+"""Purpose-built non-executing recovery for account-scoped V3B streams.
 
-This module is intentionally market-data + database only.  It never imports the
+This module is intentionally market-data + database only. It never imports the
 live execution adapter, trade submission service, or any cTrader order/position
-mutation helpers.  Callers must provide authoritative CLOSED candles and this
+mutation helpers. Callers must provide authoritative CLOSED candles and this
 service validates the full replacement suffix before a single transactional
 repair is allowed.
 """
@@ -23,6 +23,7 @@ from models import (
     IndicatorStreamState,
     TradeSubmissionAttempt,
 )
+from services import auto_trade_state_service
 from services import indicator_event_stream_service as stream
 from services.indicator_stream_account_scope import (
     active_ctrader_stream_scope,
@@ -31,6 +32,7 @@ from services.indicator_stream_account_scope import (
 
 
 SUPPORTED_PUBLIC_SYMBOLS = {"EURUSD", "XAUUSD"}
+SUPPORTED_TIMEFRAMES = {"5m": 5, "15m": 15}
 RECOVERY_SOURCE = "v3b_5m_admin_recovery"
 IRREVERSIBLE_LIFECYCLE_STATUSES = {"SUBMITTING", "CONSUMED"}
 
@@ -55,7 +57,22 @@ def _public_symbol(value):
 
 def _timeframe(value):
     text = str(value or "").strip().lower()
-    return {"5min": "5m", "m5": "5m"}.get(text, text)
+    return {
+        "5min": "5m",
+        "m5": "5m",
+        "15min": "15m",
+        "m15": "15m",
+    }.get(text, text)
+
+
+def _timeframe_minutes(value):
+    timeframe = _timeframe(value)
+    minutes = SUPPORTED_TIMEFRAMES.get(timeframe)
+    if minutes is None:
+        raise V3B5MRecoveryBlocked(
+            f"V3B recovery supports {', '.join(SUPPORTED_TIMEFRAMES)} only"
+        )
+    return timeframe, minutes
 
 
 def _utc(value):
@@ -148,9 +165,16 @@ def _recognized_ctrader_sparse_gap(public_symbol, previous, following):
     return False
 
 
-def validate_closed_history_coverage(frame, earliest, old_watermark, public_symbol=None):
+def validate_closed_history_coverage(
+    frame,
+    earliest,
+    old_watermark,
+    public_symbol=None,
+    timeframe="5m",
+):
     if old_watermark is None:
         raise V3B5MRecoveryBlocked("old durable watermark is unavailable")
+    timeframe, interval_minutes = _timeframe_minutes(timeframe)
     earliest = _utc(earliest)
     old_watermark = _utc(old_watermark)
     if earliest > old_watermark:
@@ -176,7 +200,7 @@ def validate_closed_history_coverage(frame, earliest, old_watermark, public_symb
             f"authoritative CLOSED history gap: missing {earliest.isoformat()}"
         )
 
-    interval = pd.Timedelta(minutes=5)
+    interval = pd.Timedelta(minutes=interval_minutes)
     sparse_gaps = []
     for timestamp in available:
         if (timestamp - earliest) % interval != pd.Timedelta(0):
@@ -234,15 +258,16 @@ def _build_plan(session, request, closed_frame):
     public, scope, storage_key = resolve_verified_storage_key(
         request.account_id, request.symbol, request.storage_key
     )
-    if _timeframe(request.timeframe) != "5m":
-        raise V3B5MRecoveryBlocked("V3B recovery supports 5m only")
+    timeframe, _interval_minutes = _timeframe_minutes(request.timeframe)
 
-    stream._database_lock(session, storage_key, "5m")
+    stream._database_lock(session, storage_key, timeframe)
     state = session.query(IndicatorStreamState).filter_by(
-        symbol=storage_key, timeframe="5m"
+        symbol=storage_key, timeframe=timeframe
     ).with_for_update().one_or_none()
     if state is None:
-        raise V3B5MRecoveryBlocked(f"stream {storage_key} 5m is not initialized")
+        raise V3B5MRecoveryBlocked(
+            f"stream {storage_key} {timeframe} is not initialized"
+        )
     if state.status != "RECONCILIATION_REQUIRED":
         return {
             "safe": True,
@@ -250,12 +275,13 @@ def _build_plan(session, request, closed_frame):
             "reason": "stream is not reconciliation-required",
             "resolved_scoped_key": storage_key,
             "stream_scope": scope,
+            "timeframe": timeframe,
             "old_watermark": _iso(state.last_processed_candle),
             "status": state.status,
         }
 
     event_rows = session.query(IndicatorEvent).filter_by(
-        symbol=storage_key, timeframe="5m"
+        symbol=storage_key, timeframe=timeframe
     ).with_for_update().all()
     lifecycle_rows = []
     if event_rows:
@@ -267,7 +293,11 @@ def _build_plan(session, request, closed_frame):
     )
     closed = normalize_authoritative_closed_frame(closed_frame)
     coverage = validate_closed_history_coverage(
-        closed, earliest, state.last_processed_candle, public_symbol=public
+        closed,
+        earliest,
+        state.last_processed_candle,
+        public_symbol=public,
+        timeframe=timeframe,
     )
     affected_event_ids = _event_ids_for_rebuild(event_rows, lifecycle_rows, earliest)
     affected_lifecycle = [row for row in lifecycle_rows if row.event_id in affected_event_ids]
@@ -292,28 +322,40 @@ def _build_plan(session, request, closed_frame):
         )
     replace_candles = session.query(IndicatorCandle).filter(
         IndicatorCandle.symbol == storage_key,
-        IndicatorCandle.timeframe == "5m",
+        IndicatorCandle.timeframe == timeframe,
         IndicatorCandle.candle_timestamp >= _db(earliest),
     ).count()
     rebuilt_event_ids = []
     candle_rows = session.query(IndicatorCandle).filter(
         IndicatorCandle.symbol == storage_key,
-        IndicatorCandle.timeframe == "5m",
+        IndicatorCandle.timeframe == timeframe,
         IndicatorCandle.candle_timestamp < _db(earliest),
     ).order_by(
         IndicatorCandle.candle_timestamp.asc(), IndicatorCandle.id.asc()
     ).all()
     prefix = stream._stored_frame(candle_rows)
     replacement = closed[closed.index >= earliest]
-    replay_frame = pd.concat([prefix, replacement]).sort_index() if not prefix.empty else replacement
-    for raw_event in (default_analyzer(
-        replay_frame, timeframe="5m", point_size=0.01 if public == "XAUUSD" else 0.00001
-    ) or {}).get("events") or []:
+    replay_frame = (
+        pd.concat([prefix, replacement]).sort_index()
+        if not prefix.empty
+        else replacement
+    )
+    point_size = 0.01 if public == "XAUUSD" else 0.00001
+    for raw_event in (
+        default_analyzer(
+            replay_frame,
+            timeframe=timeframe,
+            point_size=point_size,
+        ) or {}
+    ).get("events") or []:
         if not isinstance(raw_event, dict) or not raw_event.get("timestamp"):
             continue
         if _utc(raw_event["timestamp"]) >= earliest:
             _identity, event_id = stream.build_event_identity(
-                raw_event, storage_key, "5m", 0.01 if public == "XAUUSD" else 0.00001
+                raw_event,
+                storage_key,
+                timeframe,
+                point_size,
             )
             rebuilt_event_ids.append(event_id)
 
@@ -324,6 +366,7 @@ def _build_plan(session, request, closed_frame):
         "resolved_scoped_key": storage_key,
         "public_symbol": public,
         "stream_scope": scope,
+        "timeframe": timeframe,
         "earliest_rebuild_timestamp": earliest.isoformat(),
         "old_watermark": _iso(state.last_processed_candle),
         "fetched_closed_history_start": _iso(closed.index[0]),
@@ -358,10 +401,23 @@ def plan_recovery(request, closed_frame, *, session_factory=None):
             session.close()
 
 
+def _require_live_auto_disabled(session_factory=None):
+    state = auto_trade_state_service.load_state(
+        session_factory=session_factory,
+        force_refresh=True,
+    )
+    if bool((state or {}).get("live_enabled")):
+        raise V3B5MRecoveryBlocked(
+            "LIVE Auto must be disabled before recovery apply"
+        )
+
+
 def apply_recovery(request, closed_frame, point_size, *, analyzer=None, session_factory=None):
     """Apply one locked transaction after a successful dry-run plan."""
     if request.dry_run:
         return plan_recovery(request, closed_frame, session_factory=session_factory)
+
+    _require_live_auto_disabled(session_factory=session_factory)
     factory = session_factory or SessionLocal
     effective_analyzer = analyzer or default_analyzer
     with stream._STREAM_LOCK:
@@ -373,6 +429,7 @@ def apply_recovery(request, closed_frame, point_size, *, analyzer=None, session_
                 session.rollback()
                 return plan
             storage_key = plan["resolved_scoped_key"]
+            timeframe = plan["timeframe"]
             earliest = _utc(plan["earliest_rebuild_timestamp"])
             old_watermark = _utc(plan["old_watermark"])
             closed = normalize_authoritative_closed_frame(closed_frame)
@@ -386,7 +443,7 @@ def apply_recovery(request, closed_frame, point_size, *, analyzer=None, session_
                 ).delete(synchronize_session=False)
             session.query(IndicatorCandle).filter(
                 IndicatorCandle.symbol == storage_key,
-                IndicatorCandle.timeframe == "5m",
+                IndicatorCandle.timeframe == timeframe,
                 IndicatorCandle.candle_timestamp >= _db(earliest),
             ).delete(synchronize_session=False)
 
@@ -394,7 +451,7 @@ def apply_recovery(request, closed_frame, point_size, *, analyzer=None, session_
             for timestamp, candle in replacement.iterrows():
                 session.add(IndicatorCandle(
                     symbol=storage_key,
-                    timeframe="5m",
+                    timeframe=timeframe,
                     candle_timestamp=_db(timestamp),
                     open_price=float(candle["Open"]),
                     high_price=float(candle["High"]),
@@ -405,16 +462,30 @@ def apply_recovery(request, closed_frame, point_size, *, analyzer=None, session_
             session.flush()
 
             candle_rows = session.query(IndicatorCandle).filter_by(
-                symbol=storage_key, timeframe="5m"
-            ).order_by(IndicatorCandle.candle_timestamp.asc(), IndicatorCandle.id.asc()).all()
+                symbol=storage_key,
+                timeframe=timeframe,
+            ).order_by(
+                IndicatorCandle.candle_timestamp.asc(),
+                IndicatorCandle.id.asc(),
+            ).all()
             canonical = stream._stored_frame(candle_rows)
-            analysis = effective_analyzer(canonical, timeframe="5m", point_size=float(point_size))
+            analysis = effective_analyzer(
+                canonical,
+                timeframe=timeframe,
+                point_size=float(point_size),
+            )
             persisted_ids = {
                 value for (value,) in session.query(IndicatorEvent.event_id).filter_by(
-                    symbol=storage_key, timeframe="5m"
+                    symbol=storage_key,
+                    timeframe=timeframe,
                 ).all()
             }
             rebuilt_event_ids = []
+            state = session.query(IndicatorStreamState).filter_by(
+                symbol=storage_key,
+                timeframe=timeframe,
+            ).with_for_update().one()
+            activation_watermark = state.activation_watermark
             for raw_event in (analysis or {}).get("events") or []:
                 if not isinstance(raw_event, dict) or not raw_event.get("timestamp"):
                     continue
@@ -422,7 +493,10 @@ def apply_recovery(request, closed_frame, point_size, *, analyzer=None, session_
                 if event_time < earliest:
                     continue
                 identity, event_id = stream.build_event_identity(
-                    raw_event, storage_key, "5m", point_size
+                    raw_event,
+                    storage_key,
+                    timeframe,
+                    point_size,
                 )
                 if event_id in persisted_ids:
                     continue
@@ -432,7 +506,7 @@ def apply_recovery(request, closed_frame, point_size, *, analyzer=None, session_
                 session.add(IndicatorEvent(
                     event_id=event_id,
                     symbol=storage_key,
-                    timeframe="5m",
+                    timeframe=timeframe,
                     candle_timestamp=_db(event_time),
                     classification=identity["classification"],
                     direction=identity["direction"],
@@ -442,24 +516,21 @@ def apply_recovery(request, closed_frame, point_size, *, analyzer=None, session_
                     payload=payload,
                     configuration_version=stream.CONFIGURATION_VERSION,
                     is_historical=bool(
-                        session.query(IndicatorStreamState).filter_by(
-                            symbol=storage_key, timeframe="5m"
-                        ).one().activation_watermark
-                        and event_time <= _utc(session.query(IndicatorStreamState).filter_by(
-                            symbol=storage_key, timeframe="5m"
-                        ).one().activation_watermark)
+                        activation_watermark
+                        and event_time <= _utc(activation_watermark)
                     ),
                     created_at=now,
                 ))
                 persisted_ids.add(event_id)
                 rebuilt_event_ids.append(event_id)
 
-            state = session.query(IndicatorStreamState).filter_by(
-                symbol=storage_key, timeframe="5m"
-            ).with_for_update().one()
             latest_candle = _utc(canonical.index[-1])
             if latest_candle < old_watermark:
                 raise V3B5MRecoveryBlocked("recovery would move watermark backward")
+
+            # Re-check immediately before committing the repair. If LIVE Auto was
+            # re-enabled while the recovery was being prepared, fail closed.
+            _require_live_auto_disabled(session_factory=session_factory)
             state.last_processed_candle = _db(latest_candle)
             state.status = "READY"
             state.reconciliation_reason = None
@@ -480,8 +551,14 @@ def apply_recovery(request, closed_frame, point_size, *, analyzer=None, session_
             session.close()
 
 
-def history_start_for_recovery(earliest_required_at, old_watermark, lookback_candles=250):
+def history_start_for_recovery(
+    earliest_required_at,
+    old_watermark,
+    lookback_candles=250,
+    timeframe="5m",
+):
+    _timeframe_name, interval_minutes = _timeframe_minutes(timeframe)
     earliest = _utc(earliest_required_at)
     old = _utc(old_watermark)
     floor = min(earliest, old)
-    return floor - timedelta(minutes=5 * int(lookback_candles))
+    return floor - timedelta(minutes=interval_minutes * int(lookback_candles))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Admin CLI for non-executing V3B 5m account-scoped stream recovery."""
+"""Admin CLI for non-executing V3B account-scoped stream recovery."""
 from __future__ import annotations
 
 import argparse
@@ -20,16 +20,16 @@ def _json_default(value):
     return str(value)
 
 
-def _load_state(storage_key):
+def _load_state(storage_key, timeframe):
     session = recovery.SessionLocal()
     try:
         state = session.query(IndicatorStreamState).filter_by(
-            symbol=storage_key, timeframe="5m"
+            symbol=storage_key, timeframe=timeframe
         ).one_or_none()
         if state is None:
-            raise SystemExit(f"stream {storage_key} 5m is not initialized")
+            raise SystemExit(f"stream {storage_key} {timeframe} is not initialized")
         events = session.query(IndicatorEvent).filter_by(
-            symbol=storage_key, timeframe="5m"
+            symbol=storage_key, timeframe=timeframe
         ).all()
         earliest = recovery.infer_earliest_rebuild_timestamp(state, events)
         if state.last_processed_candle is None:
@@ -41,11 +41,11 @@ def _load_state(storage_key):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Recover one active account-scoped V3B 5m stream without broker execution."
+        description="Recover one active account-scoped V3B stream without broker execution."
     )
     parser.add_argument("--account-id", required=True)
     parser.add_argument("--symbol", required=True, choices=["EURUSD", "XAUUSD"])
-    parser.add_argument("--timeframe", default="5m", choices=["5m"])
+    parser.add_argument("--timeframe", default="5m", choices=["5m", "15m"])
     parser.add_argument("--storage-key", required=True)
     parser.add_argument("--earliest-required-at")
     parser.add_argument("--dry-run", action="store_true", default=False)
@@ -56,13 +56,25 @@ def main(argv=None):
         raise SystemExit("choose exactly one of --dry-run or --apply")
 
     explicit = args.earliest_required_at
-    inferred, old_watermark = _load_state(args.storage_key)
+    inferred, old_watermark = _load_state(args.storage_key, args.timeframe)
     earliest = pd.Timestamp(explicit) if explicit else inferred
     start = recovery.history_start_for_recovery(
-        earliest, old_watermark, lookback_candles=args.lookback_candles
+        earliest,
+        old_watermark,
+        lookback_candles=args.lookback_candles,
+        timeframe=args.timeframe,
     )
-    end = pd.Timestamp.now(tz="UTC").floor("5min") - pd.Timedelta(minutes=5)
-    frame = fetch_ctrader_historical_candles(args.symbol, "5m", start, end)
+    interval_minutes = recovery.SUPPORTED_TIMEFRAMES[args.timeframe]
+    end = (
+        pd.Timestamp.now(tz="UTC").floor(f"{interval_minutes}min")
+        - pd.Timedelta(minutes=interval_minutes)
+    )
+    frame = fetch_ctrader_historical_candles(
+        args.symbol,
+        args.timeframe,
+        start,
+        end,
+    )
     request = recovery.RecoveryRequest(
         account_id=args.account_id,
         symbol=args.symbol,
