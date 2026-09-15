@@ -86,6 +86,51 @@ def _serialize_closed_candles(frame, start_utc, end_utc, period_minutes):
     ]
 
 
+def _load_persisted_dashboard_candles(limit=500):
+    """Build a bounded chart snapshot without invoking strategy or execution code."""
+    from ctrader_connector import load_persisted_ctrader_candle_cache
+
+    candles = {}
+    for symbol in sorted(_ALLOWED_SYMBOLS):
+        symbol_candles = {}
+        for timeframe, period_minutes in _TIMEFRAME_MINUTES.items():
+            try:
+                persisted = load_persisted_ctrader_candle_cache(symbol, timeframe)
+                frame = persisted.get("data") if isinstance(persisted, dict) else persisted
+                if frame is None or frame.empty:
+                    continue
+                data = frame.copy()
+                data.index = data.index.map(
+                    lambda value: value if getattr(value, "tzinfo", None) else value.tz_localize("UTC")
+                )
+                data = data[~data.index.duplicated(keep="last")].sort_index().tail(limit)
+                period = timedelta(minutes=period_minutes)
+                closed_before = datetime.now(timezone.utc)
+                data = data[
+                    data.index.map(lambda value: value.to_pydatetime() + period <= closed_before)
+                ]
+                symbol_candles[timeframe] = [
+                    {
+                        "time": int(timestamp.timestamp()),
+                        "open": float(row["Open"]),
+                        "high": float(row["High"]),
+                        "low": float(row["Low"]),
+                        "close": float(row["Close"]),
+                        **({"volume": float(row["Volume"])} if "Volume" in row.index else {}),
+                    }
+                    for timestamp, row in data.iterrows()
+                ]
+            except Exception as exc:
+                print("DASHBOARD_DISPLAY_FALLBACK_SKIPPED =", {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "error_type": type(exc).__name__,
+                })
+        if symbol_candles:
+            candles[symbol] = symbol_candles
+    return candles
+
+
 def _fetch_read_only_ticks(symbol, quote, start_utc, end_utc):
     """Fetch a tiny historical tick window directly from cTrader without persistence."""
     config = _ctrader_connector.get_ctrader_config()
@@ -248,6 +293,25 @@ def nonblocking_dashboard_feed(force: int = 0):
         now = time.time()
         last_update = float(api.PANEL_CACHE.get("last_update") or 0)
         age = max(now - last_update, 0) if last_update else 0
+        display_only_fallback = False
+        if not last_update and not isinstance(data.get("candles"), dict):
+            display_candles = _load_persisted_dashboard_candles()
+            if display_candles:
+                data["candles"] = display_candles
+                display_only_fallback = True
+                for symbol in ("EURUSD", "XAUUSD"):
+                    if not isinstance(data.get(symbol), dict):
+                        data[symbol] = {}
+                    data[symbol].update({
+                        "signal": "WAIT",
+                        "signal_text": "WAIT (analysis unavailable)",
+                        "market_condition": "DISPLAY_ONLY",
+                        "signal_data_source": {
+                            "available": False,
+                            "display_available": bool(display_candles.get(symbol)),
+                            "reason": "TRADING_ENGINE_STARTUP_FENCED",
+                        },
+                    })
         refresh_state = clone_panel_for_transport(api.PANEL_REFRESH_STATE or {})
         if not isinstance(refresh_state, dict):
             refresh_state = {}
@@ -305,6 +369,13 @@ def nonblocking_dashboard_feed(force: int = 0):
             "source": "dashboard_feed_cache_only_cycle_safe",
             "cache_age_seconds": round(age, 1),
             "stale_data": bool(refresh_state.get("last_error") or not last_update),
+            "analysis_available": bool(last_update),
+            "display_only_fallback": display_only_fallback,
+            "display_data_source": (
+                "persisted_ctrader_closed_candles"
+                if display_only_fallback
+                else "panel_cache"
+            ),
             "last_successful_refresh": refresh_state.get("last_success"),
             "refresh_seconds": getattr(api, "CACHE_SECONDS", 15),
             "error": refresh_state.get("last_error"),
