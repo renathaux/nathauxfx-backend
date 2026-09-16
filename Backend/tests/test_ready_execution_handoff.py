@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import api
+from ctrader_account_context import AccountIdentity
 from strategies import shared
 
 
@@ -109,6 +110,9 @@ class ReadyExecutionHandoffTests(unittest.TestCase):
         selection = patch.object(api, 'get_active_ctrader_account_id', return_value='handoff-test')
         selection.start()
         self.addCleanup(selection.stop)
+        identity = patch('ctrader_account_context.selected_identity', return_value=AccountIdentity('handoff-test', 'demo'))
+        identity.start()
+        self.addCleanup(identity.stop)
         self.auto_enabled = api.LIVE_AUTO_TRADE_ENABLED.get("enabled")
         self.account_state = copy.deepcopy(api.LIVE_ACCOUNT_STATE)
         self.trade_history = copy.deepcopy(api.LIVE_TRADE_HISTORY)
@@ -129,6 +133,7 @@ class ReadyExecutionHandoffTests(unittest.TestCase):
     @staticmethod
     def panel(plan=None):
         return {
+            "_meta": {"account_scope": "CTRADER:DEMO:handoff-test"},
             "EURUSD": {"symbol": "EURUSD", "signal": "WAIT"},
             "XAUUSD": plan or ready_plan(),
             "candles": {},

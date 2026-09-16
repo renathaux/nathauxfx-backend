@@ -17,6 +17,10 @@ import math
 import traceback
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from ctrader_account_context import (
+    account_operation, account_state_operation, current_identity,
+    assert_current_selection, AccountSelectionChanged,
+)
 from ctrader_connector import (
     CTRADER_PAYLOAD_VOLUME_SCALE,
     build_ctrader_authorization_url,
@@ -786,6 +790,12 @@ def process_signal_email_alerts(panel_data):
 
 
 def update_panel_cache(data, source):
+    from ctrader_account_context import selected_identity, AccountSelectionChanged
+    identity = selected_identity()
+    scope = (data.get("_meta") or {}).get("account_scope") if isinstance(data, dict) else None
+    revision = (data.get("_meta") or {}).get("selection_revision") if isinstance(data, dict) else None
+    if scope and (identity is None or scope != identity.scope or revision != identity.selection_revision):
+        raise AccountSelectionChanged("cTrader account selection changed before panel publication")
     validity = _panel_cache_validity(data)
     if not validity["valid"]:
         raise ValueError(
@@ -815,7 +825,14 @@ def calculate_fresh_panel_data(reason, force_refresh=False):
         "reason": reason,
         "force_refresh": bool(force_refresh),
     })
-    return get_panel_data(force_refresh=force_refresh)
+    from ctrader_account_context import pinned_account, assert_current_selection
+    with pinned_account() as identity:
+        data = get_panel_data(force_refresh=force_refresh)
+        assert_current_selection(identity)
+        if identity is not None:
+            data.setdefault("_meta", {})["account_scope"] = identity.scope
+            data["_meta"]["selection_revision"] = identity.selection_revision
+        return data
 
 
 def _actionable_panel_plans(panel_data):
@@ -1906,7 +1923,11 @@ def overlay_live_forming_candles(panel_data, live_price_status, now=None):
     return panel_data
 
 
+@account_state_operation
 def refresh_live_panel_meta(panel_data):
+    identity = current_identity()
+    if identity and (panel_data.get("_meta") or {}).get("account_scope") != identity.scope:
+        return False
     actionable_plans = _actionable_panel_plans(panel_data)
 
     try:
@@ -2015,6 +2036,7 @@ def refresh_live_panel_meta(panel_data):
     )
 
     LIVE_PANEL_META_CACHE.update({
+        "account_scope": current_identity().scope if current_identity() else None,
         "live_positions": live_positions or [],
         "live_price_status": live_price_status or {},
         "live_pl_sync": live_pl_sync or {},
@@ -3265,6 +3287,7 @@ LIVE_ACTIVE_ORDERS = {
 }
 
 LIVE_TRADE_HISTORY = []
+LIVE_ACCOUNT_CLOSE_TIMES = {}
 LIVE_BROKER_CLOSED_HISTORY = []
 LIVE_BROKER_HISTORY_CACHE = {
     "updated_at": 0,
@@ -3298,6 +3321,21 @@ def get_live_post_close_cooldown_seconds():
     return get_configured_cooldown_seconds()
 
 
+@account_operation
+def get_account_closed_at(symbol):
+    identity = current_identity()
+    values = LIVE_ACCOUNT_CLOSE_TIMES.get(identity.scope, {}) if identity else LIVE_LAST_POSITION_CLOSED_AT
+    return float(values.get(normalize_symbol(symbol), 0) or 0)
+
+
+@account_operation
+def set_account_closed_at(symbol, timestamp):
+    identity = current_identity()
+    values = LIVE_ACCOUNT_CLOSE_TIMES.setdefault(identity.scope, {}) if identity else LIVE_LAST_POSITION_CLOSED_AT
+    symbol = normalize_symbol(symbol)
+    values[symbol] = max(float(values.get(symbol, 0) or 0), float(timestamp))
+
+
 def invalidate_symbol_setup_state(
     symbol,
     closed_at,
@@ -3310,10 +3348,7 @@ def invalidate_symbol_setup_state(
     except (TypeError, ValueError):
         closed_timestamp = time.time()
 
-    LIVE_LAST_POSITION_CLOSED_AT[normalized_symbol] = max(
-        float(LIVE_LAST_POSITION_CLOSED_AT.get(normalized_symbol, 0) or 0),
-        closed_timestamp,
-    )
+    set_account_closed_at(normalized_symbol, closed_timestamp)
     try:
         news_trading.mark_running_trade_closed(
             normalized_symbol,
@@ -3508,6 +3543,16 @@ def set_auto_trade_status(symbol=None, signal=None, action=None, status="WAITING
     )
     return AUTO_TRADE_LAST_STATUS
 
+def _trade_matches_operation_account(trade):
+    identity = current_identity()
+    return identity is None or (isinstance(trade, dict) and trade.get("account_scope") == identity.scope)
+
+
+def get_current_live_trade(symbol):
+    trade = LIVE_ACTIVE_ORDERS.get(symbol)
+    return trade if trade and _trade_matches_operation_account(trade) else None
+
+
 def get_persistable_live_active_orders():
     return {
         symbol: trade
@@ -3610,7 +3655,7 @@ def enrich_broker_closed_trade_levels(trade):
             *LIVE_ACTIVE_ORDERS.values(),
             *LIVE_TRADE_HISTORY,
         ]
-        if isinstance(item, dict)
+        if isinstance(item, dict) and _trade_matches_operation_account(item)
     ]
     local_trade = next(
         (
@@ -3681,13 +3726,16 @@ def enrich_broker_closed_trade_levels(trade):
 
     return merged
 
+@account_state_operation
 def get_live_broker_closed_history(force=False):
     run_weekly_live_reset()
 
     now = time.time()
+    scope = current_identity().scope if current_identity() else None
 
     if (
         not force
+        and LIVE_BROKER_HISTORY_CACHE.get("account_scope") == scope
         and LIVE_BROKER_HISTORY_CACHE.get("history")
         and now - LIVE_BROKER_HISTORY_CACHE.get("updated_at", 0) < 20
     ):
@@ -3708,6 +3756,7 @@ def get_live_broker_closed_history(force=False):
     LIVE_BROKER_CLOSED_HISTORY[:] = broker_history[:MAX_LIVE_TRADE_HISTORY]
     LIVE_BROKER_HISTORY_CACHE["history"] = list(LIVE_BROKER_CLOSED_HISTORY)
     LIVE_BROKER_HISTORY_CACHE["updated_at"] = now
+    LIVE_BROKER_HISTORY_CACHE["account_scope"] = scope
     print("LIVE_BROKER_HISTORY_SYNC =", {
         "closed_trades": len(LIVE_BROKER_CLOSED_HISTORY),
         "realized_pl": round(sum(item.get("broker_realized_profit") or 0 for item in LIVE_BROKER_CLOSED_HISTORY), 2),
@@ -3715,18 +3764,22 @@ def get_live_broker_closed_history(force=False):
 
     return list(LIVE_BROKER_CLOSED_HISTORY)
 
+@account_state_operation
 def get_live_broker_monthly_history(force=False):
     now = time.time()
+    scope = current_identity().scope if current_identity() else None
+    matching = LIVE_MONTHLY_HISTORY_CACHE.get("account_scope") == scope
     month_key = datetime.now(LIVE_MARKET_TIMEZONE).strftime("%Y-%m")
 
     if (
         not force
+        and matching
         and LIVE_MONTHLY_HISTORY_CACHE.get("month_key") == month_key
         and now - LIVE_MONTHLY_HISTORY_CACHE.get("updated_at", 0) < 60
     ):
         return list(LIVE_MONTHLY_HISTORY_CACHE.get("history") or [])
 
-    previous_history = list(LIVE_MONTHLY_HISTORY_CACHE.get("history") or [])
+    previous_history = list(LIVE_MONTHLY_HISTORY_CACHE.get("history") or []) if matching else []
     previous_month_key = LIVE_MONTHLY_HISTORY_CACHE.get("month_key")
 
     try:
@@ -3749,9 +3802,11 @@ def get_live_broker_monthly_history(force=False):
     LIVE_MONTHLY_HISTORY_CACHE["history"] = list(monthly_history or [])
     LIVE_MONTHLY_HISTORY_CACHE["updated_at"] = now
     LIVE_MONTHLY_HISTORY_CACHE["month_key"] = month_key
+    LIVE_MONTHLY_HISTORY_CACHE["account_scope"] = scope
     save_live_monthly_history_cache()
     return list(LIVE_MONTHLY_HISTORY_CACHE["history"])
 
+@account_operation
 def get_live_recent_history_for_panel():
     run_weekly_live_reset()
 
@@ -3768,6 +3823,8 @@ def get_live_recent_history_for_panel():
     cleaned = []
 
     for trade in LIVE_TRADE_HISTORY:
+        if not _trade_matches_operation_account(trade):
+            continue
         if str(get_live_trade_match_key(trade)) in active_ids:
             continue
 
@@ -3855,6 +3912,7 @@ def save_live_backup():
     try:
         with open(LIVE_BACKUP_FILE, "w") as f:
             json.dump({
+                "account_close_times": LIVE_ACCOUNT_CLOSE_TIMES,
                 "live_active_orders":
                     get_persistable_live_active_orders(),
                 "live_trade_history":
@@ -3875,7 +3933,7 @@ def persist_live_trade_state(trade):
         return
     symbol = normalize_symbol(trade.get("symbol"))
     active = LIVE_ACTIVE_ORDERS.get(symbol)
-    if isinstance(active, dict) and broker_position_matches_trade(active, trade):
+    if isinstance(active, dict) and active.get("account_scope") == trade.get("account_scope") and broker_position_matches_trade(active, trade):
         LIVE_ACTIVE_ORDERS[symbol] = copy.deepcopy(trade)
     save_live_backup()
 
@@ -4959,6 +5017,7 @@ def update_live_trade_tp_protection(trade):
 
     return trade
 
+@account_operation
 def calculate_live_trade_stats():
     run_weekly_live_reset()
 
@@ -4968,7 +5027,9 @@ def calculate_live_trade_stats():
         if trade and get_live_trade_match_key(trade)
     }
     broker_history = get_live_broker_closed_history()
-    history_source = broker_history if broker_history else LIVE_TRADE_HISTORY
+    history_source = broker_history if broker_history else [
+        trade for trade in LIVE_TRADE_HISTORY if _trade_matches_operation_account(trade)
+    ]
     today_history = [
         trade for trade in history_source
         if trade_is_today(trade)
@@ -4977,7 +5038,7 @@ def calculate_live_trade_stats():
     ]
     today_active = [
         trade for trade in LIVE_ACTIVE_ORDERS.values()
-        if trade and trade_is_today(trade)
+        if trade and _trade_matches_operation_account(trade) and trade_is_today(trade)
     ]
     seen = set()
     total_today = 0
@@ -5036,6 +5097,7 @@ def calculate_live_trade_stats():
         "total_pnl": round(total_pl, 2),
     }
 
+@account_operation
 def calculate_live_pl_sync():
     run_weekly_live_reset()
     weekly_history = get_live_broker_closed_history(force=True)
@@ -5083,6 +5145,17 @@ def calculate_live_pl_sync():
         })
 
     floating_live_pl = sum(floating_values)
+    if current_identity() is not None:
+        # A symbol-global display cache cannot authorize another account's loss
+        # limit. Use that pinned account's verified broker equity and balance.
+        snapshot = get_ctrader_account_snapshot()
+        if (str(snapshot.get("account_id")) != current_identity().account_id
+                or snapshot.get("mode") != current_identity().environment
+                or not snapshot.get("balance_verified") or not snapshot.get("equity_verified")):
+            raise RuntimeError("selected account floating P/L is not verified")
+        floating_live_pl = float(snapshot["equity"]) - float(snapshot["balance"])
+        if not math.isfinite(floating_live_pl):
+            raise RuntimeError("selected account floating P/L is invalid")
     daily_total_pl = daily_realized_pl + floating_live_pl
     weekly_total_pl = weekly_realized_pl + floating_live_pl
 
@@ -5665,6 +5738,10 @@ def load_live_backup():
         with open(LIVE_BACKUP_FILE, "r") as f:
             backup = json.load(f)
 
+        for name, target in (("account_close_times", LIVE_ACCOUNT_CLOSE_TIMES),):
+            if isinstance(backup.get(name), dict):
+                target.update(backup[name])
+
         active_orders = backup.get("live_active_orders", {})
         history = backup.get("live_trade_history", [])
         last_execution_time = backup.get("live_last_execution_time", {})
@@ -5740,8 +5817,10 @@ def load_live_backup():
 
 load_live_backup()
 
+@account_state_operation
 def sync_ctrader_account_state(force=False):
     connector_state = get_connection_state(force=force)
+    assert_current_selection()
 
     LIVE_ACCOUNT_STATE["connected"] = connector_state["connected"]
     LIVE_ACCOUNT_STATE["mode"] = connector_state["mode"]
@@ -5781,6 +5860,8 @@ def get_signal_trade_plan(symbol):
     execution_symbol = normalize_symbol(symbol)
 
     if not isinstance(cached_data, dict):
+        return None
+    if current_identity() and (cached_data.get("_meta") or {}).get("account_scope") != current_identity().scope:
         return None
 
     return cached_data.get(execution_symbol)
@@ -6440,6 +6521,7 @@ def log_position_size_example(symbol, account_balance=10000, risk_percent=0.5, s
 
     return result
 
+@account_operation
 def calculate_live_risk_size(symbol, entry, sl):
     execution_symbol = normalize_symbol(symbol)
 
@@ -7754,7 +7836,7 @@ def evaluate_live_trade_exit(symbol, active_trade, current_plan):
 
 def update_live_trade_exit_states(panel_data):
     for symbol, active_trade in list(LIVE_ACTIVE_ORDERS.items()):
-        if not active_trade:
+        if not active_trade or not _trade_matches_operation_account(active_trade):
             continue
 
         current_plan = get_signal_trade_plan(symbol)
@@ -8123,6 +8205,7 @@ def get_panel_candle_extremes(symbol, panel_data=None, timeframe="5m"):
     }
 
 
+@account_state_operation
 def sync_live_positions(panel_data=None):
     sync_ctrader_account_state()
 
@@ -8153,7 +8236,8 @@ def sync_live_positions(panel_data=None):
         return [
             trade
             for trade in LIVE_ACTIVE_ORDERS.values()
-            if trade and get_live_trade_status(trade) in ["RUNNING", "OPEN", "TP1 HIT", "CLOSING", "TP2 HIT"]
+            if trade and _trade_matches_operation_account(trade)
+            and get_live_trade_status(trade) in ["RUNNING", "OPEN", "TP1 HIT", "CLOSING", "TP2 HIT"]
         ]
 
     if not LIVE_ACCOUNT_STATE.get("connected"):
@@ -8161,6 +8245,7 @@ def sync_live_positions(panel_data=None):
 
     try:
         positions = get_open_positions()
+        assert_current_selection()
         from db import SessionLocal
         from services.account_execution_coordination import exclude_test_positions
         positions = exclude_test_positions(SessionLocal, get_active_ctrader_account_id(), positions)
@@ -8176,7 +8261,8 @@ def sync_live_positions(panel_data=None):
             return [
                 trade
                 for trade in LIVE_ACTIVE_ORDERS.values()
-                if trade and get_live_trade_status(trade) in ["RUNNING", "OPEN", "TP1 HIT", "CLOSING", "TP2 HIT"]
+                if trade and _trade_matches_operation_account(trade)
+                and get_live_trade_status(trade) in ["RUNNING", "OPEN", "TP1 HIT", "CLOSING", "TP2 HIT"]
             ]
         else:
             LIVE_POSITION_SYNC_STATUS["last_success"] = time.time()
@@ -8185,9 +8271,11 @@ def sync_live_positions(panel_data=None):
         previous_active_orders = {
             symbol: trade
             for symbol, trade in LIVE_ACTIVE_ORDERS.items()
-            if trade
+            if trade and (
+                current_identity() is None
+                or trade.get("account_scope") == current_identity().scope
+            )
         }
-
         rebuilt_active_orders = {
             symbol: None
             for symbol in LIVE_ACTIVE_ORDERS
@@ -8773,6 +8861,8 @@ def sync_live_positions(panel_data=None):
                 })
 
             mirrored_order = {
+                "account_id": get_active_ctrader_account_id(),
+                "account_scope": current_identity().scope if current_identity() else None,
                 "order_id": f"broker-{position_id}",
                 "trade_id": f"ctrader-pos-{position_id}",
                 "position_id": position_id,
@@ -8850,6 +8940,25 @@ def sync_live_positions(panel_data=None):
                 ),
                 "raw": position.get("raw", position),
             }
+            restored_v3b = None
+            if not current_order and current_identity() is not None:
+                from services.forex_observability_service import find_v3b_snapshot_for_position
+                restored_v3b = find_v3b_snapshot_for_position(
+                    position,
+                    current_identity().account_id,
+                    current_identity().environment,
+                )
+                if restored_v3b:
+                    # Broker entry and current SL remain authoritative for the
+                    # mirrored position; snapshot levels restore V3B management.
+                    mirrored_order.update(restored_v3b)
+                    mirrored_order["planned_entry"] = restored_v3b["entry"]
+                    mirrored_order["entry"] = entry
+                    mirrored_order["sl"] = synced_sl
+                    mirrored_order["current_sl"] = synced_sl
+                else:
+                    mirrored_order["management_paused"] = True
+                    mirrored_order["management_pause_reason"] = "EXACT_V3B_SNAPSHOT_UNAVAILABLE"
             ensure_executed_snapshot_for_active_trade(mirrored_order, signal_plan)
             ensure_live_trade_identity(mirrored_order, symbol)
 
@@ -8900,7 +9009,10 @@ def sync_live_positions(panel_data=None):
                 continue
 
             if not current_order:
-                rebuilt_active_orders[symbol] = update_live_trade_tp_protection(mirrored_order)
+                rebuilt_active_orders[symbol] = (
+                    update_live_trade_tp_protection(mirrored_order)
+                    if restored_v3b else mirrored_order
+                )
                 ensure_live_trade_identity(rebuilt_active_orders[symbol], symbol)
                 log_live_trade_audit("broker_position_mirrored", rebuilt_active_orders[symbol])
                 log_trade_visual_levels(rebuilt_active_orders[symbol])
@@ -8977,6 +9089,9 @@ def sync_live_positions(panel_data=None):
         cleaned_history = []
 
         for item in LIVE_TRADE_HISTORY:
+            if not _trade_matches_operation_account(item):
+                cleaned_history.append(item)
+                continue
             if str(get_live_trade_match_key(item)) in active_ids:
                 log_live_trade_audit(
                     "history_removed_because_active",
@@ -9040,6 +9155,8 @@ def sync_live_positions(panel_data=None):
             print("LIVE_STALE_RUNNING_REMOVED:", removed)
 
         return positions
+    except AccountSelectionChanged:
+        raise
     except Exception as e:
         print("LIVE_POSITION_SYNC_ERROR:", e)
         LIVE_POSITION_SYNC_STATUS["last_error"] = str(e)
@@ -9414,8 +9531,12 @@ def disconnect_ctrader():
     }
 
 @app.post("/close-live-trade")
+@account_state_operation
 def close_live_trade(payload: dict):
     symbol = normalize_symbol(payload.get("symbol"))
+
+    if LIVE_ACTIVE_ORDERS.get(symbol) and not _trade_matches_operation_account(LIVE_ACTIVE_ORDERS[symbol]):
+        return {"ok": False, "reason": "Live position belongs to another account"}
 
     if symbol not in LIVE_ACTIVE_ORDERS or not LIVE_ACTIVE_ORDERS.get(symbol):
         return {
@@ -9471,9 +9592,13 @@ def close_live_trade(payload: dict):
 
 
 @app.post("/modify-live-position-levels")
+@account_state_operation
 def modify_live_position_levels(payload: dict):
     symbol = normalize_symbol(payload.get("symbol"))
     trade = LIVE_ACTIVE_ORDERS.get(symbol)
+
+    if trade and not _trade_matches_operation_account(trade):
+        return {"ok": False, "reason": "Live position belongs to another account"}
 
     if not trade:
         return {"ok": False, "reason": "No active live trade for symbol"}
@@ -9697,7 +9822,7 @@ def validate_auto_entry_state_locked(
     side = str(side or "").upper()
     now = float(now if now is not None else time.time())
     last_closed_at = float(
-        LIVE_LAST_POSITION_CLOSED_AT.get(normalized_symbol, 0) or 0
+        get_account_closed_at(normalized_symbol)
     )
     break_close = parse_execution_timestamp(
         trade_payload.get("fifteen_m_break_close_time")
@@ -9737,7 +9862,7 @@ def validate_auto_entry_state_locked(
         "setup_identity": copy.deepcopy(setup_identity),
     }
 
-    active_order = LIVE_ACTIVE_ORDERS.get(normalized_symbol)
+    active_order = get_current_live_trade(normalized_symbol)
     if active_order and get_live_trade_status(active_order) in [
         "RUNNING", "OPEN", "TP1 HIT", "CLOSING", "TP2 HIT"
     ]:
@@ -9752,8 +9877,7 @@ def validate_auto_entry_state_locked(
     source_event_id = trade_payload.get("source_indicator_event_id")
     if source_event_id:
         lifecycle_account_id = str(
-            LIVE_ACCOUNT_STATE.get("account_id")
-            or LIVE_ACCOUNT_STATE.get("active_account_id")
+            get_active_ctrader_account_id()
             or ""
         )
         lifecycle = (
@@ -10173,7 +10297,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
             details=trade_payload.get("distance_details")
         )
 
-    active_order = LIVE_ACTIVE_ORDERS.get(symbol)
+    active_order = get_current_live_trade(symbol)
     active_status = get_live_trade_status(active_order)
 
     if active_order and active_status in ["RUNNING", "OPEN", "TP1 HIT", "CLOSING", "TP2 HIT"]:
@@ -10561,7 +10685,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
                 stage="duplicate_order_in_flight",
                 blocked_by="duplicate_order_in_flight",
                 blocked_reason=duplicate_reason,
-                existing_position=LIVE_ACTIVE_ORDERS.get(symbol),
+                existing_position=get_current_live_trade(symbol),
                 payload_valid=True,
                 order_sent=False,
                 order_accepted=False,
@@ -10574,7 +10698,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
                 "LIVE EXECUTION BLOCKED: order already in flight"
             )
 
-        active_order = LIVE_ACTIVE_ORDERS.get(symbol)
+        active_order = get_current_live_trade(symbol)
         active_status = get_live_trade_status(active_order)
 
         if active_order and active_status in ["RUNNING", "OPEN", "TP1 HIT", "CLOSING", "TP2 HIT"]:
@@ -10652,7 +10776,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
                 spread_ok = False
             market_health = check_live_market_data_health(symbol)
             previous_close = float(
-                LIVE_LAST_POSITION_CLOSED_AT.get(symbol, 0) or 0
+                get_account_closed_at(symbol)
             )
             cooldown_active = bool(
                 previous_close
@@ -11033,7 +11157,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
             "v1_submission_unchanged": True,
         },
     )
-    persist_execution_snapshot_safely(
+    execution_snapshot = persist_execution_snapshot_safely(
         symbol=symbol,
         direction=side,
         trade_payload=trade_payload,
@@ -11064,8 +11188,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
     submission_claim = None
     if trade_payload.get("source_indicator_event_id"):
         submission_account_id = (
-            LIVE_ACCOUNT_STATE.get("account_id")
-            or LIVE_ACCOUNT_STATE.get("active_account_id")
+            get_active_ctrader_account_id()
         )
         if not update_event_lifecycle(
             trade_payload.get("source_indicator_event_id"),
@@ -11085,7 +11208,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
         submission_claim = claim_submission(
             trade_payload.get("source_indicator_event_id"),
             "LIVE",
-            LIVE_ACCOUNT_STATE.get("account_id") or LIVE_ACCOUNT_STATE.get("active_account_id"),
+            submission_account_id,
             symbol,
             trade_payload.get("signal_setup_id"),
             trade_payload,
@@ -11132,7 +11255,10 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
                 submission_key,
                 "broker response received but durable completion failed",
             )
-    record_execution_response_safely(symbol, result)
+    record_execution_response_safely(
+        symbol, result,
+        snapshot_id=(execution_snapshot or {}).get("snapshot_id"),
+    )
     # Observe the actual fill without changing, retrying, closing, resizing, or
     # widening the V1 order.  Any risk drift is explicit and durable.
     actual_fill = (
@@ -11343,6 +11469,8 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
     )
 
     LIVE_ACTIVE_ORDERS[symbol] = {
+        "account_id": get_active_ctrader_account_id(),
+        "account_scope": current_identity().scope if current_identity() else None,
         "order_id": order_id,
         "trade_id": trade_id,
         "symbol": symbol,
@@ -11446,8 +11574,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
         signal_setup_id=trade_payload.get("signal_setup_id"),
         owner_id="OWNER",
         account_id=(
-            LIVE_ACCOUNT_STATE.get("account_id")
-            or LIVE_ACCOUNT_STATE.get("active_account_id")
+            get_active_ctrader_account_id()
         ),
     )
     ui_signal_state = f"{side} RUNNING" if side in ["BUY", "SELL"] else "TRADE RUNNING"
@@ -11552,7 +11679,14 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
         with LIVE_ORDER_LOCK:
             LIVE_ORDER_IN_FLIGHT.discard(symbol)
 
+@account_state_operation
 def execute_live_order_core(payload: dict, source="manual"):
+    from ctrader_account_context import pinned_account
+    with pinned_account():
+        return _execute_live_order_pinned(payload, source)
+
+
+def _execute_live_order_pinned(payload: dict, source="manual"):
     """Execute with guaranteed release of any guard acquired by this call."""
     inflight_guard = {"symbol": None, "acquired": False}
     try:

@@ -19,6 +19,7 @@ def load_active_account_selection(session_factory=None):
             if row is None or not row.setting_value:
                 return {}
             payload = json.loads(row.setting_value)
+            revision = row.updated_at.isoformat() if row.updated_at else None
     except Exception as exc:
         print("CTRADER_ACTIVE_ACCOUNT_DURABLE_LOAD_ERROR =", str(exc))
         return {}
@@ -30,6 +31,7 @@ def load_active_account_selection(session_factory=None):
     return {
         "active_account_id": account_id or None,
         "active_account_env": environment if environment in {"demo", "live"} else None,
+        "selection_revision": revision,
     }
 
 

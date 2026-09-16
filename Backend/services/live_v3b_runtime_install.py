@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import time
+from ctrader_account_context import account_state_operation
 
 from services.live_v3b_execution_adapter import (
     dispatch_v3b_to_live_core,
@@ -91,8 +92,7 @@ def _get_lifecycle(api_module, event_id):
         return {}
     try:
         account_id = str(
-            api_module.LIVE_ACCOUNT_STATE.get("account_id")
-            or api_module.LIVE_ACCOUNT_STATE.get("active_account_id")
+            api_module.get_active_ctrader_account_id()
             or ""
         )
         return (
@@ -273,9 +273,13 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
             side,
             trade_payload,
             broker_positions,
-            active_trade=api_module.LIVE_ACTIVE_ORDERS.get(normalized),
+            active_trade=(api_module.get_current_live_trade(normalized)
+                          if hasattr(api_module, "get_current_live_trade")
+                          else api_module.LIVE_ACTIVE_ORDERS.get(normalized)),
             now=(time.time() if now is None else now),
-            last_closed_at=api_module.LIVE_LAST_POSITION_CLOSED_AT.get(normalized, 0),
+            last_closed_at=(api_module.get_account_closed_at(normalized)
+                            if hasattr(api_module, "get_account_closed_at")
+                            else api_module.LIVE_LAST_POSITION_CLOSED_AT.get(normalized, 0)),
             cooldown_seconds=api_module.get_live_post_close_cooldown_seconds(),
             setup_id_builder=api_module.get_signal_setup_id,
             lifecycle=_get_lifecycle(
@@ -311,6 +315,7 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
             return original_protect(trade)
         return _protect_v3b_trade(api_module, trade)
 
+    @account_state_operation
     def execute_live_order_core_profile_aware(payload, source="manual"):
         result = original_execute(payload, source=source)
         if not is_v3b_execution_profile(payload) or not isinstance(result, dict) or not result.get("ok"):

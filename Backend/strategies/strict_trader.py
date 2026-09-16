@@ -167,7 +167,7 @@ def utc_timestamp(value):
 
 def last_position_closed_time(symbol):
     try:
-        value = float(shared.LAST_POSITION_CLOSED_AT.get(shared.normalize_symbol(symbol), 0) or 0)
+        value = float(shared.LAST_POSITION_CLOSED_AT.get(shared.get_final_signal_hold_key(symbol), 0) or 0)
         return pd.Timestamp(value, unit="s", tz="UTC") if value > 0 else None
     except (AttributeError, TypeError, ValueError):
         return None

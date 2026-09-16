@@ -21,6 +21,7 @@ ORIGINAL_EVALUATE_15M_BREAKOUT = strict_trader.evaluate_15m_breakout
 ORIGINAL_BUILD_RISK_LEVELS = strict_trader.build_risk_levels
 
 import api
+from ctrader_account_context import selected_identity
 
 
 class StrategySettingsExecutionCacheTests(unittest.TestCase):
@@ -701,7 +702,11 @@ class StrategySettingsCooldownWiringTests(unittest.TestCase):
                 self.assertEqual(paper_age, age_seconds)
                 self.assertEqual(paper_blocked, blocked)
 
-                with patch.dict(api.LIVE_LAST_POSITION_CLOSED_AT, {"XAUUSD": 1000.0}), patch.dict(
+                identity = selected_identity()
+                close_times = ({identity.scope: {"XAUUSD": 1000.0}} if identity else {})
+                with patch.dict(api.LIVE_ACCOUNT_CLOSE_TIMES, close_times), patch.dict(
+                    api.LIVE_LAST_POSITION_CLOSED_AT, {"XAUUSD": 1000.0}
+                ), patch.dict(
                     api.LIVE_ACTIVE_ORDERS, {"XAUUSD": None}
                 ), patch.object(
                     api, "get_signal_setup_id", return_value="stable-id"
