@@ -107,7 +107,7 @@ def _install_ctrader_sparse_trendbar_policy():
     def _ctrader_now():
         return datetime.now(timezone.utc)
 
-    def _ctrader_provider_snapshot(frame, symbol, timeframe):
+    def _ctrader_provider_snapshot(frame, symbol, timeframe, now=None):
         """Prefer the provider-only cache over a legacy synthetic return frame."""
         try:
             import ctrader_connector as _ctrader
@@ -116,29 +116,28 @@ def _install_ctrader_sparse_trendbar_policy():
             cached = _ctrader.CTRADER_CANDLE_CACHE.get(cache_key)
             provider_data = cached.get("data") if isinstance(cached, dict) else None
             if provider_data is not None and not provider_data.empty:
-                try:
-                    return provider_data.copy(deep=True)
-                except TypeError:
-                    return provider_data.copy()
+                return _ctrader._safe_cached_provider_data(
+                    cached, timeframe, now if now is not None else _ctrader_now()
+                )
         except Exception:
             pass
         return frame
 
     def _ctrader_mature_frame(frame, symbol, timeframe, now=None):
-        """Use provider-only 15m data and wait until each bar is settled."""
+        """Use provider-only 5m/15m data; preserve the existing 15m settle delay."""
         if not _ctrader_sparse_frame_allowed(frame, symbol, timeframe):
             return frame
         normalized_timeframe = _stream._normal_timeframe(timeframe)
-        if normalized_timeframe != "15m":
+        if normalized_timeframe not in {"5m", "15m"}:
             return frame
         try:
-            provider_frame = _ctrader_provider_snapshot(frame, symbol, timeframe)
+            provider_frame = _ctrader_provider_snapshot(frame, symbol, timeframe, now=now)
             current = _stream._utc(
                 now if now is not None else _stream._ctrader_now()
             )
             maturity_delay = _stream.pd.Timedelta(
                 minutes=_stream.SUPPORTED_TIMEFRAMES[normalized_timeframe],
-                seconds=CTRADER_15M_SETTLE_SECONDS,
+                seconds=CTRADER_15M_SETTLE_SECONDS if normalized_timeframe == "15m" else 0,
             )
             latest_mature_open = current - maturity_delay
             keep = [
@@ -148,7 +147,7 @@ def _install_ctrader_sparse_trendbar_policy():
             return provider_frame.loc[keep].copy()
         except Exception as exc:
             raise _stream.IndicatorStreamUnavailable(
-                f"cTrader 15m settle filter unavailable: {exc}"
+                f"cTrader {normalized_timeframe} closed provider filter unavailable: {exc}"
             ) from exc
 
     def _durable_origin(symbol, timeframe, session_factory=None):

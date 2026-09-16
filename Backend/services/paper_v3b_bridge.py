@@ -53,7 +53,7 @@ def _utc(value):
 
 
 def _wait(symbol, reason, details=None):
-    return {
+    result = {
         "symbol": _normalize_symbol(symbol),
         "signal": "WAIT",
         "final_signal": "WAIT",
@@ -70,6 +70,10 @@ def _wait(symbol, reason, details=None):
         "paper_swing_timeframe": "5m",
         "paper_risk_timeframe": "5m",
     }
+    event_id = (details or {}).get("source_indicator_event_id")
+    if event_id:
+        result["source_indicator_event_id"] = str(event_id)
+    return result
 
 
 def _confirmation_identity(symbol, event_id, side, candle_open, candle_close, broken_level):
@@ -223,6 +227,39 @@ def build_paper_v3b_candidate(
         "candidate_event_types": [item[3].get("event_type") for item in pairs],
     })
     if not pairs:
+        # The BOS candle is closed, but its immediately following candle has
+        # not closed yet. Expose its current stage without making it eligible.
+        for event in reversed((authority or {}).get("events") or []):
+            if not isinstance(event, dict) or event.get("tradable") is not True:
+                continue
+            if str(event.get("event_type") or "").upper() not in {"BOS", "CHOCH"}:
+                continue
+            direction = str(event.get("direction") or "").upper()
+            if direction not in {"BULLISH", "BEARISH"}:
+                continue
+            try:
+                bos_open = _utc(event.get("timestamp"))
+                if bos_open != latest_source:
+                    continue
+                body_ratio = float(_bos_body_ratio(frame.loc[bos_open]))
+            except Exception:
+                continue
+            details = {
+                "source_indicator_event_id": event.get("event_id"),
+                "bos_candle_time": bos_open.isoformat(),
+                "broken_level": event.get("broken_level"),
+                "side": "BUY" if direction == "BULLISH" else "SELL",
+                "bos_body_ratio": body_ratio,
+                "minimum_bos_body_ratio": float(strategy.MIN_BOS_BODY_RATIO),
+                "second_5m_same_direction": None,
+                "second_5m_stays_beyond_bos_level": None,
+            }
+            reason = (
+                "WAIT_V3B_PAPER_SECOND_5M"
+                if body_ratio >= float(strategy.MIN_BOS_BODY_RATIO)
+                else "WAIT_V3B_PAPER_BOS_BODY"
+            )
+            return _wait(normalized, reason, details)
         return _wait(normalized, "WAIT_V3B_PAPER_5M_BOS")
     rejection = None
     selected = None
@@ -240,6 +277,8 @@ def build_paper_v3b_candidate(
             continue
         if body_ratio < float(strategy.MIN_BOS_BODY_RATIO):
             rejection = rejection or _wait(normalized, "WAIT_V3B_PAPER_BOS_BODY", {
+                "bos_candle_time": bos_open.isoformat(),
+                "broken_level": broken_level,
                 "bos_body_ratio": body_ratio,
                 "minimum_bos_body_ratio": float(strategy.MIN_BOS_BODY_RATIO),
                 "source_indicator_event_id": event.get("event_id"),
@@ -249,6 +288,8 @@ def build_paper_v3b_candidate(
         stays_beyond = second_close > broken_level if side == "BUY" else second_close < broken_level
         if not (same_direction and stays_beyond):
             rejection = rejection or _wait(normalized, "WAIT_V3B_PAPER_SECOND_5M", {
+                "bos_candle_time": bos_open.isoformat(),
+                "broken_level": broken_level,
                 "side": side,
                 "second_5m_same_direction": bool(same_direction),
                 "second_5m_stays_beyond_bos_level": bool(stays_beyond),

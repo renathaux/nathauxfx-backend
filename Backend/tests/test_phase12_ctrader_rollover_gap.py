@@ -329,6 +329,79 @@ def test_cache_hit_returns_synthetic_candle_without_persisting_it(monkeypatch):
     assert float(cached_after.iloc[-1]["Close"]) == 1.1627
 
 
+def test_connector_cache_hit_keeps_provider_rows_when_live_tick_adds_forming_candle(monkeypatch):
+    provider = _provider_cache_frame(["2026-09-16T12:45:00Z"], [1.1537])
+    forming_at = pd.Timestamp("2026-09-16T12:50:00Z")
+    cache_key = "test:EURUSD:5m"
+    monkeypatch.setattr(ctrader, "get_ctrader_candle_cache_key", lambda *_args: cache_key)
+    monkeypatch.setitem(ctrader.CTRADER_CANDLE_CACHE, cache_key, {
+        "data": provider.copy(deep=True),
+        "fetched_at": datetime.now(timezone.utc),
+        "source": "ctrader",
+        "symbol": "EURUSD", "timeframe": "5m",
+    })
+
+    def with_live_tick(frame, *_args):
+        result = frame.copy(deep=True)
+        result.loc[forming_at] = {
+            "Open": 1.1537, "High": 1.1538, "Low": 1.1537,
+            "Close": 1.15375, "Volume": 0,
+        }
+        return result
+
+    monkeypatch.setattr(ctrader, "append_current_forming_candle", with_live_tick)
+    raw_get = getattr(ctrader.get_ctrader_market_data, "__wrapped__", ctrader.get_ctrader_market_data)
+    returned = raw_get("EURUSD", "5m")
+
+    assert forming_at in returned.index
+    assert list(ctrader.CTRADER_CANDLE_CACHE[cache_key]["data"].index) == list(provider.index)
+
+
+def test_provider_cache_must_refresh_when_its_forming_bar_becomes_closed():
+    cached = {
+        "data": _provider_cache_frame(["2026-09-14T20:25:00Z"], [1.15471]),
+        "fetched_at": datetime(2026, 9, 14, 20, 29, 50, tzinfo=timezone.utc),
+    }
+    assert ctrader._cached_forming_bar_crossed_close(
+        cached, "5m", pd.Timestamp("2026-09-14T20:30:05Z")
+    ) is True
+    assert ctrader._cached_forming_bar_crossed_close(
+        cached, "5m", pd.Timestamp("2026-09-14T20:29:55Z")
+    ) is False
+
+
+def test_authoritative_5m_uses_provider_snapshot_not_synthetic_return(monkeypatch):
+    provider = _provider_cache_frame(["2026-09-14T20:25:00Z"], [1.15471])
+    returned = provider.copy(deep=True)
+    returned.loc[pd.Timestamp("2026-09-14T20:30:00Z")] = {
+        "Open": 1.1547, "High": 1.1548, "Low": 1.1546,
+        "Close": 1.15465, "Volume": 0,
+    }
+    cache_key = ctrader.get_ctrader_candle_cache_key("EURUSD", "5m")
+    monkeypatch.setitem(ctrader.CTRADER_CANDLE_CACHE, cache_key, {
+        "data": provider, "fetched_at": datetime(2026, 9, 14, 20, 31, tzinfo=timezone.utc),
+    })
+    mature = stream._ctrader_mature_frame(
+        returned, "EURUSD", "5m", now="2026-09-14T20:36:00Z"
+    )
+    assert list(mature.index) == list(provider.index)
+
+
+def test_failed_boundary_refresh_cannot_reuse_partial_provider_bar():
+    provider = _provider_cache_frame([
+        "2026-09-14T20:20:00Z", "2026-09-14T20:25:00Z"
+    ], [1.1546, 1.15471])
+    cached = {
+        "data": provider,
+        "fetched_at": datetime(2026, 9, 14, 20, 29, 50, tzinfo=timezone.utc),
+    }
+    safe = ctrader._safe_cached_provider_data(
+        cached, "5m", pd.Timestamp("2026-09-14T20:30:05Z")
+    )
+    assert list(safe.index) == list(provider.index[:-1])
+    assert list(cached["data"].index) == list(provider.index)
+
+
 def test_real_provider_refresh_replaces_cache_and_is_not_rolled_back(monkeypatch):
     old_provider = _provider_cache_frame(["2026-09-09T19:15:00Z"], [4399.5])
     refreshed_provider = _provider_cache_frame(

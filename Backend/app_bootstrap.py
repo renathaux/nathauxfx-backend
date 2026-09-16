@@ -42,6 +42,8 @@ from services.smc_strategy_authority import (
     evaluate_indicator_breakout,
     mark_indicator_breakout_watch,
 )
+from services.live_v3b_service import live_v3b_enabled
+from services.v3b_startup_stream_gate import startup_stream_gate
 
 
 _ORIGINAL_GET_SIGNAL_ALERT_EMAIL_TO = api.get_signal_alert_email_to
@@ -760,32 +762,32 @@ def _start_forex_background_task():
         print("SUBMISSION_RECONCILIATION_BLOCKED =", submission_reconciliation)
         return
 
-    initialized = []
-    for startup_symbol in ("EURUSD", "XAUUSD"):
-        for startup_timeframe, startup_minutes in (("5m", 5), ("15m", 15), ("1h", 60)):
-            try:
-                startup_market_data = api.get_ctrader_market_data(
-                    startup_symbol, startup_timeframe, limit=5000, force_refresh=True,
-                )
-                startup_closed = strict_trader.closed_frame(startup_market_data, startup_minutes)
-                if startup_closed is None or startup_closed.empty:
-                    raise IndicatorStreamUnavailable("closed startup history unavailable")
-                initialized.append(initialize_indicator_stream(
-                    startup_closed,
-                    startup_symbol,
-                    startup_timeframe,
-                    strict_trader.point_size(startup_symbol),
-                    analyzer=analyze_structure,
-                ))
-            except Exception as exc:
-                api.ENGINE_RUNTIME_STATE["indicator_stream_startup"] = {
-                    "ready": False, "reason": str(exc), "symbols_ready": len(initialized),
-                }
-                print("INDICATOR_STREAM_STARTUP_BLOCKED =", api.ENGINE_RUNTIME_STATE["indicator_stream_startup"])
-                return
-    api.ENGINE_RUNTIME_STATE["indicator_stream_startup"] = {
-        "ready": True, "streams_ready": len(initialized),
-    }
+    def initialize_startup_stream(startup_symbol, startup_timeframe):
+        startup_minutes = {"5m": 5, "15m": 15, "1h": 60}[startup_timeframe]
+        startup_market_data = api.get_ctrader_market_data(
+            startup_symbol, startup_timeframe, limit=5000, force_refresh=True,
+        )
+        startup_closed = strict_trader.closed_frame(startup_market_data, startup_minutes)
+        if startup_closed is None or startup_closed.empty:
+            raise IndicatorStreamUnavailable("closed startup history unavailable")
+        return initialize_indicator_stream(
+            startup_closed,
+            startup_symbol,
+            startup_timeframe,
+            strict_trader.point_size(startup_symbol),
+            analyzer=analyze_structure,
+        )
+
+    startup_state = startup_stream_gate(
+        initialize_startup_stream,
+        v3b_enabled=live_v3b_enabled(),
+    )
+    api.ENGINE_RUNTIME_STATE["indicator_stream_startup"] = startup_state
+    if not startup_state["ready"]:
+        print("INDICATOR_STREAM_STARTUP_BLOCKED =", startup_state)
+        return
+    if startup_state["ancillary_failures"]:
+        print("INDICATOR_STREAM_ANCILLARY_BLOCKED =", startup_state["ancillary_failures"])
     print("Startup OK - warming panel cache")
     api.warm_panel_cache_from_persisted_candles()
     try:

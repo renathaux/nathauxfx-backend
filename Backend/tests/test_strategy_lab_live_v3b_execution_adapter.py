@@ -11,6 +11,7 @@ from services.live_v3b_execution_adapter import (
     v3b_broker_handoff_enabled,
 )
 from services.live_v3b_service import LIVE_V3B_MODEL
+from services import indicator_stream_account_scope as account_scope
 from services.v3b_strategy_settings_sync import install_v3b_strategy_settings_sync
 
 
@@ -248,6 +249,33 @@ def test_all_gates_true_hands_exact_payload_to_injected_live_core_once():
     assert payload["source_indicator_event_id"] == "event-EURUSD"
     assert payload["signal_setup_id"] == "setup-EURUSD-BUY"
     assert payload["protected_sl_price"] == pytest.approx(candidate["protected_sl_price"])
+
+
+def test_intended_demo_account_reaches_mocked_handoff_without_broker_order(monkeypatch):
+    monkeypatch.setattr(account_scope, "load_active_account_selection", lambda: {
+        "active_account_id": "47784297", "active_account_env": "DEMO",
+    })
+    assert account_scope.active_ctrader_stream_scope() == "CTRADER:DEMO:47784297"
+    candidate = _candidate("EURUSD", "BUY")
+    calls = []
+
+    def test_only_executor(payload, source=None):
+        calls.append((payload, source))
+        return {"ok": True, "test_only": True}
+
+    result = dispatch_v3b_to_live_core(
+        candidate,
+        executor=test_only_executor,
+        strategy_enabled=True,
+        broker_handoff_enabled=True,
+        live_auto_enabled=True,
+        execution_profile_supported=True,
+        authoritative_live_state_loader=_live_on_loader,
+    )
+    assert result["ok"] is True
+    assert len(calls) == 1
+    assert calls[0][0]["source_indicator_event_id"] == candidate["source_indicator_event_id"]
+    assert calls[0][1] == "auto"
 
 
 def test_adapter_has_no_direct_broker_imports_or_calls():
