@@ -85,13 +85,19 @@ class DemoSocket:
         deadline = time.monotonic() + 15
         while True:
             data = self._receive(deadline)
+            if not isinstance(data, dict):
+                raise BrokerTestBlocked(Code.BROKER_RESPONSE_INVALID)
             if data.get('clientMsgId') != client_id:
                 continue
-            if data.get('payloadType') in (2142, 2132):
+            if data.get('payloadType') in (2142, 2132) or data.get('errorCode'):
                 raise BrokerTestBlocked(Code.BROKER_REJECTED)
             if data.get('payloadType') != expected:
                 continue
             result = data.get('payload')
+            # ProtoOAApplicationAuthRes has no required body fields. The JSON
+            # gateway omits payload on success; this is NOT account authorization.
+            if kind == 2100 and expected == 2101 and result is None:
+                result = {}
             if not isinstance(result, dict) or result.get('errorCode'):
                 raise BrokerTestBlocked(Code.BROKER_RESPONSE_INVALID)
             if 'ctidTraderAccountId' in payload and str(result.get('ctidTraderAccountId')) != str(ACCOUNT):

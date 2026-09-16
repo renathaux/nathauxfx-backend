@@ -4,6 +4,81 @@ import pytest
 
 
 @pytest.fixture
+def wire_transport():
+    """Exercise the real request parser; replace only socket I/O."""
+    import json
+    from services.broker_integration_test_adapter import DemoSocket
+    transport = object.__new__(DemoSocket)
+    sent = []
+    transport.sock = SimpleNamespace(settimeout=lambda seconds: None)
+    transport.connector = SimpleNamespace(websocket_send_text=lambda sock, msg: sent.append(json.loads(msg)))
+    def respond(envelope):
+        responses = iter([envelope])
+        def receive(deadline):
+            try:
+                response = next(responses)
+            except StopIteration:
+                raise TimeoutError('No matching response')
+            if isinstance(response, dict):
+                return {'clientMsgId':sent[-1]['clientMsgId'], **response}
+            return response
+        transport._receive = receive
+    return transport, respond
+
+
+@pytest.mark.parametrize('body', [{}, {'payload':None}, {'payload':{}}, {'payload':{'payloadType':2101}}])
+def test_application_auth_accepts_empty_success_envelope(wire_transport, body):
+    transport, respond = wire_transport
+    respond({'payloadType':2101, **body})
+    assert transport.request(2100, {}, 2101) == (body.get('payload') or {})
+
+
+@pytest.mark.parametrize('kind,expected,body', [
+    (2102,2103,{}), (2124,2125,{}), (2102,2103,{'payload':{}}),
+    (2102,2103,{'payload':{'ctidTraderAccountId':47810571}}),
+])
+def test_auth_exception_does_not_accept_empty_or_wrong_account_content(wire_transport, kind, expected, body):
+    transport, respond = wire_transport
+    respond({'payloadType':expected, **body})
+    with pytest.raises(ValueError):
+        transport.request(kind, {'ctidTraderAccountId':47784297}, expected)
+
+
+@pytest.mark.parametrize('envelope', [
+    {'payloadType':2142,'payload':{'errorCode':'INVALID_CLIENT'}},
+    {'payloadType':2132,'payload':{'errorCode':'INVALID_REQUEST'}},
+    {'payloadType':2101,'errorCode':'INVALID_CLIENT'},
+    {'payloadType':2101,'payload':{'errorCode':'INVALID_CLIENT'}},
+    {'payloadType':2101,'payload':[]}, {'payloadType':2101,'payload':''},
+    [], None,
+])
+def test_application_auth_rejects_errors_and_malformed_envelopes(wire_transport, envelope):
+    transport, respond = wire_transport
+    respond(envelope)
+    with pytest.raises(ValueError):
+        transport.request(2100, {}, 2101)
+
+
+@pytest.mark.parametrize('envelope', [
+    {'payloadType':2103}, {'payloadType':2101,'clientMsgId':'unrelated'}, {},
+])
+def test_application_auth_never_succeeds_on_unexpected_or_uncorrelated_response(wire_transport, envelope):
+    transport, respond = wire_transport
+    respond(envelope)
+    with pytest.raises(TimeoutError):
+        transport.request(2100, {}, 2101)
+
+
+def test_application_auth_disconnect_remains_failure(wire_transport):
+    transport, _ = wire_transport
+    def disconnect(deadline):
+        raise ConnectionError('disconnected')
+    transport._receive = disconnect
+    with pytest.raises(ConnectionError):
+        transport.request(2100, {}, 2101)
+
+
+@pytest.fixture
 def network(monkeypatch):
     import ctrader_connector
     monkeypatch.setattr(ctrader_connector, 'get_active_ctrader_account_id', lambda: '47784297')
