@@ -117,6 +117,16 @@ class CTraderTestAdapter:
         self.transport_factory = transport_factory
         self.protection = None
 
+    @staticmethod
+    def _assert_selected_account():
+        from ctrader_connector import get_active_ctrader_account_id
+        try:
+            selected = get_active_ctrader_account_id()
+        except Exception as exc:
+            raise BrokerTestBlocked(Code.SELECTED_ACCOUNT_MISMATCH) from exc
+        if str(selected) != str(ACCOUNT):
+            raise BrokerTestBlocked(Code.SELECTED_ACCOUNT_MISMATCH)
+
     @contextmanager
     def _connection(self):
         with self.transport_factory() as transport:
@@ -145,11 +155,12 @@ class CTraderTestAdapter:
         except BrokerTestBlocked:
             raise
         except (KeyError, TypeError, ValueError) as exc:
-            raise BrokerTestBlocked(Code.SYMBOL_METADATA_INVALID) from exc
+            raise BrokerTestBlocked(Code.BROKER_RESPONSE_INVALID) from exc
 
     def _fresh_preflight(self, request):
         if request.account_id != str(ACCOUNT) or request.symbol != 'EURUSD':
             raise BrokerTestBlocked(Code.INVALID_REQUEST)
+        self._assert_selected_account()
         with self._connection() as transport:
             trader = transport.request(2121, {'ctidTraderAccountId':ACCOUNT}, 2122)['trader']
             if (str(trader.get('ctidTraderAccountId')) != str(ACCOUNT)
@@ -179,11 +190,16 @@ class CTraderTestAdapter:
             if symbol.get('distanceSetIn') not in (1, 'SYMBOL_DISTANCE_IN_POINTS'):
                 raise BrokerTestBlocked(Code.PROTECTION_UNSUPPORTED)
             quote = transport.quote(symbol_id)
-            if (str(quote.get('ctidTraderAccountId')) != str(ACCOUNT)
-                    or int(quote.get('symbolId', 0)) != symbol_id
-                    or abs(time.time()*1000 - int(quote['timestamp'])) > 30000):
+            try:
+                quote_account = str(quote['ctidTraderAccountId'])
+                quote_symbol = int(quote['symbolId'])
+                quote_time = int(quote['timestamp'])
+                bid, ask = int(quote['bid']) / 100000, int(quote['ask']) / 100000
+            except (KeyError, TypeError, ValueError) as exc:
+                raise BrokerTestBlocked(Code.QUOTE_INVALID) from exc
+            if (quote_account != str(ACCOUNT) or quote_symbol != symbol_id
+                    or abs(time.time()*1000 - quote_time) > 30000):
                 raise BrokerTestBlocked(Code.QUOTE_INVALID)
-            bid, ask = int(quote['bid']) / 100000, int(quote['ask']) / 100000
             if not 0 < bid < ask:
                 raise BrokerTestBlocked(Code.QUOTE_INVALID)
             digits = int(symbol['digits'])
@@ -201,6 +217,7 @@ class CTraderTestAdapter:
         if row.account_id != str(ACCOUNT) or not self.protection:
             raise BrokerTestBlocked(Code.INVALID_REQUEST)
         with self._connection() as transport:
+            self._assert_selected_account()
             transport.request(2106, {'ctidTraderAccountId':ACCOUNT, 'symbolId':row.symbol_id,
                 'orderType':1, 'tradeSide':1, 'volume':row.volume, 'label':row.reference,
                 'clientOrderId':row.reference, 'comment':'Dedicated DEMO broker integration test',
@@ -248,8 +265,26 @@ class CTraderTestAdapter:
             open_volume = int(data.get('volume',0))
         if open_volume + closed != row.volume:
             return Reconciliation(False)
+        try:
+            prices = [float(d['executionPrice']) for d in opening]
+            opened_times = [int(d['executionTimestamp']) for d in opening]
+            closed_times = [int(d['executionTimestamp']) for d in closing]
+            since_ms = int(row.created_at.replace(tzinfo=row.created_at.tzinfo or timezone.utc).timestamp()*1000)-60000
+            now_ms = int(time.time()*1000)+30000
+            if (any(not math.isfinite(price) or price <= 0 for price in prices)
+                    or any(not since_ms <= timestamp <= now_ms for timestamp in opened_times+closed_times)
+                    or any(timestamp < min(opened_times) for timestamp in closed_times)):
+                return Reconciliation(False)
+            fill_price = sum(price*int(deal['filledVolume']) for price,deal in zip(prices,opening))/row.volume
+            opened_at = min(opened_times)
+            closed_at = max(closed_times) if not open_volume and closed_times else None
+            if not open_volume and closed_at is None:
+                return Reconciliation(False)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return Reconciliation(False)
         return Reconciliation(True, str(ACCOUNT), row.symbol_id, 'BUY', row.reference,
-                              order_id, position_id, row.volume, open_volume, closed)
+                              order_id, position_id, row.volume, open_volume, closed,
+                              fill_price, opened_at, closed_at)
 
     def close(self, row, evidence):
         fresh = self.reconcile(row)

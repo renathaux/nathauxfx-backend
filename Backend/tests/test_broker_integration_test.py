@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import timezone
 
 import pytest
 from sqlalchemy import create_engine
@@ -39,11 +40,13 @@ def rig(tmp_path):
         def reconcile(self, row):
             if self.unavailable:
                 return Reconciliation(complete=False)
+            opened_at = int(row.created_at.replace(tzinfo=timezone.utc).timestamp()*1000)
             return Reconciliation(complete=True, account_id='47784297', symbol_id=1,
                 side='BUY', reference='unrelated' if self.mismatch else row.reference,
                 order_id='17', position_id='18', volume=1000,
                 open_volume=0 if self.closes else 1000,
-                closed_volume=1000 if self.closes else 0)
+                closed_volume=1000 if self.closes else 0, fill_price=1.1001,
+                broker_opened_at=opened_at, broker_closed_at=opened_at+1 if self.closes else None)
 
         def close(self, row, evidence):
             assert evidence.position_id == '18' and evidence.open_volume == 1000
@@ -293,3 +296,21 @@ def test_unknown_exception_secret_is_never_persisted(rig):
     result = service.run(request)
     assert result['last_error'] == 'BROKER_IO_FAILURE'
     assert 'sensitive broker payload' not in str(result)
+
+
+def test_fill_price_and_broker_times_survive_restart_and_same_id(rig):
+    from services.broker_integration_test_service import BrokerIntegrationTestService
+    from models import BrokerIntegrationTestSubmission
+    service, broker, factory, request = rig
+    result = service.run(request)
+    assert result['fill_price'] == pytest.approx(1.1001)
+    assert result['broker_opened_at'] is not None
+    assert result['broker_closed_at'] >= result['broker_opened_at']
+    assert result['account_scope'] == 'demo:47784297'
+    assert result['reconciliation_status'] == 'VERIFIED_CLOSED'
+    restored = BrokerIntegrationTestService(factory, broker)
+    assert restored.run(request) == result
+    with factory() as session:
+        row = session.get(BrokerIntegrationTestSubmission, request.test_id)
+        assert row.fill_price == pytest.approx(1.1001)
+        assert row.broker_closed_at >= row.broker_opened_at

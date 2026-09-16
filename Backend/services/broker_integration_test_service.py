@@ -2,6 +2,7 @@
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
+import math
 import re
 from typing import Protocol
 
@@ -45,6 +46,9 @@ class Reconciliation:
     volume: int = 0
     open_volume: int = 0
     closed_volume: int = 0
+    fill_price: float | None = None
+    broker_opened_at: int | None = None
+    broker_closed_at: int | None = None
 
 
 class BrokerAdapter(Protocol):
@@ -135,6 +139,7 @@ class BrokerIntegrationTestService:
                         raise BrokerTestBlocked(Code.UNRESOLVED_CLOSE)
                     row.broker_order_id = evidence.order_id
                     row.broker_position_id = evidence.position_id
+                    self._persist_fill(row, evidence)
                     row.reconciliation_evidence = asdict(evidence)
                     if evidence.open_volume:
                         row.state = 'OPEN'
@@ -163,6 +168,7 @@ class BrokerIntegrationTestService:
                         raise BrokerTestBlocked(Code.UNRESOLVED_CLOSE)
                     row.state = 'CLOSED'
                     row.unresolved_account = None
+                    self._persist_fill(row, evidence)
                     row.reconciliation_evidence = asdict(evidence)
                     row.reconciled_at = datetime.now(timezone.utc)
                     row.last_error = None
@@ -188,10 +194,33 @@ class BrokerIntegrationTestService:
                 or evidence.open_volume < 0 or evidence.closed_volume < 0
                 or evidence.open_volume + evidence.closed_volume != row.volume):
             raise BrokerTestBlocked(Code.IDENTITY_MISMATCH)
+        created_ms = int(row.created_at.replace(tzinfo=row.created_at.tzinfo or timezone.utc).timestamp()*1000)
+        now_ms = int(datetime.now(timezone.utc).timestamp()*1000)
+        if (evidence.fill_price is None or not math.isfinite(evidence.fill_price)
+                or evidence.fill_price <= 0 or not evidence.broker_opened_at
+                or not created_ms-60000 <= evidence.broker_opened_at <= now_ms+30000
+                or (not evidence.open_volume and (not evidence.broker_closed_at
+                    or not evidence.broker_opened_at <= evidence.broker_closed_at <= now_ms+30000))):
+            raise BrokerTestBlocked(Code.HISTORY_INCOMPLETE)
+
+    @staticmethod
+    def _persist_fill(row, evidence):
+        row.fill_price = evidence.fill_price
+        row.broker_opened_at = datetime.fromtimestamp(evidence.broker_opened_at/1000, timezone.utc)
+        row.broker_closed_at = (datetime.fromtimestamp(evidence.broker_closed_at/1000, timezone.utc)
+                                if evidence.broker_closed_at is not None else None)
 
     @staticmethod
     def _result(row):
+        def utc_text(value):
+            return value.replace(tzinfo=value.tzinfo or timezone.utc).isoformat() if value else None
         return {'test_id': row.test_id, 'account_id': row.account_id, 'state': row.state,
+                'account_scope': f'{row.environment}:{row.account_id}',
+                'reconciliation_status': ('VERIFIED_CLOSED' if row.state == 'CLOSED' and row.broker_position_id
+                    else 'NO_DISPATCH' if row.state == 'CLOSED' and row.request_started_at is None
+                    else 'UNRESOLVED'),
+                'fill_price': row.fill_price, 'broker_opened_at': utc_text(row.broker_opened_at),
+                'broker_closed_at': utc_text(row.broker_closed_at),
                 'reference': row.reference, 'broker_order_id': row.broker_order_id,
                 'broker_position_id': row.broker_position_id, 'last_error': row.last_error,
                 'open_evidence': row.open_evidence, 'duplicate_evidence': row.duplicate_evidence,
