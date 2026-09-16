@@ -105,6 +105,10 @@ class BoundedPanelSnapshotTests(unittest.TestCase):
 
 class ReadyExecutionHandoffTests(unittest.TestCase):
     def setUp(self):
+        # Runtime selection is an external boundary; do not read developer account files.
+        selection = patch.object(api, 'get_active_ctrader_account_id', return_value='handoff-test')
+        selection.start()
+        self.addCleanup(selection.stop)
         self.auto_enabled = api.LIVE_AUTO_TRADE_ENABLED.get("enabled")
         self.account_state = copy.deepcopy(api.LIVE_ACCOUNT_STATE)
         self.trade_history = copy.deepcopy(api.LIVE_TRADE_HISTORY)
