@@ -156,3 +156,17 @@ def test_empty_worker_without_exact_snapshot_mirrors_position_without_legacy_man
     assert mirrored["position_id"] == "42"
     assert mirrored["account_scope"] == "CTRADER:DEMO:47784297"
     assert mirrored["management_paused"] is True
+    api.sync_live_positions()
+    repeated = api.LIVE_ACTIVE_ORDERS["EURUSD"]
+    assert repeated["position_id"] == "42"
+    assert repeated["management_paused"] is True
+
+
+def test_paused_broker_position_cannot_reach_legacy_tp_manager(monkeypatch):
+    import api
+    monkeypatch.setattr(api, "close_position", lambda *a, **kw: pytest.fail("broker close attempted"))
+    monkeypatch.setattr(api, "modify_position_sltp", lambda *a, **kw: pytest.fail("broker SL changed"))
+    trade = {"symbol": "EURUSD", "side": "BUY", "position_id": "42",
+             "management_paused": True, "current_price": 1.20,
+             "entry": 1.10, "sl": 1.09, "tp1": 1.11, "tp2": 1.19}
+    assert api.update_live_trade_tp_protection(trade) == trade

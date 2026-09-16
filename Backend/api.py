@@ -1100,11 +1100,17 @@ def warm_panel_cache_from_persisted_candles():
 def refresh_panel_cache_from_disk(reason):
     try:
         from brain import get_panel_data, hydrate_market_data_cache_from_disk
+        from ctrader_account_context import pinned_account, assert_current_selection
 
-        if not hydrate_market_data_cache_from_disk():
-            return None
-
-        data = get_panel_data(force_refresh=False)
+        with pinned_account() as identity:
+            if not hydrate_market_data_cache_from_disk():
+                return None
+            assert_current_selection(identity)
+            data = get_panel_data(force_refresh=False)
+            assert_current_selection(identity)
+            if identity is not None:
+                data.setdefault("_meta", {})["account_scope"] = identity.scope
+                data["_meta"]["selection_revision"] = identity.selection_revision
         refresh_live_panel_meta(data)
         validity = _panel_cache_validity(data)
 
@@ -4848,6 +4854,8 @@ def protect_live_trade_after_tp1(trade):
 
 def update_live_trade_tp_protection(trade):
     if not isinstance(trade, dict):
+        return trade
+    if trade.get("management_paused"):
         return trade
 
     hit_tp1_before = bool(trade.get("tp1_hit") or trade.get("hit_tp1"))
@@ -8963,6 +8971,19 @@ def sync_live_positions(panel_data=None):
             ensure_live_trade_identity(mirrored_order, symbol)
 
             if current_order and broker_position_matches_trade(position, current_order):
+                if current_order.get("management_paused"):
+                    mirrored_order["management_paused"] = True
+                    mirrored_order["management_pause_reason"] = current_order.get(
+                        "management_pause_reason"
+                    ) or "EXACT_V3B_SNAPSHOT_UNAVAILABLE"
+                    mirrored_order["trade_id"] = (
+                        get_live_trade_identity(current_order)
+                        or get_live_trade_identity(mirrored_order)
+                    )
+                    rebuilt_active_orders[symbol] = mirrored_order
+                    ensure_live_trade_identity(mirrored_order, symbol)
+                    log_live_trade_audit("broker_position_mirrored_management_paused", mirrored_order)
+                    continue
                 rebuilt_active_orders[symbol] = update_live_trade_tp_protection({
                     **current_order,
                     **mirrored_order,

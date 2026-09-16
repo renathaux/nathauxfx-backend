@@ -212,6 +212,17 @@ def test_connection_snapshot_does_not_claim_previous_account_connected(selected,
     assert not result["execution_ready"]
 
 
+def test_connection_snapshot_does_not_claim_other_environment_connected(selected, monkeypatch):
+    selected["active_account_env"] = "live"
+    monkeypatch.setattr(connector, "CTRADER_CONNECTION_CACHE", {"state": None, "checked_at": 0})
+    monkeypatch.setattr(connector, "CONNECTED", {
+        "account_id": "47784297", "status": True, "mode": "demo",
+    })
+    result = connector.get_ctrader_connection_snapshot()
+    assert result["mode"] == "live"
+    assert result["connected"] is False
+
+
 def test_switch_position_sync_never_returns_other_account_orders(selected, monkeypatch):
     import api
     monkeypatch.setattr(api, "sync_ctrader_account_state", lambda **kw: None)
@@ -364,6 +375,22 @@ def test_a_b_a_old_panel_revision_cannot_publish(selected, monkeypatch):
     with pytest.raises(AccountSelectionChanged):
         api.update_panel_cache({"_meta": {"account_scope": "CTRADER:DEMO:47784297",
                                         "selection_revision": "old"}}, "test")
+
+
+def test_disk_panel_fallback_cannot_publish_after_selection_changes(selected, monkeypatch):
+    import api
+    import brain
+    published = []
+    monkeypatch.setattr(brain, "hydrate_market_data_cache_from_disk", lambda: True)
+    def old_account_panel(*, force_refresh=False):
+        selected["active_account_id"] = "47810571"
+        return {"EURUSD": {"signal": "WAIT"}, "XAUUSD": {"signal": "WAIT"}}
+    monkeypatch.setattr(brain, "get_panel_data", old_account_panel)
+    monkeypatch.setattr(api, "_panel_cache_validity", lambda data: {"valid": True, "candle_counts": {}})
+    monkeypatch.setattr(api, "refresh_live_panel_meta", lambda data: None)
+    monkeypatch.setattr(api, "update_panel_cache", lambda data, source: published.append(data))
+    assert api.refresh_panel_cache_from_disk("test") is None
+    assert published == []
 
 
 def test_profile_postprocessing_keeps_submission_account_pinned(selected, monkeypatch):

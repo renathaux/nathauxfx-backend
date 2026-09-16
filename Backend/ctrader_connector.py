@@ -509,7 +509,10 @@ def get_ctrader_connection_snapshot():
 
     config = get_ctrader_config()
     local_connected = bool(CONNECTED.get("connected") or CONNECTED.get("status"))
-    if identity and str(CONNECTED.get("account_id")) != identity.account_id:
+    if identity and (
+        str(CONNECTED.get("account_id")) != identity.account_id
+        or str(CONNECTED.get("mode") or "").lower() != identity.environment
+    ):
         local_connected = False
     selection = get_ctrader_account_selection_debug()
     return {
