@@ -197,7 +197,7 @@ def test_display_snapshot_prefers_usable_memory_removes_forming_and_preserves_ca
         ("5m",),
         stream_scope=ACTIVE_SCOPE,
         session_factory=Session,
-        candle_cache={"EURUSD:5m": {"data": original}},
+        candle_cache={f"{ACTIVE_SCOPE}:EURUSD:5m": {"data": original}},
         cache_health_reader=_usable_health,
         now=datetime(2026, 9, 15, 12, 17, tzinfo=timezone.utc),
     )
@@ -226,7 +226,7 @@ def test_display_snapshot_uses_memory_for_all_six_when_closed_frames_are_fresh()
     for symbol in SYMBOLS:
         for timeframe in TIMEFRAMES:
             minutes = {"5m": 5, "15m": 15, "1h": 60}[timeframe]
-            cache[f"{symbol}:{timeframe}"] = {
+            cache[f"{ACTIVE_SCOPE}:{symbol}:{timeframe}"] = {
                 "data": _memory_frame(
                     starts[timeframe],
                     periods=3,
@@ -262,12 +262,12 @@ def test_display_snapshot_falls_back_individually_to_durable_streams():
     _seed_all_streams(Session)
     now = datetime(2026, 9, 15, 16, 30, tzinfo=timezone.utc)
     cache = {
-        "EURUSD:5m": {"data": _memory_frame("2026-09-15T16:10:00Z", freq="5min")},
-        "EURUSD:15m": {"data": _memory_frame("2026-09-15T15:45:00Z", freq="15min")},
+        f"{ACTIVE_SCOPE}:EURUSD:5m": {"data": _memory_frame("2026-09-15T16:10:00Z", freq="5min")},
+        f"{ACTIVE_SCOPE}:EURUSD:15m": {"data": _memory_frame("2026-09-15T15:45:00Z", freq="15min")},
     }
 
     def health(symbol, timeframe):
-        if f"{symbol}:{timeframe}" not in cache:
+        if f"{ACTIVE_SCOPE}:{symbol}:{timeframe}" not in cache:
             return {"usable": False}
         return _usable_health(symbol, timeframe)
 
@@ -301,7 +301,7 @@ def test_display_snapshot_rejects_unusable_memory_and_uses_durable():
     Session, _ = _sessions()
     _seed_all_streams(Session)
     cache = {
-        "XAUUSD:5m": {
+        f"{ACTIVE_SCOPE}:XAUUSD:5m": {
             "data": _memory_frame("2026-09-15T16:10:00Z", base=3600.0),
         }
     }
@@ -337,7 +337,7 @@ def test_display_snapshot_rechecks_freshness_after_forming_candle_is_removed(mon
         ("5m",),
         stream_scope=ACTIVE_SCOPE,
         session_factory=Session,
-        candle_cache={"EURUSD:5m": {"data": cached}},
+        candle_cache={f"{ACTIVE_SCOPE}:EURUSD:5m": {"data": cached}},
         cache_health_reader=lambda *_args: {
             "usable": True,
             "last_candle_age_seconds": 120.0,
@@ -360,7 +360,7 @@ def test_display_snapshot_caps_memory_to_latest_500_closed_rows():
         ("5m",),
         stream_scope=ACTIVE_SCOPE,
         session_factory=Session,
-        candle_cache={"EURUSD:5m": {"data": frame}},
+        candle_cache={f"{ACTIVE_SCOPE}:EURUSD:5m": {"data": frame}},
         cache_health_reader=_usable_health,
         now=now,
     )

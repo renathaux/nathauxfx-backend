@@ -795,11 +795,11 @@ def _start_forex_background_task():
     api.ENGINE_RUNTIME_STATE["indicator_stream_startup"] = startup_state
     if not startup_state["ready"]:
         print("INDICATOR_STREAM_STARTUP_BLOCKED =", startup_state)
-        return
-    if startup_state["ancillary_failures"]:
-        print("INDICATOR_STREAM_ANCILLARY_BLOCKED =", startup_state["ancillary_failures"])
-    print("Startup OK - warming panel cache")
-    api.warm_panel_cache_from_persisted_candles()
+    else:
+        if startup_state["ancillary_failures"]:
+            print("INDICATOR_STREAM_ANCILLARY_BLOCKED =", startup_state["ancillary_failures"])
+        print("Startup OK - warming panel cache")
+        api.warm_panel_cache_from_persisted_candles()
     with api.BACKGROUND_THREAD_LOCK:
         if api.BACKGROUND_THREAD is not None and api.BACKGROUND_THREAD.is_alive():
             print("BACKGROUND_FETCH_ALREADY_RUNNING =", {

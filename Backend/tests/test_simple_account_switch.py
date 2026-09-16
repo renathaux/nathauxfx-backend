@@ -28,6 +28,35 @@ def test_cache_isolated_on_a_b_a_without_discarding_history(selected):
     assert connector.CTRADER_CANDLE_CACHE[connector.get_ctrader_candle_cache_key("EURUSD", "5m")]["source"] == "account-a"
 
 
+def test_blocked_account_refresh_does_not_poison_selected_account_a_b_a(selected, monkeypatch):
+    import api
+    import brain
+    from services.indicator_event_stream_service import IndicatorStreamUnavailable
+
+    published = []
+
+    def selected_panel(*, force_refresh=False):
+        account_id = connector.get_ctrader_config()["account_id"]
+        if account_id == "47810571":
+            raise IndicatorStreamUnavailable("B EURUSD 5m reconciliation required")
+        return {"EURUSD": {"signal": "WAIT"}, "XAUUSD": {"signal": "WAIT"}}
+
+    monkeypatch.setattr(brain, "get_panel_data", selected_panel)
+    monkeypatch.setattr(api, "update_panel_cache", lambda data, _reason: published.append(data))
+    monkeypatch.setattr(api, "record_auto_execution_gate", lambda *_args, **_kwargs: None)
+
+    assert api.refresh_panel_cache("account-a") is True
+    selected["active_account_id"] = "47810571"
+    assert api.refresh_panel_cache("blocked-account-b") is False
+    assert "B EURUSD 5m reconciliation required" in api.PANEL_REFRESH_STATE["last_error"]
+    selected["active_account_id"] = "47784297"
+    assert api.refresh_panel_cache("account-a-again") is True
+    assert [panel["_meta"]["account_scope"] for panel in published] == [
+        "CTRADER:DEMO:47784297",
+        "CTRADER:DEMO:47784297",
+    ]
+
+
 def test_environment_is_part_of_cache_identity(selected):
     demo = connector.get_ctrader_candle_cache_path("EURUSD", "5m")
     selected["active_account_env"] = "live"
