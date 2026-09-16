@@ -8,13 +8,14 @@ import tempfile
 
 from sqlalchemy import select, text
 from models import BrokerIntegrationTestSubmission
+from services.broker_integration_test_errors import BlockerCode
 
 TEST_ACCOUNT = '47784297'
 _execution_account = ContextVar('normal_execution_account', default=None)
 
 
 class ExecutionFenced(RuntimeError):
-    pass
+    code = BlockerCode.EXECUTION_FENCED
 
 
 @contextmanager
@@ -75,13 +76,18 @@ def _run_normal_submission(session_factory, account_id, callback):
         return callback()
 
 
-def exclude_test_positions(session_factory, account_id, positions):
+def exclude_test_positions(session_factory, account_id, positions, *, closed_history=False):
     """Exclude only durable exact identity matches, including terminal tests."""
     if str(account_id) != TEST_ACCOUNT:
         return positions
     with session_factory() as session:
         rows = session.scalars(select(BrokerIntegrationTestSubmission).where(
             BrokerIntegrationTestSubmission.account_id == TEST_ACCOUNT)).all()
+        if closed_history and any(row.unresolved_account and row.request_started_at
+                                  and not row.broker_position_id for row in rows):
+            error = ExecutionFenced('Closed history identity unresolved')
+            error.code = BlockerCode.HISTORY_IDENTITY_UNRESOLVED
+            raise error
         refs = {row.reference for row in rows}
         ids = {row.broker_position_id for row in rows if row.broker_position_id}
     def tracked(position):
@@ -98,3 +104,8 @@ def exclude_test_positions(session_factory, account_id, positions):
             raw = raw.get('raw')
         return False
     return [position for position in positions if not tracked(position)]
+
+
+def exclude_test_closed_deals(session_factory, account_id, deals):
+    """Deals may have no reference: do not expose history before identity resolution."""
+    return exclude_test_positions(session_factory, account_id, deals, closed_history=True)

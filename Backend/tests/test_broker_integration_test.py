@@ -222,3 +222,74 @@ def test_cli_preflight_recover_and_roundtrip_use_same_durable_service(rig, monke
     assert main(args) == 0
     assert main(args + ['--recover']) == 0
     assert broker.sends == 1
+
+
+@pytest.mark.parametrize('crash', [False, True])
+def test_ambiguous_close_restart_never_resends_close_on_still_open_snapshot(rig, crash):
+    from services.broker_integration_test_service import BrokerIntegrationTestService
+    from models import BrokerIntegrationTestSubmission
+    service, broker, factory, request = rig
+    calls = []
+    def ambiguous_close(row, evidence):
+        calls.append(evidence.position_id)
+        if crash:
+            raise SystemExit('process died after durable close marker')
+        raise TimeoutError('secret access token must not be emitted')
+    broker.close = ambiguous_close
+    if crash:
+        with pytest.raises(SystemExit):
+            service.run(request)
+    else:
+        assert service.run(request)['state'] == 'NEEDS_RECOVERY'
+    restored = BrokerIntegrationTestService(factory, broker)
+    result = restored.run(request, recover=True)
+    assert calls == ['18']
+    assert result['state'] == 'NEEDS_RECOVERY'
+    assert result['last_error'] == 'UNRESOLVED_CLOSE'
+    with factory() as session:
+        assert session.get(BrokerIntegrationTestSubmission, request.test_id).unresolved_account == '47784297'
+    broker.closes = 1  # Later authoritative filled closing deal, no second close.
+    assert restored.run(request, recover=True)['state'] == 'CLOSED'
+    assert calls == ['18']
+
+
+def test_label_less_closed_deal_is_not_exposed_while_open_identity_unresolved(rig):
+    from ctrader_connector import normalize_ctrader_closed_deal
+    from services.account_execution_coordination import exclude_test_closed_deals, ExecutionFenced
+    service, broker, factory, request = rig
+    broker.ambiguous = True
+    service.run(request)
+    deal = {'dealId':20, 'orderId':19, 'positionId':18, 'symbolId':1,
+            'tradeSide':2, 'filledVolume':1000, 'executionPrice':1.101,
+            'closePositionDetail':{'closedVolume':1000,'entryPrice':1.1,'grossProfit':0,'swap':0,'commission':1,'balance':10000}}
+    history = [normalize_ctrader_closed_deal(deal, {'1':'EURUSD'})]
+    with pytest.raises(ExecutionFenced):
+        exclude_test_closed_deals(factory, '47784297', history)
+    assert exclude_test_closed_deals(factory, '47810571', history) == history
+    broker.closes = 1
+    assert service.run(request, recover=True)['state'] == 'CLOSED'
+    assert exclude_test_closed_deals(factory, '47784297', history) == []
+
+
+@pytest.mark.parametrize('change,code', [({'is_live':True},'DEMO_PROOF_REQUIRED'),
+    ({'min_volume':0},'INVALID_BROKER_VOLUME'), ({'cleanup_ready':False},'CLEANUP_UNAVAILABLE')])
+def test_cli_returns_known_safe_blocker_codes(rig, monkeypatch, capsys, change, code):
+    import json
+    import db
+    from scripts.run_broker_integration_test import main
+    import services.broker_integration_test_adapter as adapter
+    _, broker, factory, _ = rig
+    broker.preflight = replace(broker.preflight, **change)
+    monkeypatch.setattr(db, 'SessionLocal', factory)
+    monkeypatch.setattr(adapter, 'CTraderTestAdapter', lambda: broker)
+    args = ['--account-id','47784297','--test-id','codes','--symbol','EURUSD','--confirm-demo-broker-test','--preflight']
+    assert main(args) == 2
+    assert json.loads(capsys.readouterr().out)['error_code'] == code
+
+
+def test_unknown_exception_secret_is_never_persisted(rig):
+    service, broker, _, request = rig
+    broker.ambiguous = True
+    result = service.run(request)
+    assert result['last_error'] == 'BROKER_IO_FAILURE'
+    assert 'sensitive broker payload' not in str(result)

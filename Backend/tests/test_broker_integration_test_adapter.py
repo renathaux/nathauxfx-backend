@@ -124,3 +124,24 @@ def test_transport_deadline_bounds_repeated_heartbeat_or_fragment_reads(monkeypa
         while True: sock.recv(1)
     transport.connector = SimpleNamespace(websocket_recv_text=streaming_reader)
     with pytest.raises(TimeoutError): transport._receive(10)
+
+
+@pytest.mark.parametrize('change,code', [('live','DEMO_PROOF_REQUIRED'),
+    ('volume','INVALID_BROKER_VOLUME'),('exposure','EXISTING_EXPOSURE'),
+    ('history','HISTORY_INCOMPLETE')])
+def test_adapter_blockers_have_safe_specific_codes(network, change, code):
+    from services.broker_integration_test_adapter import CTraderTestAdapter
+    from services.broker_integration_test_service import TestRequest
+    from services.broker_integration_test_errors import safe_error_code
+    if change == 'live': network.is_live = True
+    if change == 'volume': network.volume = None
+    if change == 'history': network.truncated = True
+    original = network.request
+    def request(kind, payload, expected):
+        if kind == 2124 and change == 'exposure':
+            return {'position':[{'positionId':999}], 'order':[]}
+        return original(kind, payload, expected)
+    network.request = request
+    with pytest.raises(Exception) as error:
+        CTraderTestAdapter(lambda:network).fresh_preflight(TestRequest('47784297','codes','EURUSD',True))
+    assert safe_error_code(error.value) == code

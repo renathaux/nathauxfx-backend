@@ -4003,8 +4003,8 @@ def fetch_ctrader_closed_deals(config, from_timestamp, to_timestamp, max_rows=10
         ]
 
         from db import SessionLocal
-        from services.account_execution_coordination import exclude_test_positions
-        closed = exclude_test_positions(SessionLocal, account_id, closed)
+        from services.account_execution_coordination import exclude_test_closed_deals
+        closed = exclude_test_closed_deals(SessionLocal, account_id, closed)
         closed.sort(key=lambda item: item.get("closed_at") or 0, reverse=True)
         print("CTRADER_CLOSED_DEALS_SYNC =", {
             "from_timestamp": from_timestamp,

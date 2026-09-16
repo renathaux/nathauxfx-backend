@@ -12,6 +12,7 @@ import time
 import uuid
 
 from services.broker_integration_test_service import Preflight, Reconciliation, BrokerIntegrationTestService
+from services.broker_integration_test_errors import BlockerCode as Code, BrokerTestBlocked
 
 ACCOUNT = 47784297
 
@@ -46,7 +47,7 @@ class DemoSocket:
         self.token = load_tokens().get('access_token') or os.getenv('CTRADER_ACCESS_TOKEN')
         self.sock = None
         if not self.token or not os.getenv('CTRADER_CLIENT_ID') or not os.getenv('CTRADER_CLIENT_SECRET'):
-            raise ValueError('Broker credentials unavailable')
+            raise BrokerTestBlocked(Code.CREDENTIALS_UNAVAILABLE)
 
     def __enter__(self):
         self.sock = self.connector.open_ctrader_json_socket('demo.ctraderapi.com', 5036)
@@ -67,7 +68,7 @@ class DemoSocket:
         result = self.request(2149, {'accessToken': self.token}, 2150)
         accounts = [a for a in result.get('ctidTraderAccount', []) if str(a.get('ctidTraderAccountId')) == str(ACCOUNT)]
         if len(accounts) != 1 or accounts[0].get('isLive') is not False:
-            raise ValueError('Fresh explicit DEMO account metadata required')
+            raise BrokerTestBlocked(Code.DEMO_PROOF_REQUIRED)
 
     def _receive(self, deadline):
         remaining = deadline - time.monotonic()
@@ -87,14 +88,14 @@ class DemoSocket:
             if data.get('clientMsgId') != client_id:
                 continue
             if data.get('payloadType') in (2142, 2132):
-                raise ValueError('Broker request rejected')
+                raise BrokerTestBlocked(Code.BROKER_REJECTED)
             if data.get('payloadType') != expected:
                 continue
             result = data.get('payload')
             if not isinstance(result, dict) or result.get('errorCode'):
-                raise ValueError('Invalid broker response')
+                raise BrokerTestBlocked(Code.BROKER_RESPONSE_INVALID)
             if 'ctidTraderAccountId' in payload and str(result.get('ctidTraderAccountId')) != str(ACCOUNT):
-                raise ValueError('Broker account response mismatch')
+                raise BrokerTestBlocked(Code.IDENTITY_MISMATCH)
             return result
 
     def quote(self, symbol_id):
@@ -124,7 +125,7 @@ class CTraderTestAdapter:
             accounts = transport.request(2149, {'accessToken':token}, 2150).get('ctidTraderAccount', [])
             matched = [a for a in accounts if str(a.get('ctidTraderAccountId')) == str(ACCOUNT)]
             if len(matched) != 1 or matched[0].get('isLive') is not False:
-                raise ValueError('Fresh explicit DEMO metadata missing')
+                raise BrokerTestBlocked(Code.DEMO_PROOF_REQUIRED)
             yield transport
 
     @staticmethod
@@ -135,59 +136,70 @@ class CTraderTestAdapter:
         orders = transport.request(2175, payload, 2176)
         deals = transport.request(2133, {**payload, 'maxRows':1000}, 2134)
         if orders.get('hasMore') is not False or deals.get('hasMore') is not False:
-            raise ValueError('Complete untruncated history required')
+            raise BrokerTestBlocked(Code.HISTORY_INCOMPLETE)
         return orders.get('order', []), deals.get('deal', [])
 
     def fresh_preflight(self, request):
+        try:
+            return self._fresh_preflight(request)
+        except BrokerTestBlocked:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BrokerTestBlocked(Code.SYMBOL_METADATA_INVALID) from exc
+
+    def _fresh_preflight(self, request):
         if request.account_id != str(ACCOUNT) or request.symbol != 'EURUSD':
-            raise ValueError('Pinned DEMO EURUSD only')
+            raise BrokerTestBlocked(Code.INVALID_REQUEST)
         with self._connection() as transport:
             trader = transport.request(2121, {'ctidTraderAccountId':ACCOUNT}, 2122)['trader']
             if (str(trader.get('ctidTraderAccountId')) != str(ACCOUNT)
                     or trader.get('accountType') not in (0, 'HEDGED')
                     or trader.get('accessRights') not in (0, 'FULL_ACCESS')
                     or trader.get('isLimitedRisk') is not False):
-                raise ValueError('Hedged full-access non-limited-risk account required')
+                raise BrokerTestBlocked(Code.ACCOUNT_PERMISSIONS_UNSUPPORTED)
             symbols = transport.request(2114, {'ctidTraderAccountId':ACCOUNT,'includeArchivedSymbols':False}, 2115)['symbol']
             candidates = [s for s in symbols if s.get('symbolName') == 'EURUSD']
             if len(candidates) != 1:
-                raise ValueError('Exact unique EURUSD symbol required')
+                raise BrokerTestBlocked(Code.SYMBOL_METADATA_INVALID)
             symbol_id = int(candidates[0]['symbolId'])
             details = transport.request(2116, {'ctidTraderAccountId':ACCOUNT,'symbolId':[symbol_id]}, 2117)['symbol']
             if len(details) != 1 or int(details[0]['symbolId']) != symbol_id:
-                raise ValueError('Full symbol metadata mismatch')
+                raise BrokerTestBlocked(Code.SYMBOL_METADATA_INVALID)
             symbol = details[0]
-            volume, step, maximum = (int(symbol[k]) for k in ('minVolume','stepVolume','maxVolume'))
+            try:
+                volume, step, maximum = (int(symbol[k]) for k in ('minVolume','stepVolume','maxVolume'))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise BrokerTestBlocked(Code.INVALID_BROKER_VOLUME) from exc
             if volume <= 0 or step <= 0 or volume % step or maximum < volume:
-                raise ValueError('Invalid authoritative volume')
+                raise BrokerTestBlocked(Code.INVALID_BROKER_VOLUME)
             if symbol.get('tradingMode') not in (0, 'ENABLED'):
-                raise ValueError('Symbol trading unavailable')
+                raise BrokerTestBlocked(Code.SYMBOL_METADATA_INVALID)
             # Test-only 50-pip protection, widened to broker minimum + spread.
             # Unsupported distance metadata fails closed; no guessed unit conversion.
             if symbol.get('distanceSetIn') not in (1, 'SYMBOL_DISTANCE_IN_POINTS'):
-                raise ValueError('Unsupported broker protection distance units')
+                raise BrokerTestBlocked(Code.PROTECTION_UNSUPPORTED)
             quote = transport.quote(symbol_id)
             if (str(quote.get('ctidTraderAccountId')) != str(ACCOUNT)
                     or int(quote.get('symbolId', 0)) != symbol_id
                     or abs(time.time()*1000 - int(quote['timestamp'])) > 30000):
-                raise ValueError('Fresh scoped quote required')
+                raise BrokerTestBlocked(Code.QUOTE_INVALID)
             bid, ask = int(quote['bid']) / 100000, int(quote['ask']) / 100000
             if not 0 < bid < ask:
-                raise ValueError('Invalid broker quote')
+                raise BrokerTestBlocked(Code.QUOTE_INVALID)
             digits = int(symbol['digits'])
             distances = [max(0.005, int(symbol[k]) / 10**digits + 2*(ask-bid)) for k in ('slDistance','tpDistance')]
             if max(distances) > 0.02:
-                raise ValueError('Test protection exceeds bounded distance')
+                raise BrokerTestBlocked(Code.PROTECTION_UNSUPPORTED)
             self.protection = tuple(math.ceil(d*100000) for d in distances)
             existing = transport.request(2124, {'ctidTraderAccountId':ACCOUNT,'returnProtectionOrders':False}, 2125)
             if existing.get('position') or existing.get('order'):
-                raise ValueError('Account must have zero existing positions and orders')
+                raise BrokerTestBlocked(Code.EXISTING_EXPOSURE)
             self._history(transport, datetime.now(timezone.utc))
             return Preflight(str(ACCOUNT), False, 'EURUSD', symbol_id, volume, step, maximum, bid, ask, True)
 
     def submit(self, row):
         if row.account_id != str(ACCOUNT) or not self.protection:
-            raise ValueError('Pinned fresh preflight required')
+            raise BrokerTestBlocked(Code.INVALID_REQUEST)
         with self._connection() as transport:
             transport.request(2106, {'ctidTraderAccountId':ACCOUNT, 'symbolId':row.symbol_id,
                 'orderType':1, 'tradeSide':1, 'volume':row.volume, 'label':row.reference,
@@ -196,7 +208,7 @@ class CTraderTestAdapter:
 
     def reconcile(self, row):
         if row.account_id != str(ACCOUNT):
-            raise ValueError('Pinned DEMO account required')
+            raise BrokerTestBlocked(Code.INVALID_REQUEST)
         with self._connection() as transport:
             orders, deals = self._history(transport, row.created_at)
             current = transport.request(2124, {'ctidTraderAccountId':ACCOUNT,'returnProtectionOrders':False}, 2125)
@@ -243,7 +255,7 @@ class CTraderTestAdapter:
         fresh = self.reconcile(row)
         BrokerIntegrationTestService._verify(row, fresh)
         if fresh != evidence or fresh.open_volume <= 0:
-            raise ValueError('Close identity or volume changed; reconcile again')
+            raise BrokerTestBlocked(Code.UNRESOLVED_CLOSE)
         with self._connection() as transport:
             transport.request(2111, {'ctidTraderAccountId':ACCOUNT,
                 'positionId':int(fresh.position_id),'volume':fresh.open_volume}, 2126)
