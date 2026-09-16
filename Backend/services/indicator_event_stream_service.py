@@ -377,6 +377,10 @@ def _recognized_ctrader_sparse_gap(symbol, previous, following):
     if _known_market_closure(public, previous, following):
         return True
     if public == "EURUSD" and previous.date() == following.date():
+        # The active DEMO cTrader feed omitted 20:30-20:55 on successive
+        # trading days; accept this exact daily rollover boundary only.
+        if (previous.hour, previous.minute, following.hour, following.minute) == (20, 25, 21, 0):
+            return True
         gap = following - previous
         if gap <= pd.Timedelta(minutes=30):
             previous_minutes = previous.hour * 60 + previous.minute
