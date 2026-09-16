@@ -5,6 +5,7 @@ import os
 import re
 import smtplib
 import threading
+from ctrader_account_context import account_operation
 
 from fastapi import HTTPException, Request
 
@@ -638,6 +639,7 @@ def save_remembered_breakout_with_smc_marker(*args, **kwargs):
 
 
 @api.app.get("/chart/smc-structure")
+@account_operation
 def chart_smc_structure(symbol: str = "EURUSD", timeframe: str = "15m", limit: int = 250):
     """Return the same SMC structure that the 15m strategy consumes."""
     normalized_symbol = api.normalize_symbol(symbol)
@@ -737,6 +739,13 @@ def _start_forex_background_task():
             "reason": str(exc),
         })
 
+    # Broker quotes and chart display are read-only and independent of the
+    # indicator/V3B execution startup fence.
+    try:
+        api.start_ctrader_live_price_stream()
+    except Exception as exc:
+        print("CTRADER_LIVE_STREAM_START_ERROR =", str(exc))
+
     if not verify_execution_protocol():
         protocol_failure = {
             "ok": False,
@@ -762,6 +771,7 @@ def _start_forex_background_task():
         print("SUBMISSION_RECONCILIATION_BLOCKED =", submission_reconciliation)
         return
 
+    @account_operation
     def initialize_startup_stream(startup_symbol, startup_timeframe):
         startup_minutes = {"5m": 5, "15m": 15, "1h": 60}[startup_timeframe]
         startup_market_data = api.get_ctrader_market_data(
@@ -790,10 +800,6 @@ def _start_forex_background_task():
         print("INDICATOR_STREAM_ANCILLARY_BLOCKED =", startup_state["ancillary_failures"])
     print("Startup OK - warming panel cache")
     api.warm_panel_cache_from_persisted_candles()
-    try:
-        api.start_ctrader_live_price_stream()
-    except Exception as exc:
-        print("CTRADER_LIVE_STREAM_START_ERROR =", str(exc))
     with api.BACKGROUND_THREAD_LOCK:
         if api.BACKGROUND_THREAD is not None and api.BACKGROUND_THREAD.is_alive():
             print("BACKGROUND_FETCH_ALREADY_RUNNING =", {

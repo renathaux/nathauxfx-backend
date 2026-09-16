@@ -17,6 +17,7 @@ import hashlib
 import threading
 
 import pandas as pd
+from ctrader_account_context import current_identity
 
 from services import indicator_event_stream_service as stream
 from services.broker_account_state_service import load_active_account_selection
@@ -40,6 +41,8 @@ def _normal_scope(value):
 
 def active_ctrader_stream_scope():
     """Return a stable stream scope for the currently selected cTrader account."""
+    if current_identity() is not None:
+        return current_identity().scope
     selected = load_active_account_selection() or {}
     account_id = str(selected.get("active_account_id") or "").strip()
     environment = str(selected.get("active_account_env") or "").strip().upper()
@@ -131,6 +134,9 @@ def account_scoped_get_authoritative_structure(
         return original(frame, symbol, timeframe, point_size, **kwargs)
 
     scope = _resolved_scope(stream_scope, session_factory)
+    frame_scope = getattr(frame, "attrs", {}).get("ctrader_stream_scope")
+    if frame_scope and frame_scope != scope:
+        raise stream.IndicatorStreamUnavailable("candle account scope does not match target account")
     if not scope:
         kwargs = {
             "session_factory": session_factory,
@@ -216,6 +222,9 @@ def account_scoped_read_authoritative_structure(
         return original(frame, symbol, timeframe, point_size, **kwargs)
 
     scope = _resolved_scope(stream_scope, session_factory)
+    frame_scope = getattr(frame, "attrs", {}).get("ctrader_stream_scope")
+    if frame_scope and frame_scope != scope:
+        raise stream.IndicatorStreamUnavailable("candle account scope does not match target account")
     if not scope:
         kwargs = {"session_factory": session_factory}
         if analyzer is not None:

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import time
+from ctrader_account_context import account_operation, current_identity
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -272,6 +273,7 @@ def ctrader_health():
 
 @router.get("/panel-data", include_in_schema=False)
 @router.get("/dashboard-feed", include_in_schema=False)
+@account_operation
 def nonblocking_dashboard_feed(force: int = 0):
     """Serve browser dashboard reads from in-memory cache only.
 
@@ -287,6 +289,13 @@ def nonblocking_dashboard_feed(force: int = 0):
 
     try:
         cached = api.PANEL_CACHE.get("data")
+        identity = current_identity()
+        matching_cache = (identity is None or (
+            isinstance(cached, dict)
+            and (cached.get("_meta") or {}).get("account_scope") == identity.scope
+        ))
+        if not matching_cache:
+            cached = None
         if not isinstance(cached, dict):
             cached = api.default_panel()
         data = clone_panel_for_transport(cached)
@@ -295,6 +304,8 @@ def nonblocking_dashboard_feed(force: int = 0):
 
         now = time.time()
         last_update = float(api.PANEL_CACHE.get("last_update") or 0)
+        if not matching_cache:
+            last_update = 0
         age = max(now - last_update, 0) if last_update else 0
         display_only_fallback = False
         if not last_update and not isinstance(data.get("candles"), dict):
@@ -319,6 +330,8 @@ def nonblocking_dashboard_feed(force: int = 0):
         if not isinstance(refresh_state, dict):
             refresh_state = {}
         live_meta = api.LIVE_PANEL_META_CACHE or {}
+        if identity and live_meta.get("account_scope") != identity.scope:
+            live_meta = {}
         live_pl = clone_panel_for_transport(live_meta.get("live_pl_sync") or {})
         if not isinstance(live_pl, dict):
             live_pl = {}
@@ -346,6 +359,12 @@ def nonblocking_dashboard_feed(force: int = 0):
         live_orders = clone_panel_for_transport(
             getattr(api, "LIVE_ACTIVE_ORDERS", {}) or {}
         )
+        if identity:
+            if str(live_account.get("account_id")) != identity.account_id:
+                live_account = {"account_id": identity.account_id, "mode": identity.environment,
+                                "connected": False, "execution_ready": False}
+            live_orders = {symbol: order for symbol, order in (live_orders or {}).items()
+                           if isinstance(order, dict) and order.get("account_scope") == identity.scope}
         live_positions = clone_panel_for_transport(
             live_meta.get("live_positions") or []
         )
@@ -369,6 +388,8 @@ def nonblocking_dashboard_feed(force: int = 0):
             live_price_status = {}
 
         data["_meta"] = {
+            "account_scope": identity.scope if identity else None,
+            "selection_revision": identity.selection_revision if identity else None,
             "source": "dashboard_feed_cache_only_cycle_safe",
             "cache_age_seconds": round(age, 1),
             "stale_data": bool(refresh_state.get("last_error") or not last_update),

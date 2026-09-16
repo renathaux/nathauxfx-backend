@@ -107,7 +107,10 @@ def test_startup_panel_uses_persisted_candles_for_display_only(monkeypatch):
 
 
 def test_ready_panel_does_not_load_display_fallback(monkeypatch):
+    from ctrader_account_context import AccountIdentity
+    monkeypatch.setattr("ctrader_account_context.selected_identity", lambda: AccountIdentity("47784297", "demo"))
     panel = api.default_panel()
+    panel["_meta"] = {"account_scope": "CTRADER:DEMO:47784297"}
     panel["candles"] = {"EURUSD": {"5m": [{"time": 1}]}}
     monkeypatch.setattr(api, "PANEL_CACHE", {"data": panel, "last_update": 123.0})
     monkeypatch.setattr(api, "PANEL_REFRESH_STATE", {"last_success": 123.0})

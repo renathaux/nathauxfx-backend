@@ -44,6 +44,7 @@ def _install_ctrader_provider_cache_guard():
     original_get = _ctrader.get_ctrader_market_data
 
     @wraps(original_get)
+    @_ctrader.account_operation
     def get_ctrader_market_data(symbol, timeframe, *args, **kwargs):
         cache_key = _ctrader.get_ctrader_candle_cache_key(symbol, timeframe)
         cached_before = _ctrader.CTRADER_CANDLE_CACHE.get(cache_key)
@@ -113,6 +114,9 @@ def _install_ctrader_sparse_trendbar_policy():
             import ctrader_connector as _ctrader
 
             cache_key = _ctrader.get_ctrader_candle_cache_key(symbol, timeframe)
+            frame_scope = getattr(frame, "attrs", {}).get("ctrader_stream_scope")
+            if frame_scope and not cache_key.startswith(frame_scope + ":"):
+                return frame
             cached = _ctrader.CTRADER_CANDLE_CACHE.get(cache_key)
             provider_data = cached.get("data") if isinstance(cached, dict) else None
             if provider_data is not None and not provider_data.empty:

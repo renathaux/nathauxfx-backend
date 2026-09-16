@@ -11,6 +11,7 @@ import pandas as pd
 import requests
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
+from ctrader_account_context import account_operation, current_identity, AccountSelectionChanged
 from ctrader_connector import (
     append_current_forming_candle,
     get_ctrader_candle_cache_status,
@@ -135,6 +136,9 @@ def remember_last_open_payload(payload):
     """Best-effort optional cache update; never suppress strategy execution."""
     try:
         get_panel_data._last_open_payload = bounded_panel_snapshot(payload)
+        identity = current_identity()
+        if identity:
+            _LAST_OPEN_PAYLOAD_BY_ACCOUNT[identity.scope] = bounded_panel_snapshot(payload)
         return True
     except Exception as exc:
         print("PANEL_CACHE_SNAPSHOT_WARNING =", {
@@ -1964,6 +1968,8 @@ def _fetch_ctrader_symbol(symbol, timeframe, limit, force_refresh=False):
             limit=limit,
             force_refresh=force_refresh
         )
+    except AccountSelectionChanged:
+        raise
     except Exception as e:
         print(f"CTRADER DATA ERROR: {symbol} {timeframe} {e}")
         return pd.DataFrame()
@@ -2153,6 +2159,11 @@ def _empty_market_data_cache():
     }
 
 
+_MARKET_CACHE_BY_ACCOUNT = {}
+_LAST_OPEN_PAYLOAD_BY_ACCOUNT = {}
+
+
+@account_operation
 def hydrate_market_data_cache_from_disk():
     frame_map = {
         "eurusd_5m": ("EURUSD", "5m"),
@@ -2188,6 +2199,8 @@ def hydrate_market_data_cache_from_disk():
         "last_1h_update": hydrated_at,
     })
     fetch_market_data._cache = cache
+    if current_identity():
+        _MARKET_CACHE_BY_ACCOUNT[current_identity().scope] = cache
     MARKET_DATA_STATUS["last_fetch_source"] = "ctrader_cache"
     MARKET_DATA_STATUS["fallback_used"] = True
     MARKET_DATA_STATUS["error"] = None
@@ -2198,6 +2211,7 @@ def hydrate_market_data_cache_from_disk():
     return True
 
 
+@account_operation
 def fetch_market_data(force_refresh=False):
     global _FETCH_LOCK
 
@@ -2217,6 +2231,8 @@ def fetch_market_data(force_refresh=False):
         fetch_market_data._cache = _empty_market_data_cache()
 
     cache = fetch_market_data._cache
+    if current_identity():
+        cache = _MARKET_CACHE_BY_ACCOUNT.setdefault(current_identity().scope, _empty_market_data_cache())
 
     if force_refresh:
         print("FORCE MARKET DATA REFRESH")
@@ -2510,7 +2526,7 @@ LAST_POSITION_CLOSED_AT = {
 
 
 def set_last_position_closed_at(symbol, closed_at):
-    normalized_symbol = normalize_symbol(symbol)
+    normalized_symbol = get_final_signal_hold_key(symbol)
     try:
         timestamp = float(closed_at or 0)
     except (TypeError, ValueError):
@@ -2548,7 +2564,8 @@ def clear_symbol_entry_memory(symbol, reason, closed_at=None):
     return bool(removed_watches or hold_removed)
 
 def get_final_signal_hold_key(symbol):
-    return normalize_symbol(symbol)
+    symbol = normalize_symbol(symbol)
+    return f"{current_identity().scope}:{symbol}" if current_identity() else symbol
 
 def is_final_signal_hold_expired(held):
     if not isinstance(held, dict):
@@ -6273,7 +6290,7 @@ def validate_trade_levels_1_to_2(result, side):
     return True, None
 
 def get_15m_swing_watch_key(symbol, side):
-    return f"{normalize_symbol(symbol)}:{str(side or '').upper()}"
+    return f"{get_final_signal_hold_key(symbol)}:{str(side or '').upper()}"
 
 def eurusd_requires_fresh_5m_entry(symbol):
     return normalize_symbol(symbol) == "EURUSD"
@@ -7869,7 +7886,7 @@ def apply_score_persistence(
     weights,
     structure_debug,
 ):
-    memory_key = normalize_symbol(symbol)
+    memory_key = get_final_signal_hold_key(symbol)
     previous_memory = SCORE_PERSISTENCE_MEMORY.get(memory_key)
 
     def numeric_score(value, fallback):
@@ -10146,6 +10163,7 @@ def _make_closed_result(symbol, base_result=None, stale_minutes=None):
 
     return result
 
+@account_operation
 def get_panel_data(force_refresh=False):
     run_weekly_paper_reset()
 
@@ -10172,8 +10190,12 @@ def get_panel_data(force_refresh=False):
     # =========================
     # MARKET CLOSED / STALE FEED MODE
     # =========================
-    if all_closed and get_panel_data._last_open_payload is not None:
-        payload = bounded_panel_snapshot(get_panel_data._last_open_payload)
+    last_open_payload = (
+        _LAST_OPEN_PAYLOAD_BY_ACCOUNT.get(current_identity().scope)
+        if current_identity() else get_panel_data._last_open_payload
+    )
+    if all_closed and last_open_payload is not None:
+        payload = bounded_panel_snapshot(last_open_payload)
 
         payload["EURUSD"] = _make_closed_result(
             "EURUSD",

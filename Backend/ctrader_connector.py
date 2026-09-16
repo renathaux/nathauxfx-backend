@@ -19,6 +19,13 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from pathlib import Path
+from ctrader_account_context import (
+    account_operation, current_identity, selected_identity, assert_current_selection,
+    AccountSelectionChanged,
+    account_state_lock,
+    pinned_account,
+    market_read_operation,
+)
 from paths import CANDLE_CACHE_DIR, DATA_DIR
 from services.broker_account_state_service import (
     load_active_account_selection,
@@ -332,6 +339,7 @@ CTRADER_CANDLE_TTLS = {
 }
 
 
+@account_operation
 def check_ctrader_connection_capability(force=False):
     config = get_ctrader_config()
     now = time.time()
@@ -340,6 +348,10 @@ def check_ctrader_connection_capability(force=False):
     if (
         not force
         and cached_state
+        and (current_identity() is None or (
+            str(cached_state.get("account_id")) == current_identity().account_id
+            and cached_state.get("mode") == current_identity().environment
+        ))
         and now - CTRADER_CONNECTION_CACHE.get("checked_at", 0) < CTRADER_CONNECTION_CACHE_SECONDS
     ):
         return dict(cached_state)
@@ -458,6 +470,7 @@ def check_ctrader_connection_capability(force=False):
         CTRADER_CONNECTION_CACHE.get("last_success_at") or None
     )
 
+    assert_current_selection()
     CTRADER_CONNECTION_CACHE["checked_at"] = now
     CTRADER_CONNECTION_CACHE["state"] = dict(state)
 
@@ -467,10 +480,17 @@ def get_connection_state(force=False):
     return check_ctrader_connection_capability(force=force)
 
 
+@account_operation
 def get_ctrader_connection_snapshot():
     """Return status immediately without opening a broker socket."""
     now = time.time()
     cached_state = CTRADER_CONNECTION_CACHE.get("state")
+    identity = current_identity()
+    if identity and isinstance(cached_state, dict) and (
+        str(cached_state.get("account_id")) != identity.account_id
+        or cached_state.get("mode") != identity.environment
+    ):
+        cached_state = None
     if isinstance(cached_state, dict):
         state = dict(cached_state)
         checked_at = float(CTRADER_CONNECTION_CACHE.get("checked_at") or 0)
@@ -489,13 +509,18 @@ def get_ctrader_connection_snapshot():
 
     config = get_ctrader_config()
     local_connected = bool(CONNECTED.get("connected") or CONNECTED.get("status"))
+    if identity and (
+        str(CONNECTED.get("account_id")) != identity.account_id
+        or str(CONNECTED.get("mode") or "").lower() != identity.environment
+    ):
+        local_connected = False
     selection = get_ctrader_account_selection_debug()
     return {
         "connected": local_connected,
         "status": local_connected,
-        "mode": CONNECTED.get("mode") or (config.get("env") if config else "demo"),
+        "mode": identity.environment if identity else CONNECTED.get("mode") or (config.get("env") if config else "demo"),
         "account_id": (
-            CONNECTED.get("account_id")
+            identity.account_id if identity else CONNECTED.get("account_id")
             or (config.get("account_id") if config else None)
         ),
         "execution_ready": False,
@@ -539,6 +564,7 @@ def load_ctrader_account_settings():
         settings["active_account_id"] = durable_selection["active_account_id"]
         settings["active_account_env"] = durable_selection.get("active_account_env")
         settings["_durable_selection_authoritative"] = True
+        settings["selection_revision"] = durable_selection.get("selection_revision")
 
     return settings
 
@@ -546,6 +572,7 @@ def save_ctrader_account_settings(settings, *, persist_selection=False):
     payload = dict(DEFAULT_CTRADER_ACCOUNT_SETTINGS)
     payload.update(settings or {})
     payload.pop("_durable_selection_authoritative", None)
+    payload.pop("selection_revision", None)
     CTRADER_ACCOUNTS_PATH.write_text(json.dumps(payload, indent=2, default=str))
     if persist_selection:
         save_active_account_selection(
@@ -589,6 +616,8 @@ def get_selected_ctrader_account_source():
     return None
 
 def get_active_ctrader_account_id():
+    if current_identity() is not None:
+        return current_identity().account_id
     settings = load_ctrader_account_settings()
     if settings.get("_durable_selection_authoritative"):
         return settings.get("active_account_id")
@@ -720,6 +749,8 @@ def get_saved_ctrader_account(account_id):
     return None
 
 def get_active_ctrader_account_env():
+    if current_identity() is not None:
+        return current_identity().environment
     settings = load_ctrader_account_settings()
     active_account_id = (
         settings.get("active_account_id")
@@ -744,7 +775,7 @@ def clear_ctrader_connection_cache():
     CTRADER_CONNECTION_CACHE["state"] = None
     CTRADER_CONNECTION_CACHE["last_success_at"] = 0
     CTRADER_CONNECTION_CACHE["consecutive_failures"] = 0
-    CTRADER_CANDLE_CACHE.clear()
+    # Candle entries are account/environment scoped; switching back reuses them.
 
 def get_ctrader_redirect_uri():
     return get_ctrader_redirect_uri_debug()["final_value"]
@@ -925,6 +956,11 @@ def clear_ctrader_saved_accounts():
     }
 
 def set_active_ctrader_account(account_id):
+    with account_state_lock:
+        return _set_active_ctrader_account(account_id)
+
+
+def _set_active_ctrader_account(account_id):
     account_id = str(account_id or "").strip()
 
     if not account_id:
@@ -977,6 +1013,9 @@ def set_active_ctrader_account(account_id):
     settings["active_account_env"] = account_env
     clear_active_ctrader_account_balance_cache(settings, persist=False)
     save_ctrader_account_settings(settings, persist_selection=True)
+    selected = selected_identity()
+    if selected is None or (selected.account_id, selected.environment) != (account_id, account_env):
+        raise AccountSelectionChanged("cTrader account selection changed before account refresh")
     os.environ["ACTIVE_CTRADER_ACCOUNT_ID"] = account_id
     os.environ["ACTIVE_CTRADER_ACCOUNT_ENV"] = account_env
     os.environ["CTRADER_ACCOUNT_ID"] = account_id
@@ -990,7 +1029,11 @@ def set_active_ctrader_account(account_id):
     CONNECTED["execution_ready"] = True
     clear_ctrader_connection_cache()
     try:
-        fresh_snapshot = get_ctrader_account_snapshot()
+        with pinned_account(selected):
+            fresh_snapshot = get_ctrader_account_snapshot()
+            assert_current_selection(selected)
+    except AccountSelectionChanged:
+        raise
     except Exception as exc:
         fresh_snapshot = {
             "ok": False,
@@ -1113,7 +1156,11 @@ def normalize_live_price(value):
 
     return numeric / 100000
 
-def update_live_tick(symbol, bid, ask, server_timestamp=None):
+def update_live_tick(symbol, bid, ask, server_timestamp=None, *, account_scope=None):
+    identity = current_identity() or selected_identity()
+    scope = account_scope or (identity.scope if identity else None)
+    if identity is not None and scope != identity.scope:
+        return
     normalized_symbol = normalize_symbol(symbol)
 
     if normalized_symbol not in LIVE_TICKS:
@@ -1150,6 +1197,7 @@ def update_live_tick(symbol, bid, ask, server_timestamp=None):
             "mid": mid_value,
             "timestamp": now,
             "server_timestamp": server_timestamp,
+            "account_scope": scope,
         }
 
     print(
@@ -1157,13 +1205,16 @@ def update_live_tick(symbol, bid, ask, server_timestamp=None):
         f"bid={bid_value} ask={ask_value}"
     )
 
+@account_operation
 def get_ctrader_live_price_status():
     now = time.time()
+    identity = current_identity()
 
     with LIVE_TICKS_LOCK:
         prices = {
             symbol: dict(values)
             for symbol, values in LIVE_TICKS.items()
+            if identity is None or values.get("account_scope") == identity.scope
         }
 
     timestamps = [
@@ -1181,7 +1232,7 @@ def get_ctrader_live_price_status():
 
     return {
         "live_prices": prices,
-        "live_price_health": "STALE" if stale_symbols else "OK",
+        "live_price_health": "STALE" if stale_symbols or not prices else "OK",
         "live_price_stale_symbols": stale_symbols,
         "live_price_last_update": last_update,
         "live_price_last_error": LIVE_PRICE_LAST_ERROR,
@@ -1224,6 +1275,9 @@ def get_live_tick_snapshot(symbol):
 
     with LIVE_TICKS_LOCK:
         tick = dict(LIVE_TICKS.get(normalized_symbol) or {})
+    identity = current_identity() or selected_identity()
+    if identity is not None and tick.get("account_scope") != identity.scope:
+        return None
 
     now = time.time()
     timestamp = tick.get("timestamp")
@@ -1422,13 +1476,17 @@ def get_default_symbol_digits(symbol):
     return None
 
 def get_ctrader_candle_cache_key(symbol, timeframe):
-    return f"{normalize_symbol(symbol)}:{str(timeframe or '').lower()}"
+    identity = current_identity() or selected_identity()
+    prefix = identity.scope if identity else "CTRADER:NO-ACCOUNT"
+    return f"{prefix}:{normalize_symbol(symbol)}:{str(timeframe or '').lower()}"
 
 def get_ctrader_candle_cache_path(symbol, timeframe):
-    account_id = get_active_ctrader_account_id() or "no-account"
+    identity = current_identity() or selected_identity()
+    account_id = identity.account_id if identity else "no-account"
+    environment = identity.environment if identity else "unknown"
     safe_timeframe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(timeframe or "").lower())
     return CTRADER_CANDLE_CACHE_DIR / (
-        f"{account_id}_{normalize_symbol(symbol)}_{safe_timeframe}.json"
+        f"{environment}_{account_id}_{normalize_symbol(symbol)}_{safe_timeframe}.json"
     )
 
 def persist_ctrader_candle_cache(symbol, timeframe, data):
@@ -1750,6 +1808,7 @@ def _safe_cached_provider_data(cached, timeframe, now):
     return frame
 
 
+@market_read_operation
 def get_ctrader_market_data(symbol, timeframe, limit=500, force_refresh=False):
     global LAST_CTRADER_CANDLE_ERROR, LAST_CTRADER_CANDLE_SUCCESS
 
@@ -1837,6 +1896,9 @@ def get_ctrader_market_data(symbol, timeframe, limit=500, force_refresh=False):
             period,
             limit
         )
+        assert_current_selection()
+        if current_identity() is not None:
+            candles.attrs["ctrader_stream_scope"] = current_identity().scope
 
         if candles.empty:
             LAST_CTRADER_CANDLE_ERROR = f"No cTrader candles returned for {execution_symbol} {timeframe}"
@@ -1900,6 +1962,8 @@ def get_ctrader_market_data(symbol, timeframe, limit=500, force_refresh=False):
         })
         return result
 
+    except AccountSelectionChanged:
+        raise
     except Exception as e:
         LAST_CTRADER_CANDLE_ERROR = describe_ctrader_error(e)
         print("CTRADER_CANDLES_ERROR_DEBUG =", {
@@ -2028,6 +2092,9 @@ def ctrader_live_price_stream_loop():
             last_heartbeat_sent = time.monotonic()
 
             while True:
+                identity = selected_identity()
+                if identity is None or (identity.account_id, identity.environment) != (str(account_id), config["env"]):
+                    break
                 if (
                     time.monotonic() - last_heartbeat_sent
                     >= CTRADER_HEARTBEAT_INTERVAL_SECONDS
@@ -2064,6 +2131,7 @@ def ctrader_live_price_stream_loop():
                     payload.get("bid"),
                     payload.get("ask"),
                     payload.get("timestamp"),
+                    account_scope=f"CTRADER:{config['env'].upper()}:{account_id}",
                 )
 
         except Exception as e:
@@ -2863,6 +2931,7 @@ def build_ctrader_market_order_payload(
     return payload
 
 
+@account_operation
 def place_market_order(
     symbol,
     side=None,
@@ -3415,6 +3484,7 @@ def parse_ctrader_money(value, money_digits=2):
 
     return numeric
 
+@account_operation
 def get_ctrader_account_snapshot():
     config = get_ctrader_config()
     settings = load_ctrader_account_settings()
@@ -3511,9 +3581,12 @@ def get_ctrader_account_snapshot():
             "snapshot_refreshed_at": snapshot_refreshed_at,
         }
         print("CTRADER_ACCOUNT_BALANCE_AUDIT =", audit)
-        settings["active_account_snapshot"] = audit
-        settings["active_account_snapshot_refreshed_at"] = snapshot_refreshed_at
-        save_ctrader_account_settings(settings)
+        with account_state_lock:
+            if current_identity() == selected_identity():
+                settings = load_ctrader_account_settings()
+                settings["active_account_snapshot"] = audit
+                settings["active_account_snapshot_refreshed_at"] = snapshot_refreshed_at
+                save_ctrader_account_settings(settings)
 
         return {
             "ok": True,
@@ -3657,6 +3730,7 @@ def normalize_risk_pip_metadata(symbol, pip_size, pip_value, fallback):
 
     return pip_size_value, pip_value_value
 
+@account_operation
 def get_ctrader_symbol_risk_metadata(symbol):
     normalized_symbol = normalize_symbol(symbol)
     fallback = get_symbol_risk_fallback(normalized_symbol)
@@ -3802,6 +3876,7 @@ def get_ctrader_symbol_risk_metadata(symbol):
             pass
 
 
+@account_operation
 def get_open_positions():
     """
     Read-only cTrader position sync hook.
@@ -3839,6 +3914,7 @@ def get_open_positions():
 def get_ctrader_position_fetch_error():
     return LAST_CTRADER_POSITION_FETCH_ERROR
 
+@account_operation
 def get_closed_deals_for_current_week(max_rows=100):
     config = get_ctrader_config()
 
@@ -3867,6 +3943,7 @@ def get_closed_deals_for_current_week(max_rows=100):
         print("CTRADER CLOSED DEALS FETCH ERROR:", e)
         return []
 
+@account_operation
 def get_closed_deals_for_current_month(max_rows=500):
     config = get_ctrader_config()
 
@@ -4170,6 +4247,7 @@ def fetch_ctrader_reconciliation_records(account_id, claimed_at=None):
         except Exception:
             pass
 
+@account_operation
 def get_ctrader_config():
     hydrate_ctrader_tokens_from_storage()
     active_account_id = get_active_ctrader_account_id()
@@ -4413,6 +4491,7 @@ def fetch_ctrader_trendbars(config, symbol, period, limit):
             pass
 
 
+@market_read_operation
 def fetch_ctrader_historical_candles(symbol, timeframe, start_utc, end_utc):
     """Fetch native cTrader trendbars for a bounded historical UTC range.
 
@@ -5523,6 +5602,7 @@ def fetch_ctrader_open_positions(config):
         except Exception:
             pass
 
+@account_operation
 def modify_position_sltp(position_id, stop_loss_price=None, take_profit_price=None):
     config = get_ctrader_config()
 
@@ -6171,6 +6251,7 @@ def set_debug_open_positions(positions):
     return normalize_positions(DEBUG_OPEN_POSITIONS)
 
 
+@account_operation
 def close_position(position_id, volume=None):
     config = get_ctrader_config()
 

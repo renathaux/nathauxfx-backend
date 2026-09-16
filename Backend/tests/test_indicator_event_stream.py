@@ -569,7 +569,7 @@ def test_startup_does_not_start_trading_when_stream_initialization_fails():
     ) as background:
         app_bootstrap._start_forex_background_task()
     assert api.ENGINE_RUNTIME_STATE["indicator_stream_startup"]["ready"] is False
-    live_stream.assert_not_called()
+    live_stream.assert_called_once()
     background.assert_not_called()
 
 

@@ -162,17 +162,19 @@ def persist_execution_snapshot_safely(*, symbol, direction, trade_payload, plan,
             db.close()
 
 
-def record_execution_response_safely(symbol, broker_result):
-    """Attach broker IDs to the latest V3B audit row; never affects execution."""
+def record_execution_response_safely(symbol, broker_result, *, snapshot_id=None,
+                                     session_factory=None):
+    """Attach broker IDs only to the pre-submit snapshot for this request."""
+    if not snapshot_id:
+        return False
     db = None
     try:
-        db = SessionLocal()
+        db = (session_factory or SessionLocal)()
         row = db.execute(
             select(ForexExecutionSnapshot)
-            .where(ForexExecutionSnapshot.symbol == str(symbol).upper().replace("/", ""))
-            .order_by(
-                ForexExecutionSnapshot.order_attempted_at.desc(),
-                ForexExecutionSnapshot.id.desc(),
+            .where(
+                ForexExecutionSnapshot.snapshot_id == str(snapshot_id),
+                ForexExecutionSnapshot.symbol == str(symbol).upper().replace("/", ""),
             )
             .limit(1)
         ).scalar_one_or_none()
@@ -191,3 +193,95 @@ def record_execution_response_safely(symbol, broker_result):
     finally:
         if db is not None:
             db.close()
+
+
+def find_v3b_snapshot_for_position(position, account_id, environment, *, session_factory=None):
+    """Read an unambiguous executed V3B snapshot for this exact broker position."""
+    position = position if isinstance(position, dict) else {}
+    account_id = str(account_id or "").strip()
+    environment = str(environment or "").strip().lower()
+    symbol = str(position.get("symbol") or "").upper().replace("/", "")
+    direction = str(position.get("side") or position.get("direction") or "").upper()
+    position_id = position.get("position_id") or position.get("positionId")
+    order_id = position.get("broker_order_id") or position.get("order_id")
+    client_id = position.get("client_order_id") or position.get("clientOrderId")
+    if not account_id or environment not in {"demo", "live"} or not position_id:
+        return None
+    if not symbol or direction not in {"BUY", "SELL"}:
+        return None
+    opened_at = position.get("opened_at") or position.get("openedAt")
+    try:
+        if isinstance(opened_at, (int, float)):
+            epoch = float(opened_at)
+            opened = datetime.fromtimestamp(
+                epoch / 1000 if abs(epoch) >= 1e11 else epoch,
+                tz=timezone.utc,
+            )
+        elif isinstance(opened_at, datetime):
+            opened = opened_at.replace(tzinfo=timezone.utc) if opened_at.tzinfo is None else opened_at.astimezone(timezone.utc)
+        else:
+            opened = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+    factory = session_factory or SessionLocal
+    db = factory()
+    try:
+        rows = db.execute(select(ForexExecutionSnapshot).where(
+            ForexExecutionSnapshot.account_id == account_id,
+            ForexExecutionSnapshot.broker_environment == environment,
+            ForexExecutionSnapshot.symbol == symbol,
+            ForexExecutionSnapshot.direction == direction,
+        ).order_by(ForexExecutionSnapshot.order_attempted_at.desc()).limit(100)).scalars().all()
+        matches = []
+        for row in rows:
+            attempted = row.order_attempted_at
+            if attempted is None:
+                continue
+            attempted = attempted.replace(tzinfo=timezone.utc) if attempted.tzinfo is None else attempted.astimezone(timezone.utc)
+            if not 0 <= (opened - attempted).total_seconds() <= 600:
+                continue
+            if row.position_id:
+                if str(row.position_id) != str(position_id):
+                    continue
+            elif row.broker_order_id and order_id:
+                if str(row.broker_order_id) != str(order_id):
+                    continue
+            elif row.client_order_id and client_id:
+                if str(row.client_order_id) != str(client_id):
+                    continue
+            else:
+                continue
+            if row.broker_order_id and order_id and str(row.broker_order_id) != str(order_id):
+                continue
+            if row.client_order_id and client_id and str(row.client_order_id) != str(client_id):
+                continue
+            snapshot = row.snapshot_json if isinstance(row.snapshot_json, dict) else {}
+            if snapshot.get("strategy_execution_profile") != "V3B_M5_FROZEN":
+                continue
+            if any(snapshot.get(key) is None for key in ("entry", "sl", "tp1", "tp2", "protected_sl_price")):
+                continue
+            matches.append((row, snapshot))
+        if len(matches) != 1:
+            return None
+        row, snapshot = matches[0]
+        return {
+            "strategy_execution_profile": "V3B_M5_FROZEN",
+            "entry": snapshot["entry"],
+            "original_sl": snapshot["sl"],
+            "protection_trigger_price": snapshot["tp1"],
+            "tp1": snapshot["tp1"],
+            "tp2": snapshot["tp2"],
+            "protected_sl_price": snapshot["protected_sl_price"],
+            "source_indicator_event_id": row.event_id or snapshot.get("event_id"),
+            "signal_setup_id": snapshot.get("signal_setup_id"),
+            "setup_identity": copy.deepcopy(snapshot.get("setup_identity") or {}),
+            "indicator_event_identity": copy.deepcopy(snapshot.get("indicator_event_identity") or {}),
+            "m5_confirmation_id": row.confirmation_id or snapshot.get("confirmation_id"),
+            "m5_confirmation_identity": copy.deepcopy(snapshot.get("m5_confirmation_identity") or {}),
+            "no_partial_close_at_protection_trigger": True,
+            "execution_snapshot_id": row.snapshot_id,
+        }
+    except Exception:
+        return None
+    finally:
+        db.close()
