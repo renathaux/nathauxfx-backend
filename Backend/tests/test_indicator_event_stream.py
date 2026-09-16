@@ -555,7 +555,7 @@ def test_two_initializers_converge_on_one_ready_stream():
     session.close(); engine.dispose()
 
 
-def test_startup_does_not_start_trading_when_stream_initialization_fails():
+def test_blocked_startup_keeps_refresh_worker_available_without_starting_trading():
     with patch.object(app_bootstrap, "_restore_ctrader_selection_before_market_data"), patch.object(
         app_bootstrap, "verify_execution_protocol", return_value=True
     ), patch.object(
@@ -566,10 +566,19 @@ def test_startup_does_not_start_trading_when_stream_initialization_fails():
         app_bootstrap, "initialize_indicator_stream", side_effect=stream.IndicatorStreamUnavailable("broken")
     ), patch.object(api, "start_ctrader_live_price_stream") as live_stream, patch.object(
         api, "background_fetch"
-    ) as background:
+    ) as background, patch.object(app_bootstrap.threading, "Thread") as worker, patch.object(
+        api, "warm_panel_cache_from_persisted_candles"
+    ) as warm_cache:
         app_bootstrap._start_forex_background_task()
     assert api.ENGINE_RUNTIME_STATE["indicator_stream_startup"]["ready"] is False
     live_stream.assert_called_once()
+    worker.assert_called_once_with(
+        target=background,
+        name="flowsignal-trading-engine",
+        daemon=True,
+    )
+    worker.return_value.start.assert_called_once()
+    warm_cache.assert_not_called()
     background.assert_not_called()
 
 

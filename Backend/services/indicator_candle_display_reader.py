@@ -169,9 +169,11 @@ def load_dashboard_display_candles(
             minutes = _TIMEFRAME_MINUTES.get(timeframe)
             if minutes is None:
                 continue
-            cache_key = f"{public_symbol}:{timeframe}"
+            cache_key = f"{scope}:{public_symbol}:{timeframe}"
             cached = cache.get(cache_key) if isinstance(cache, dict) else None
             health = health_reader(public_symbol, timeframe) or {}
+            if health.get("cache_key") and health["cache_key"] != cache_key:
+                health = {}
             frame = None
             closed_age_seconds = None
             max_age_seconds = float(

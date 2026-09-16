@@ -76,7 +76,8 @@ def test_chart_uses_persisted_closed_candles_when_live_market_data_unavailable(m
     assert result["display_closed_candles_available"] is True
 
 
-def test_panel_display_reader_prefers_memory_and_strips_forming_candle():
+def test_panel_display_reader_prefers_memory_and_strips_forming_candle(monkeypatch):
+    monkeypatch.setattr(display_reader, "load_durable_indicator_candles", lambda *_args, **_kwargs: {})
     cached = pd.DataFrame(
         {
             "Open": [1.10, 1.11, 1.12, 1.13],
@@ -93,7 +94,7 @@ def test_panel_display_reader_prefers_memory_and_strips_forming_candle():
         ("EURUSD",),
         ("5m",),
         stream_scope="CTRADER:DEMO:47810571",
-        candle_cache={"EURUSD:5m": {"data": cached}},
+        candle_cache={"CTRADER:DEMO:47810571:EURUSD:5m": {"data": cached}},
         cache_health_reader=lambda *_args: {
             "usable": True,
             "last_candle_age_seconds": 30.0,
@@ -137,7 +138,7 @@ def test_panel_display_reader_rechecks_freshness_after_forming_candle_removed(mo
         ("EURUSD",),
         ("5m",),
         stream_scope="CTRADER:DEMO:47810571",
-        candle_cache={"EURUSD:5m": {"data": cached}},
+        candle_cache={"CTRADER:DEMO:47810571:EURUSD:5m": {"data": cached}},
         cache_health_reader=lambda *_args: {
             # The raw cache looks fresh only because the 12:15 forming bucket is present.
             "usable": True,
@@ -148,5 +149,37 @@ def test_panel_display_reader_rechecks_freshness_after_forming_candle_removed(mo
         now=datetime(2026, 9, 15, 12, 17, tzinfo=timezone.utc),
     )
 
+    assert result["frames"] == {}
+    assert result["streams"] == {}
+
+
+def test_panel_display_reader_never_uses_another_accounts_memory_frame(monkeypatch):
+    monkeypatch.setattr(display_reader, "load_durable_indicator_candles", lambda *_args, **_kwargs: {})
+    other_account_frame = _closed_frame()
+    result = display_reader.load_dashboard_display_candles(
+        ("EURUSD",),
+        ("15m",),
+        stream_scope="CTRADER:DEMO:47784297",
+        candle_cache={"CTRADER:DEMO:47810571:EURUSD:15m": {"data": other_account_frame}},
+        cache_health_reader=lambda *_args: {"usable": True},
+        now=datetime(2026, 9, 14, 19, tzinfo=timezone.utc),
+    )
+    assert result["frames"] == {}
+    assert result["streams"] == {}
+
+
+def test_panel_display_reader_rejects_health_from_previous_account(monkeypatch):
+    monkeypatch.setattr(display_reader, "load_durable_indicator_candles", lambda *_args, **_kwargs: {})
+    result = display_reader.load_dashboard_display_candles(
+        ("EURUSD",),
+        ("15m",),
+        stream_scope="CTRADER:DEMO:47784297",
+        candle_cache={"CTRADER:DEMO:47784297:EURUSD:15m": {"data": _closed_frame()}},
+        cache_health_reader=lambda *_args: {
+            "cache_key": "CTRADER:DEMO:47810571:EURUSD:15m",
+            "usable": True,
+        },
+        now=datetime(2026, 9, 14, 19, tzinfo=timezone.utc),
+    )
     assert result["frames"] == {}
     assert result["streams"] == {}
