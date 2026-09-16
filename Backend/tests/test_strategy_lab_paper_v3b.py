@@ -156,6 +156,46 @@ def test_bridge_rejects_historical_authoritative_event():
     assert result["paper_entry_reason"] == "WAIT_V3B_PAPER_5M_BOS"
 
 
+def test_fresh_bos_before_second_close_exposes_time_bounded_progress_without_entry():
+    index = pd.to_datetime(["2026-09-16T12:00:00Z", "2026-09-16T12:05:00Z"])
+    frame = pd.DataFrame(
+        {
+            "Open": [1.1000, 1.1001],
+            "High": [1.1002, 1.1014],
+            "Low": [1.0998, 1.1000],
+            "Close": [1.1001, 1.1012],
+        }, index=index,
+    )
+    event = {
+        "event_id": "fresh_bos_1205", "symbol": "EURUSD", "timeframe": "5m",
+        "timestamp": index[-1].isoformat(), "event_type": "BOS",
+        "direction": "BULLISH", "broken_level": 1.1009,
+        "broken_swing_timestamp": index[0].isoformat(),
+        "event_invalidation_swing": {"type": "LOW", "price": 1.0998},
+        "tradable": True,
+    }
+
+    result = build_paper_v3b_candidate(
+        "EURUSD", frame, strict_trader_module=_Strict,
+        authoritative_reader=_authority(event),
+    )
+
+    assert result["signal"] == "WAIT"
+    assert result["paper_entry_ready"] is False
+    assert result["paper_entry_reason"] == "WAIT_V3B_PAPER_SECOND_5M"
+    assert result["source_indicator_event_id"] == "fresh_bos_1205"
+    assert result["paper_entry_details"]["bos_body_ratio"] == pytest.approx(1.1 / 1.4)
+    assert result["paper_entry_details"]["bos_candle_time"] == index[-1].isoformat()
+    assert "entry_price" not in result
+
+    invalid_direction = dict(event, direction="UNKNOWN")
+    invalid = build_paper_v3b_candidate(
+        "EURUSD", frame, strict_trader_module=_Strict,
+        authoritative_reader=_authority(invalid_direction),
+    )
+    assert invalid["paper_entry_reason"] == "WAIT_V3B_PAPER_5M_BOS"
+
+
 def test_bridge_final_gate_can_fail_closed_without_opening_any_trade():
     index = pd.to_datetime([
         "2026-09-10T13:00:00Z",
@@ -262,6 +302,9 @@ def test_verified_sep14_rejections_keep_their_exact_v3b_reason(
     )
     assert result["paper_entry_ready"] is False
     assert result["paper_entry_reason"] == expected
+    assert result["source_indicator_event_id"] == event["event_id"]
+    assert result["paper_entry_details"]["bos_candle_time"] == frame.index[0].isoformat()
+    assert result["paper_entry_details"]["broken_level"] == broken_level
 
 
 def test_verified_sep14_0250_bos_and_0255_confirmation_are_selected():

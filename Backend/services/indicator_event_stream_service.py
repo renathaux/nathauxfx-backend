@@ -68,7 +68,7 @@ def _automatic_correction_repair_allowed(symbol, timeframe, enabled):
     )
 
 
-def _correction_coverage_failure(frame, incoming, conflict_time, durable_watermark):
+def _correction_coverage_failure(frame, incoming, conflict_time, durable_watermark, *, symbol=None):
     """Return why a corrected suffix cannot safely replace durable 5m history."""
     if durable_watermark is None:
         return "previous durable watermark is unavailable"
@@ -103,21 +103,22 @@ def _correction_coverage_failure(frame, incoming, conflict_time, durable_waterma
         )
 
     interval = pd.Timedelta(minutes=5)
-    expected = pd.date_range(
-        start=conflict_time,
-        end=latest,
-        freq=interval,
-        tz="UTC",
-    )
-    expected_times = [_utc(value) for value in expected]
-    if available_suffix != expected_times:
-        expected_set = set(expected_times)
-        missing = [value for value in expected_times if value not in available_suffix]
-        unexpected = [value for value in available_suffix if value not in expected_set]
-        detail = (
-            f"missing {missing[0].isoformat()}" if missing
-            else f"unexpected off-grid timestamp {unexpected[0].isoformat()}"
-        )
+    detail = None
+    if conflict_time not in available_suffix:
+        detail = f"missing {conflict_time.isoformat()}"
+    else:
+        for timestamp in available_suffix:
+            if (timestamp - conflict_time) % interval:
+                detail = f"unexpected off-grid timestamp {timestamp.isoformat()}"
+                break
+        if detail is None:
+            for previous, following in zip(available_suffix, available_suffix[1:]):
+                if following - previous > interval and not _recognized_ctrader_sparse_gap(
+                    symbol, previous, following
+                ):
+                    detail = f"missing {(previous + interval).isoformat()}"
+                    break
+    if detail:
         return (
             "authoritative CLOSED 5m coverage is incomplete from "
             f"{conflict_time.isoformat()} through previous durable watermark "
@@ -369,6 +370,25 @@ def _known_market_closure(symbol, previous, following):
     return False
 
 
+def _recognized_ctrader_sparse_gap(symbol, previous, following):
+    """Accept only previously recognized venue closure or short EURUSD rollover gaps."""
+    public = str(symbol or "").upper().replace("/", "").split("~", 1)[0]
+    previous, following = _utc(previous), _utc(following)
+    if _known_market_closure(public, previous, following):
+        return True
+    if public == "EURUSD" and previous.date() == following.date():
+        # The active DEMO cTrader feed omitted 20:30-20:55 on successive
+        # trading days; accept this exact daily rollover boundary only.
+        if (previous.hour, previous.minute, following.hour, following.minute) == (20, 25, 21, 0):
+            return True
+        gap = following - previous
+        if gap <= pd.Timedelta(minutes=30):
+            previous_minutes = previous.hour * 60 + previous.minute
+            following_minutes = following.hour * 60 + following.minute
+            return previous_minutes >= 20 * 60 + 30 and following_minutes <= 22 * 60 + 30
+    return False
+
+
 def _utc(value):
     timestamp = pd.Timestamp(value)
     if timestamp.tzinfo is None:
@@ -596,6 +616,7 @@ def get_authoritative_structure(
                     incoming,
                     conflict_time,
                     previous_durable_watermark,
+                    symbol=normalized_symbol,
                 )
                 if coverage_failure:
                     affected_candle_count = sum(

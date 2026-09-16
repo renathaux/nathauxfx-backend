@@ -1700,6 +1700,34 @@ def normalize_ctrader_candles(raw, symbol=None):
 
     return df[["Open", "High", "Low", "Close", "Volume"]]
 
+def _cached_forming_bar_crossed_close(cached, timeframe, now):
+    """A cached provider snapshot cannot finalize a bar fetched while forming."""
+    frame = cached.get("data") if isinstance(cached, dict) else None
+    period = CTRADER_TRENDBAR_PERIODS.get(str(timeframe or "").lower())
+    minutes = CTRADER_TRENDBAR_PERIOD_MINUTES.get(period)
+    if frame is None or frame.empty or not minutes or not cached.get("fetched_at"):
+        return False
+    latest = pd.Timestamp(frame.index[-1])
+    fetched = pd.Timestamp(cached["fetched_at"])
+    current = pd.Timestamp(now)
+    if latest.tzinfo is None:
+        latest = latest.tz_localize("UTC")
+    if fetched.tzinfo is None:
+        fetched = fetched.tz_localize("UTC")
+    if current.tzinfo is None:
+        current = current.tz_localize("UTC")
+    close_time = latest + pd.Timedelta(minutes=minutes)
+    return bool(fetched < close_time <= current)
+
+
+def _safe_cached_provider_data(cached, timeframe, now):
+    """Never promote a pre-close provider snapshot after a failed refresh."""
+    frame = cached["data"].copy(deep=True)
+    if _cached_forming_bar_crossed_close(cached, timeframe, now):
+        return frame.iloc[:-1].copy()
+    return frame
+
+
 def get_ctrader_market_data(symbol, timeframe, limit=500, force_refresh=False):
     global LAST_CTRADER_CANDLE_ERROR, LAST_CTRADER_CANDLE_SUCCESS
 
@@ -1733,7 +1761,9 @@ def get_ctrader_market_data(symbol, timeframe, limit=500, force_refresh=False):
     if cached and not force_refresh:
         age = (now - cached["fetched_at"]).total_seconds()
 
-        if age < ttl_seconds and not cached["data"].empty:
+        if age < ttl_seconds and not cached["data"].empty and not _cached_forming_bar_crossed_close(
+            cached, normalized_timeframe, now
+        ):
             cached["source"] = "ctrader_cache"
             print(f"CTRADER CANDLE CACHE HIT: {execution_symbol} {timeframe}")
             result = append_current_forming_candle(
@@ -1741,7 +1771,6 @@ def get_ctrader_market_data(symbol, timeframe, limit=500, force_refresh=False):
                 execution_symbol,
                 normalized_timeframe,
             )
-            cached["data"] = result.copy()
             print("CANDLE_PROVIDER_DEBUG =", {
                 **get_ctrader_candle_health(execution_symbol, normalized_timeframe),
                 "event": "cache_hit",
@@ -1768,11 +1797,10 @@ def get_ctrader_market_data(symbol, timeframe, limit=500, force_refresh=False):
                 cached["last_error"] = LAST_CTRADER_CANDLE_ERROR
                 cached["source"] = "ctrader_cache"
                 result = append_current_forming_candle(
-                    cached["data"].copy(),
+                    _safe_cached_provider_data(cached, normalized_timeframe, now),
                     execution_symbol,
                     normalized_timeframe,
                 )
-                cached["data"] = result.copy()
                 print("CANDLE_PROVIDER_DEBUG =", {
                     **get_ctrader_candle_health(execution_symbol, normalized_timeframe),
                     "event": "fetch_failed_cache_used",
@@ -1801,11 +1829,10 @@ def get_ctrader_market_data(symbol, timeframe, limit=500, force_refresh=False):
                 cached["last_error"] = LAST_CTRADER_CANDLE_ERROR
                 cached["source"] = "ctrader_cache"
                 result = append_current_forming_candle(
-                    cached["data"].copy(),
+                    _safe_cached_provider_data(cached, normalized_timeframe, now),
                     execution_symbol,
                     normalized_timeframe,
                 )
-                cached["data"] = result.copy()
                 print("CANDLE_PROVIDER_DEBUG =", {
                     **get_ctrader_candle_health(execution_symbol, normalized_timeframe),
                     "event": "empty_fetch_cache_used",
@@ -1865,11 +1892,10 @@ def get_ctrader_market_data(symbol, timeframe, limit=500, force_refresh=False):
             cached["last_error"] = LAST_CTRADER_CANDLE_ERROR
             cached["source"] = "ctrader_cache"
             result = append_current_forming_candle(
-                cached["data"].copy(),
+                _safe_cached_provider_data(cached, normalized_timeframe, now),
                 execution_symbol,
                 normalized_timeframe,
             )
-            cached["data"] = result.copy()
             print("CANDLE_PROVIDER_DEBUG =", {
                 **get_ctrader_candle_health(execution_symbol, normalized_timeframe),
                 "event": "exception_cache_used",

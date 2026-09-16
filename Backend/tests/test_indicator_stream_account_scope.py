@@ -205,14 +205,15 @@ def _durable_reconciliation_snapshot(Session, storage):
         }
 
 
-def _corrected_suffix_case(incoming_builder, *, succeeds):
+def _corrected_suffix_case(incoming_builder, *, succeeds, base_frame=None, conflict_index=2):
     Session, engine = _session_factory()
     install_account_scoped_indicator_stream()
     try:
         scope = "CTRADER:LIVE:ACCOUNT-A"
         storage = storage_symbol_for_scope("EURUSD", scope)
+        original = base_frame if base_frame is not None else _frame()
         created = stream.get_authoritative_structure(
-            _frame(), "EURUSD", "5m", 0.00001,
+            original, "EURUSD", "5m", 0.00001,
             analyzer=_analysis_before_conflict,
             session_factory=Session, stream_scope=scope,
         )
@@ -222,7 +223,9 @@ def _corrected_suffix_case(incoming_builder, *, succeeds):
             account_id="ACCOUNT-A", session_factory=Session,
         )
         before = _durable_reconciliation_snapshot(Session, storage)
-        incoming = incoming_builder(_frame(close_shift=0.00003))
+        corrected = original.copy()
+        corrected.iloc[conflict_index, corrected.columns.get_loc("Close")] += 0.00003
+        incoming = incoming_builder(corrected)
 
         if succeeds:
             result = stream.get_authoritative_structure(
@@ -268,6 +271,34 @@ def test_corrected_suffix_truncated_before_old_watermark_fails_without_mutation(
 
 def test_corrected_suffix_complete_through_old_watermark_succeeds():
     _corrected_suffix_case(lambda corrected: corrected, succeeds=True)
+
+
+def test_authoritative_corrected_suffix_accepts_only_known_eurusd_rollover_gap():
+    times = pd.to_datetime([
+        "2026-09-14T20:25:00Z", "2026-09-14T21:00:00Z",
+        "2026-09-14T21:05:00Z", "2026-09-14T21:15:00Z",
+    ])
+    frame = pd.DataFrame({"Open": 1.15, "High": 1.16, "Low": 1.14, "Close": 1.155}, index=times)
+    assert stream._correction_coverage_failure(
+        frame, frame, times[0], times[-1], symbol="EURUSD~BA7A929D19"
+    ) is None
+    unknown = frame.drop(times[0])
+    assert "missing 2026-09-14T20:25:00+00:00" in stream._correction_coverage_failure(
+        unknown, unknown, times[0], times[-1], symbol="EURUSD~BA7A929D19"
+    )
+
+
+def test_account_scoped_correction_replays_across_known_rollover_gap():
+    frame = _frame()
+    frame.index = pd.to_datetime([
+        "2026-09-14T20:20:00Z", "2026-09-14T20:25:00Z",
+        "2026-09-14T21:00:00Z", "2026-09-14T21:05:00Z",
+        "2026-09-14T21:15:00Z", "2026-09-14T21:20:00Z",
+        "2026-09-14T21:25:00Z", "2026-09-14T21:30:00Z",
+    ])
+    _corrected_suffix_case(
+        lambda corrected: corrected, succeeds=True, base_frame=frame, conflict_index=1
+    )
 
 
 def test_corrected_suffix_extending_beyond_old_watermark_succeeds():

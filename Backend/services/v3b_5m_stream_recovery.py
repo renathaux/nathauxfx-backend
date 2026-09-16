@@ -145,24 +145,7 @@ def normalize_authoritative_closed_frame(frame):
 
 def _recognized_ctrader_sparse_gap(public_symbol, previous, following):
     """Allow only broker gaps that are already understood by production policy."""
-    previous = _utc(previous)
-    following = _utc(following)
-    public = _public_symbol(public_symbol)
-
-    if stream._known_market_closure(public, previous, following):
-        return True
-
-    # cTrader can omit EURUSD trendbars when no tick arrives around the daily
-    # rollover. Recovery is intentionally stricter than normal sparse ingestion:
-    # only a short same-day hole around the 21/22 UTC rollover is accepted.
-    if public == "EURUSD" and previous.date() == following.date():
-        gap = following - previous
-        if gap <= pd.Timedelta(minutes=30):
-            previous_minutes = previous.hour * 60 + previous.minute
-            following_minutes = following.hour * 60 + following.minute
-            if previous_minutes >= 20 * 60 + 30 and following_minutes <= 22 * 60 + 30:
-                return True
-    return False
+    return stream._recognized_ctrader_sparse_gap(public_symbol, previous, following)
 
 
 def validate_closed_history_coverage(

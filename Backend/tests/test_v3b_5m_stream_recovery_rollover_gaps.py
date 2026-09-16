@@ -39,6 +39,21 @@ def test_eurusd_short_rollover_no_tick_gap_is_allowed():
     ]
 
 
+def test_eurusd_production_2026_09_14_rollover_gap_is_allowed():
+    frame = _frame([
+        "2026-09-14T20:25:00Z",
+        "2026-09-14T21:00:00Z",
+        "2026-09-14T21:05:00Z",
+        "2026-09-14T21:15:00Z",
+    ])
+    result = recovery.validate_closed_history_coverage(
+        frame, "2026-09-14T20:25:00Z", "2026-09-14T21:15:00Z",
+        public_symbol="EURUSD",
+    )
+    assert result["allowed_sparse_gaps"][0] == "2026-09-14T20:30:00+00:00"
+    assert result["allowed_sparse_gaps"][-1] == "2026-09-14T21:10:00+00:00"
+
+
 def test_xauusd_daily_market_close_gap_is_allowed():
     frame = _frame([
         "2026-09-14T20:40:00Z",
