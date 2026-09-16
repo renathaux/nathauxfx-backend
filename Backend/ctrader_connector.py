@@ -2909,6 +2909,10 @@ def place_market_order(
     order_payload = None
     volume_check = None
 
+    from services.account_execution_coordination import assert_execution_account
+    if config:
+        assert_execution_account(config.get('account_id'))
+
     if not config:
         return {
             "ok": False,
@@ -3820,6 +3824,9 @@ def get_open_positions():
             return []
 
         raw_positions = fetch_ctrader_open_positions(config)
+        from db import SessionLocal
+        from services.account_execution_coordination import exclude_test_positions
+        raw_positions = exclude_test_positions(SessionLocal, config['account_id'], raw_positions)
         LAST_CTRADER_POSITION_FETCH_ERROR = None
 
         return normalize_positions(raw_positions)
@@ -3995,6 +4002,9 @@ def fetch_ctrader_closed_deals(config, from_timestamp, to_timestamp, max_rows=10
             if normalized
         ]
 
+        from db import SessionLocal
+        from services.account_execution_coordination import exclude_test_positions
+        closed = exclude_test_positions(SessionLocal, account_id, closed)
         closed.sort(key=lambda item: item.get("closed_at") or 0, reverse=True)
         print("CTRADER_CLOSED_DEALS_SYNC =", {
             "from_timestamp": from_timestamp,

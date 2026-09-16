@@ -153,6 +153,33 @@ class TradeSubmissionAttempt(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class BrokerIntegrationTestSubmission(Base):
+    """Independent broker proof; never a strategy event or execution attempt."""
+
+    __tablename__ = "broker_integration_test_submissions"
+    test_id = Column(String(80), primary_key=True)
+    account_id = Column(String(100), nullable=False)
+    unresolved_account = Column(String(100), unique=True, nullable=True)
+    environment = Column(String(10), nullable=False)
+    symbol = Column(String(20), nullable=False)
+    symbol_id = Column(Integer, nullable=False)
+    side = Column(String(10), nullable=False)
+    volume = Column(Integer, nullable=False)
+    reference = Column(String(50), unique=True, nullable=False)
+    state = Column(String(40), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    request_started_at = Column(DateTime(timezone=True), nullable=True)
+    close_started_at = Column(DateTime(timezone=True), nullable=True)
+    reconciled_at = Column(DateTime(timezone=True), nullable=True)
+    broker_order_id = Column(String(100), nullable=True)
+    broker_position_id = Column(String(100), nullable=True)
+    preflight_evidence = Column(JSON, nullable=False)
+    open_evidence = Column(JSON, nullable=True)
+    duplicate_evidence = Column(JSON, nullable=True)
+    reconciliation_evidence = Column(JSON, nullable=True)
+    last_error = Column(String(100), nullable=True)
+
+
 class ExecutionProtocolState(Base):
     """Durable compatibility fence checked before any automatic execution."""
 

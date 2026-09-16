@@ -57,9 +57,11 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "indicator_event_lifecycle",
             "trade_submission_attempts",
             "execution_protocol_state",
+            "broker_integration_test_submissions",
         }
         self.assertEqual(set(Base.metadata.tables), expected)
         legacy_tables = expected - {
+            "broker_integration_test_submissions",
             "ctrader_oauth_tokens",
             "strategy_cycle_diagnostics",
             "forex_lifecycle_evaluations",
@@ -135,6 +137,7 @@ class DatabaseConfigurationTests(unittest.TestCase):
         finally:
             connection.close()
         source_tables = set(Base.metadata.tables) - {
+            "broker_integration_test_submissions",
             "ctrader_oauth_tokens",
             "strategy_cycle_diagnostics",
             "forex_lifecycle_evaluations",

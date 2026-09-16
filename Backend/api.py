@@ -31,6 +31,7 @@ from ctrader_connector import (
     fetch_ctrader_reconciliation_records,
     forget_ctrader_account,
     get_connection_state,
+    get_active_ctrader_account_id,
     get_ctrader_connection_snapshot,
     get_ctrader_account_snapshot,
     get_closed_deals_for_current_week,
@@ -8160,6 +8161,9 @@ def sync_live_positions(panel_data=None):
 
     try:
         positions = get_open_positions()
+        from db import SessionLocal
+        from services.account_execution_coordination import exclude_test_positions
+        positions = exclude_test_positions(SessionLocal, get_active_ctrader_account_id(), positions)
         print("LIVE_POSITION_SYNC:", {
             "connected": True,
             "positions": positions
@@ -11552,11 +11556,17 @@ def execute_live_order_core(payload: dict, source="manual"):
     """Execute with guaranteed release of any guard acquired by this call."""
     inflight_guard = {"symbol": None, "acquired": False}
     try:
-        return _execute_live_order_core_impl(
-            payload,
-            source=source,
-            _inflight_guard=inflight_guard,
-        )
+        from db import SessionLocal
+        from services.account_execution_coordination import run_normal_submission, ExecutionFenced
+        try:
+            return run_normal_submission(
+                SessionLocal, get_active_ctrader_account_id(),
+                lambda: _execute_live_order_core_impl(
+                    payload, source=source, _inflight_guard=inflight_guard),
+            )
+        except ExecutionFenced:
+            return {'ok': False, 'broker_order_sent': False,
+                    'reason': 'Account execution coordination unavailable or DEMO test unresolved'}
     finally:
         if inflight_guard["acquired"] and inflight_guard["symbol"]:
             with LIVE_ORDER_LOCK:
