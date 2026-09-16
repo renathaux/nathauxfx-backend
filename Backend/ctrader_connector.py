@@ -535,15 +535,17 @@ def load_ctrader_account_settings():
         settings["forgotten_account_ids"] = []
 
     durable_selection = load_active_account_selection()
-    if durable_selection.get("active_account_id"):
+    if "active_account_id" in durable_selection:
         settings["active_account_id"] = durable_selection["active_account_id"]
         settings["active_account_env"] = durable_selection.get("active_account_env")
+        settings["_durable_selection_authoritative"] = True
 
     return settings
 
 def save_ctrader_account_settings(settings, *, persist_selection=False):
     payload = dict(DEFAULT_CTRADER_ACCOUNT_SETTINGS)
     payload.update(settings or {})
+    payload.pop("_durable_selection_authoritative", None)
     CTRADER_ACCOUNTS_PATH.write_text(json.dumps(payload, indent=2, default=str))
     if persist_selection:
         save_active_account_selection(
@@ -572,6 +574,9 @@ def clear_active_ctrader_account_balance_cache(settings=None, persist=True):
 def get_selected_ctrader_account_source():
     settings = load_ctrader_account_settings()
 
+    if settings.get("_durable_selection_authoritative"):
+        return "settings" if settings.get("active_account_id") else "durable_selection_cleared"
+
     if settings.get("active_account_id"):
         return "settings"
 
@@ -585,6 +590,8 @@ def get_selected_ctrader_account_source():
 
 def get_active_ctrader_account_id():
     settings = load_ctrader_account_settings()
+    if settings.get("_durable_selection_authoritative"):
+        return settings.get("active_account_id")
     return (
         settings.get("active_account_id")
         or os.getenv("ACTIVE_CTRADER_ACCOUNT_ID")
@@ -1033,13 +1040,27 @@ def forget_ctrader_account(account_id):
     if account_id:
         forgotten.add(account_id)
 
-    if str(settings.get("active_account_id")) == account_id:
+    was_active = str(settings.get("active_account_id")) == account_id
+    if was_active:
         settings["active_account_id"] = None
         settings["active_account_env"] = None
 
     settings["accounts"] = accounts
     settings["forgotten_account_ids"] = sorted(forgotten)
     save_ctrader_account_settings(settings, persist_selection=True)
+    if was_active:
+        os.environ.pop("ACTIVE_CTRADER_ACCOUNT_ID", None)
+        os.environ.pop("ACTIVE_CTRADER_ACCOUNT_ENV", None)
+        os.environ.pop("CTRADER_ACCOUNT_ID", None)
+        update_env_file_values({
+            "ACTIVE_CTRADER_ACCOUNT_ID": "",
+            "ACTIVE_CTRADER_ACCOUNT_ENV": "",
+            "CTRADER_ACCOUNT_ID": "",
+        })
+        CONNECTED["account_id"] = None
+        CONNECTED["execution_ready"] = False
+        CONNECTED["connected"] = False
+        CONNECTED["status"] = False
     clear_ctrader_connection_cache()
 
     return {
