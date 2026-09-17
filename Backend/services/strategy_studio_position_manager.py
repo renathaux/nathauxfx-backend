@@ -135,6 +135,27 @@ def _rows_for_owner(session, owner_id):
     ).all()
 
 
+def account_has_managed_position(owner_id, account_identity, open_positions, *, session_factory=None) -> bool:
+    """Return True only for an open broker position owned by this Studio/account scope."""
+    factory = _factory(session_factory)
+    scope = _scope(account_identity)
+    account_id = _account_id(account_identity)
+    positions = _position_map(open_positions)
+    if not positions:
+        return False
+    with factory() as session:
+        row = session.query(StrategySetupLifecycle).filter(
+            StrategySetupLifecycle.owner_id == str(owner_id),
+            StrategySetupLifecycle.account_id == account_id,
+            StrategySetupLifecycle.account_scope == scope,
+            StrategySetupLifecycle.status.in_(_OPEN_STATUSES),
+            StrategySetupLifecycle.broker_position_id.is_not(None),
+        ).first()
+        if row is None:
+            return False
+        return str(row.broker_position_id) in positions
+
+
 def suspend_account_management(owner_id, account_identity, open_positions, *, session_factory=None) -> dict:
     factory = _factory(session_factory)
     scope = _scope(account_identity)
