@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -35,6 +36,12 @@ TERMINAL_STATUSES = {"CONSUMED", "EXPIRED", "INVALIDATED"}
 ALL_LIFECYCLE_STATUSES = TEMPORARY_STATUSES | IN_FLIGHT_STATUSES | TERMINAL_STATUSES
 SAFE_REBUILD_LIFECYCLE_STATUSES = TEMPORARY_STATUSES | {"EXPIRED", "INVALIDATED"}
 ACCOUNT_SCOPED_V3B_5M_SYMBOL = re.compile(r"^(?:EURUSD|XAUUSD)~[0-9A-F]{10}$")
+SAVED_COVERAGE_ERROR = re.compile(
+    r"^automatic V3B 5m reconciliation blocked: authoritative CLOSED 5m "
+    r"coverage is incomplete from (?P<start>[^;]+) through previous durable "
+    r"watermark (?P<watermark>[^;]+); missing (?P<missing>[^;]+); "
+    r"latest incoming closed candle is (?P<latest>[^;]+)$"
+)
 
 
 class IndicatorStreamUnavailable(RuntimeError):
@@ -126,6 +133,81 @@ def _correction_coverage_failure(frame, incoming, conflict_time, durable_waterma
             f"candle is {latest.isoformat()}"
         )
     return None
+
+
+def _revalidate_saved_coverage_error(
+    state, existing, symbol, frame, fetched_at,
+):
+    """Prove the saved missing-bar complaint obsolete without rewriting history."""
+    match = SAVED_COVERAGE_ERROR.fullmatch(str(state.reconciliation_reason or ""))
+    if match is None or state.last_processed_candle is None:
+        raise IndicatorStreamUnavailable(state.reconciliation_reason or "reconciliation required")
+    try:
+        start = _utc(match.group("start"))
+        saved_watermark = _utc(match.group("watermark"))
+        disputed = _utc(match.group("missing"))
+        watermark = _utc(state.last_processed_candle)
+    except Exception as exc:
+        raise IndicatorStreamUnavailable(state.reconciliation_reason) from exc
+    if (
+        pd.isna(start) or pd.isna(disputed) or pd.isna(saved_watermark)
+        or saved_watermark != watermark or not (start <= disputed <= watermark)
+        or not existing or max(existing) != watermark
+    ):
+        raise IndicatorStreamUnavailable(state.reconciliation_reason)
+
+    # The broker reader is already account-pinned by its caller. Validate its
+    # untouched rows before canonicalization could collapse duplicate times.
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        raise IndicatorStreamUnavailable(state.reconciliation_reason)
+    if not {"Open", "High", "Low", "Close"}.issubset(frame.columns):
+        raise IndicatorStreamUnavailable(state.reconciliation_reason)
+    try:
+        raw_times = [_utc(value) for value in frame.index]
+        if any(pd.isna(value) for value in raw_times) or len(set(raw_times)) != len(raw_times):
+            raise ValueError("duplicate or invalid broker timestamp")
+        closed_limit = _utc(fetched_at) - pd.Timedelta(minutes=5)
+        for timestamp, (_, row) in zip(raw_times, frame.iterrows()):
+            values = [float(row[key]) for key in ("Open", "High", "Low", "Close")]
+            if (
+                timestamp.minute % 5 or timestamp.second or timestamp.microsecond
+                or timestamp > closed_limit or not all(math.isfinite(value) for value in values)
+                or values[2] > min(values[0], values[3])
+                or values[1] < max(values[0], values[3])
+                or values[2] > values[1]
+            ):
+                raise ValueError("malformed, off-grid, or open broker candle")
+        incoming = _canonical_input(frame)
+        incoming = incoming.loc[incoming.index >= start]
+        coverage_failure = _correction_coverage_failure(
+            frame, incoming, start, watermark, symbol=symbol,
+        )
+        if coverage_failure:
+            raise ValueError(coverage_failure)
+        broker_by_time = {_utc(timestamp): row for timestamp, row in incoming.iterrows()}
+        durable_times = {timestamp for timestamp in existing if start <= timestamp <= watermark}
+        broker_times = {timestamp for timestamp in broker_by_time if timestamp <= watermark}
+        if durable_times != broker_times:
+            raise ValueError("broker/durable timestamp coverage differs")
+        for timestamp in durable_times:
+            stored = existing[timestamp]
+            broker = broker_by_time[timestamp]
+            if any(
+                abs(float(broker[key]) - float(value)) > 1e-12
+                for key, value in zip(
+                    ("Open", "High", "Low", "Close"),
+                    (stored.open_price, stored.high_price, stored.low_price, stored.close_price),
+                )
+            ):
+                raise ValueError("broker/durable OHLC differs")
+    except (ValueError, TypeError, IndicatorStreamUnavailable) as exc:
+        logger.warning("V3B_5M_SAVED_COVERAGE_REVALIDATION_BLOCKED symbol=%s reason=%s", symbol, exc)
+        raise IndicatorStreamUnavailable(state.reconciliation_reason) from exc
+    logger.warning(
+        "V3B_5M_SAVED_COVERAGE_REVALIDATED symbol=%s disputed=%s watermark=%s",
+        symbol, disputed.isoformat(), watermark.isoformat(),
+    )
+    return incoming
 
 
 def _block_corrected_candle_repair(
@@ -516,6 +598,7 @@ def get_authoritative_structure(
     initialize=False,
     allow_sparse_trendbars=False,
     allow_authoritative_correction_repair=False,
+    revalidation_fetcher=None,
 ):
     """Merge closed candles and return the immutable event stream.
 
@@ -567,6 +650,23 @@ def get_authoritative_structure(
                 IndicatorCandle.timeframe == normalized_timeframe,
             ).all()
             existing = {_utc(row.candle_timestamp): row for row in existing_rows}
+            if (
+                revalidation_fetcher is not None
+                and normalized_timeframe == "5m"
+                and ACCOUNT_SCOPED_V3B_5M_SYMBOL.fullmatch(normalized_symbol)
+                and state.status == "RECONCILIATION_REQUIRED"
+                and SAVED_COVERAGE_ERROR.fullmatch(str(state.reconciliation_reason or ""))
+            ):
+                match = SAVED_COVERAGE_ERROR.fullmatch(state.reconciliation_reason)
+                fresh_frame = revalidation_fetcher(
+                    _utc(match.group("start")), now,
+                )
+                incoming = _revalidate_saved_coverage_error(
+                    state, existing, normalized_symbol, fresh_frame, now,
+                )
+                state.status = "READY"
+                state.reconciliation_reason = None
+                state.updated_at = now
             correction_times = []
             for timestamp, candle in incoming.iterrows():
                 candle_time = _utc(timestamp)
