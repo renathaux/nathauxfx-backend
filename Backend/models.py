@@ -144,6 +144,40 @@ class V3BSignalTransition(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class StrategySetupLifecycle(Base):
+    """Durable account-scoped lifecycle for one Strategy Studio setup."""
+
+    __tablename__ = "strategy_setup_lifecycle"
+
+    setup_id = Column(String(96), primary_key=True)
+    owner_id = Column(String(100), nullable=False, index=True)
+    strategy_id = Column(String(64), nullable=False, index=True)
+    account_id = Column(String(100), nullable=False, index=True)
+    account_scope = Column(String(160), nullable=False)
+    symbol = Column(String(20), nullable=False)
+    direction = Column(String(8), nullable=False)
+    status = Column(String(32), nullable=False)
+    definition_snapshot = Column(JSON, nullable=False)
+    initial_volume_units = Column(Integer, nullable=True)
+    broker_position_id = Column(String(100), nullable=True)
+    tp1_completed_at = Column(DateTime(timezone=True), nullable=True)
+    protection_applied_at = Column(DateTime(timezone=True), nullable=True)
+    management_suspended_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class StrategyStudioLiveState(Base):
+    """Owner-scoped Strategy Studio LIVE handoff gate; disabled by default."""
+
+    __tablename__ = "strategy_studio_live_state"
+
+    owner_id = Column(String(100), primary_key=True)
+    enabled = Column(Boolean, nullable=False, default=False, server_default="0")
+    enabled_strategy_id = Column(String(64), nullable=True)
+    enabled_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class TradeSubmissionAttempt(Base):
     """Durable exactly-once claim and broker reconciliation record."""
 
@@ -157,7 +191,13 @@ class TradeSubmissionAttempt(Base):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    event_id = Column(String(80), ForeignKey("indicator_events.event_id"), nullable=False, index=True)
+    event_id = Column(String(80), nullable=False, index=True)
+    lifecycle_kind = Column(
+        String(32),
+        nullable=False,
+        default="INDICATOR_EVENT",
+        server_default="INDICATOR_EVENT",
+    )
     mode = Column(String(10), nullable=False)
     owner_id = Column(String(100), nullable=False)
     account_id = Column(String(100), nullable=False)
