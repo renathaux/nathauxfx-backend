@@ -16,6 +16,8 @@ from services.strategy_simulator_data_source import (
     load_market_bundle,
     load_simulation_5m,
 )
+from services.strategy_engine import market_facts as market_facts_module
+from services.strategy_engine.market_facts import build_market_facts
 
 
 START = pd.Timestamp("2026-09-17T00:00:00Z")
@@ -34,11 +36,11 @@ def _session_factory():
     return sessionmaker(bind=engine), engine
 
 
-def _frame(periods=12):
-    index = pd.date_range(START, periods=periods, freq="5min")
+def _frame(periods=12, *, start=START, freq="5min", slope=0.0001):
+    index = pd.date_range(start, periods=periods, freq=freq)
     rows = []
     for i, _timestamp in enumerate(index):
-        base = 1.1000 + i * 0.0001
+        base = 1.1000 + i * slope
         rows.append(
             {
                 "Open": base,
@@ -147,3 +149,102 @@ def test_market_bundle_derives_only_closed_supported_timeframes():
         assert bundle["4h"].empty
     finally:
         engine.dispose()
+
+
+def _fake_analysis(frame, *, timeframe=None, point_size=None, **_kwargs):
+    if timeframe == "5m":
+        trigger_time = frame.index[-1]
+        return {
+            "bias": "BULLISH",
+            "events": [
+                {
+                    "timestamp": trigger_time.isoformat(),
+                    "direction": "BULLISH",
+                    "event_type": "BOS",
+                    "broken_level": 1.1010,
+                    "event_invalidation_swing": {"price": 1.0990},
+                }
+            ],
+            "swings": [],
+            "current_structure": {"bias": "BULLISH"},
+        }
+
+    times = list(frame.index)
+    swing_rows = [
+        ("HIGH", 0, 1.1000),
+        ("LOW", 0, 0.9000),
+        ("HIGH", 1, 1.2000),
+        ("LOW", 1, 1.0000),
+        ("HIGH", 3, 1.1000),
+        ("LOW", 3, 0.8000),
+        ("HIGH", 5, 1.3000),
+        ("LOW", 5, 0.7000),
+    ]
+    swings = [
+        {
+            "type": swing_type,
+            "price": price,
+            "confirmed_timestamp": times[index].isoformat(),
+            "timestamp": times[index].isoformat(),
+        }
+        for swing_type, index, price in swing_rows
+    ]
+    return {
+        "bias": "BULLISH",
+        "events": [],
+        "swings": swings,
+        "current_structure": {"bias": "BULLISH"},
+    }
+
+
+def _facts_bundle():
+    trading = _frame(periods=24, start=pd.Timestamp("2026-09-17T00:00:00Z"), freq="5min")
+    trend = _frame(periods=8, start=pd.Timestamp("2026-09-17T00:00:00Z"), freq="15min", slope=0.001)
+    return {"5m": trading, "15m": trend, "1h": pd.DataFrame(), "4h": pd.DataFrame()}
+
+
+def test_bos_and_choch_are_exposed_as_one_directional_trigger(monkeypatch):
+    monkeypatch.setattr(market_facts_module, "analyze_structure", _fake_analysis)
+    bundle = _facts_bundle()
+    timeline = build_market_facts(bundle, "EURUSD", "5m", "15m")
+    event_time = bundle["5m"].index[-1]
+
+    event = timeline.structure_event(event_time)
+
+    assert event.direction == "BUY"
+    assert event.event_type == "BOS"
+    assert event.broken_level == 1.1010
+    assert event.invalidation_price == 1.0990
+
+
+def test_ema_direction_is_close_relative_to_ema(monkeypatch):
+    monkeypatch.setattr(market_facts_module, "analyze_structure", _fake_analysis)
+    bundle = _facts_bundle()
+    timeline = build_market_facts(bundle, "EURUSD", "5m", "15m")
+
+    trend = timeline.trend(bundle["15m"].index[-1])
+
+    assert trend.ema50_direction == "BUY"
+    assert trend.ema200_direction == "BUY"
+
+
+def test_swing_structure_requires_hh_hl_or_lh_ll(monkeypatch):
+    monkeypatch.setattr(market_facts_module, "analyze_structure", _fake_analysis)
+    bundle = _facts_bundle()
+    timeline = build_market_facts(bundle, "EURUSD", "5m", "15m")
+    times = bundle["15m"].index
+
+    assert timeline.trend(times[1]).swing_structure_direction == "BUY"
+    assert timeline.trend(times[3]).swing_structure_direction == "SELL"
+    assert timeline.trend(times[5]).swing_structure_direction is None
+
+
+def test_candle_facts_body_percent_is_body_over_full_range(monkeypatch):
+    monkeypatch.setattr(market_facts_module, "analyze_structure", _fake_analysis)
+    bundle = _facts_bundle()
+    timeline = build_market_facts(bundle, "EURUSD", "5m", "15m")
+    timestamp = bundle["5m"].index[0]
+
+    facts = timeline.candle(timestamp)
+    expected = abs(facts.close - facts.open) / (facts.high - facts.low) * 100.0
+    assert facts.body_percent == pytest.approx(expected)
