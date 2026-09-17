@@ -13,6 +13,7 @@ _AGGREGATION = {
     "1h": ("1h", pd.Timedelta(hours=1)),
     "4h": ("4h", pd.Timedelta(hours=4)),
 }
+_BASE_INTERVAL = pd.Timedelta(minutes=5)
 
 
 def _utc(value) -> pd.Timestamp:
@@ -91,6 +92,20 @@ def load_simulation_5m(symbol: str, start, end, *, stream_scope: str, session_fa
     return _canonical_frame(frame)
 
 
+def _complete_bucket_starts(data: pd.DataFrame, duration: pd.Timedelta, cutoff: pd.Timestamp) -> list[pd.Timestamp]:
+    required_count = int(duration / _BASE_INTERVAL)
+    available = set(data.index)
+    starts = []
+    for bucket_start in data.index.floor(duration).unique():
+        bucket_start = _utc(bucket_start)
+        if bucket_start + duration > cutoff:
+            continue
+        expected = [bucket_start + index * _BASE_INTERVAL for index in range(required_count)]
+        if all(timestamp in available for timestamp in expected):
+            starts.append(bucket_start)
+    return sorted(starts)
+
+
 def aggregate_closed(frame_5m: pd.DataFrame, timeframe: str, *, end_exclusive) -> pd.DataFrame:
     data = _canonical_frame(frame_5m)
     cutoff = _utc(end_exclusive)
@@ -112,8 +127,8 @@ def aggregate_closed(frame_5m: pd.DataFrame, timeframe: str, *, end_exclusive) -
         })
         .dropna(subset=["Open", "High", "Low", "Close"])
     )
-    result = result.loc[(result.index + duration) <= cutoff]
-    return result
+    complete_starts = _complete_bucket_starts(data, duration, cutoff)
+    return result.loc[result.index.isin(complete_starts)]
 
 
 def load_market_bundle(symbol: str, start, end, *, stream_scope: str, session_factory=None) -> dict[str, pd.DataFrame]:
