@@ -14,6 +14,7 @@ from models import (
     IndicatorEvent,
     IndicatorEventLifecycle,
     IndicatorStreamState,
+    RuntimeSetting,
     TradeSubmissionAttempt,
 )
 from services import indicator_event_stream_service as stream
@@ -802,3 +803,410 @@ def test_missing_durable_timestamp_no_longer_turns_into_int_nan_error():
         assert details["lag_candles"] is None
     finally:
         uninstall_account_scoped_indicator_stream_for_tests()
+
+
+def test_b_account_resolved_saved_missing_candle_revalidates_and_resumes(monkeypatch):
+    """A previously missing 20:30 bar must not keep a now-identical stream fenced."""
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        scope = "CTRADER:DEMO:47810571"
+        storage = storage_symbol_for_scope("EURUSD", scope)
+        closed = _frame()
+        closed.index = pd.date_range("2026-09-15T20:10:00Z", periods=8, freq="5min")
+        stream.get_authoritative_structure(
+            closed, "EURUSD", "5m", 0.00001,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope,
+        )
+        with Session() as db:
+            state = db.query(IndicatorStreamState).filter_by(
+                symbol=storage, timeframe="5m"
+            ).one()
+            state.status = "RECONCILIATION_REQUIRED"
+            state.reconciliation_reason = (
+                "automatic V3B 5m reconciliation blocked: authoritative CLOSED 5m "
+                "coverage is incomplete from 2026-09-15T20:15:00+00:00 through "
+                "previous durable watermark 2026-09-15T20:45:00+00:00; "
+                "missing 2026-09-15T20:30:00+00:00; latest incoming closed "
+                "candle is 2026-09-15T20:45:00+00:00"
+            )
+            db.commit()
+
+        fresh = closed.copy(deep=True)
+        fresh.attrs["ctrader_stream_scope"] = scope
+        fetches = []
+
+        def fetch_closed(symbol, timeframe, start, end, *, strict_raw=False):
+            assert strict_raw is True
+            fetches.append((symbol, timeframe, start, end))
+            return fresh.copy(deep=True)
+
+        monkeypatch.setattr("ctrader_connector.fetch_ctrader_historical_candles", fetch_closed)
+        monkeypatch.setattr(
+            "services.indicator_stream_account_scope.active_ctrader_stream_scope",
+            lambda: pytest.fail("revalidation reread the selected account"),
+        )
+        monkeypatch.setattr(
+            "ctrader_connector.place_market_order",
+            lambda *_args, **_kwargs: pytest.fail("revalidation submitted a broker order"),
+        )
+        caller_frame = closed.iloc[-2:].copy(deep=True)
+        caller_frame.attrs["ctrader_stream_scope"] = scope
+        result = stream.get_authoritative_structure(
+            caller_frame, "EURUSD", "5m", 0.00001,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope,
+        )
+        assert result["stream_status"] == "READY"
+        assert len(fetches) == 1
+        assert fetches[0][:3] == (
+            "EURUSD", "5m", pd.Timestamp("2026-09-15T20:15:00Z")
+        )
+        assert fetches[0][3] >= pd.Timestamp("2026-09-15T20:45:00Z")
+        with Session() as db:
+            state = db.query(IndicatorStreamState).filter_by(
+                symbol=storage, timeframe="5m"
+            ).one()
+            assert state.reconciliation_reason is None
+            assert db.query(IndicatorCandle).filter_by(
+                symbol=storage, timeframe="5m"
+            ).count() == len(closed)
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
+def _saved_b_error_case(Session, symbol, closed, reason):
+    scope = "CTRADER:DEMO:47810571"
+    storage = storage_symbol_for_scope(symbol, scope)
+    stream.get_authoritative_structure(
+        closed, symbol, "5m", 0.01 if symbol == "XAUUSD" else 0.00001,
+        analyzer=_analysis, session_factory=Session, stream_scope=scope,
+    )
+    with Session() as db:
+        state = db.query(IndicatorStreamState).filter_by(
+            symbol=storage, timeframe="5m"
+        ).one()
+        state.status = "RECONCILIATION_REQUIRED"
+        state.reconciliation_reason = reason
+        db.commit()
+    return scope, storage
+
+
+def _saved_coverage_reason(first, watermark, missing):
+    return (
+        "automatic V3B 5m reconciliation blocked: authoritative CLOSED 5m "
+        f"coverage is incomplete from {first} through previous durable "
+        f"watermark {watermark}; missing {missing}; latest incoming closed "
+        f"candle is {watermark}"
+    )
+
+
+def test_b_account_accepted_xauusd_session_gap_retires_saved_error(monkeypatch):
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        times = pd.to_datetime([
+            "2026-09-15T20:35:00Z", "2026-09-15T20:40:00Z",
+            "2026-09-15T20:45:00Z", "2026-09-15T22:05:00Z",
+            "2026-09-15T22:10:00Z", "2026-09-15T22:15:00Z",
+            "2026-09-15T22:20:00Z", "2026-09-15T22:25:00Z",
+        ])
+        closed = _frame()
+        closed.index = times
+        scope, storage = _saved_b_error_case(
+            Session, "XAUUSD", closed,
+            _saved_coverage_reason(
+                "2026-09-15T20:45:00+00:00",
+                "2026-09-15T22:25:00+00:00",
+                "2026-09-15T21:00:00+00:00",
+            ),
+        )
+        fresh = closed.copy(deep=True)
+        fresh.attrs["ctrader_stream_scope"] = scope
+        monkeypatch.setattr(
+            "ctrader_connector.fetch_ctrader_historical_candles",
+            lambda *_args, **_kwargs: fresh.copy(deep=True),
+        )
+        result = stream.get_authoritative_structure(
+            fresh, "XAUUSD", "5m", 0.01,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope,
+        )
+        assert result["stream_status"] == "READY"
+        with Session() as db:
+            state = db.query(IndicatorStreamState).filter_by(
+                symbol=storage, timeframe="5m"
+            ).one()
+            assert state.reconciliation_reason is None
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("defect", ["missing", "conflict", "duplicate", "off_grid", "malformed"])
+def test_b_account_current_defect_keeps_saved_error_fail_closed(monkeypatch, defect):
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        closed = _frame()
+        closed.index = pd.date_range("2026-09-15T20:10:00Z", periods=8, freq="5min")
+        scope, storage = _saved_b_error_case(
+            Session, "EURUSD", closed,
+            _saved_coverage_reason(
+                "2026-09-15T20:15:00+00:00",
+                "2026-09-15T20:45:00+00:00",
+                "2026-09-15T20:30:00+00:00",
+            ),
+        )
+        fresh = closed.copy(deep=True)
+        if defect == "missing":
+            fresh = fresh.drop(pd.Timestamp("2026-09-15T20:30:00Z"))
+        elif defect == "conflict":
+            fresh.loc[pd.Timestamp("2026-09-15T20:30:00Z"), "Close"] += 0.00003
+        elif defect == "duplicate":
+            fresh = pd.concat([fresh, fresh.iloc[[4]]]).sort_index()
+        elif defect == "off_grid":
+            fresh = fresh.rename(index={pd.Timestamp("2026-09-15T20:30:00Z"): pd.Timestamp("2026-09-15T20:31:00Z")})
+        else:
+            fresh.loc[pd.Timestamp("2026-09-15T20:30:00Z"), "High"] = float("nan")
+        fresh.attrs["ctrader_stream_scope"] = scope
+        monkeypatch.setattr(
+            "ctrader_connector.fetch_ctrader_historical_candles",
+            lambda *_args, **_kwargs: fresh.copy(deep=True),
+        )
+        with pytest.raises(stream.IndicatorStreamUnavailable):
+            stream.get_authoritative_structure(
+                closed, "EURUSD", "5m", 0.00001,
+                analyzer=_analysis, session_factory=Session, stream_scope=scope,
+            )
+        with Session() as db:
+            state = db.query(IndicatorStreamState).filter_by(
+                symbol=storage, timeframe="5m"
+            ).one()
+            assert state.status == "RECONCILIATION_REQUIRED"
+            assert "missing 2026-09-15T20:30:00" in state.reconciliation_reason
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
+def test_b_account_revalidation_leaves_a_and_live_auto_untouched(monkeypatch):
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        closed = _frame()
+        closed.index = pd.date_range("2026-09-15T20:10:00Z", periods=8, freq="5min")
+        scope_a = "CTRADER:DEMO:47784297"
+        scope_b = "CTRADER:DEMO:47810571"
+        a_key = storage_symbol_for_scope("EURUSD", scope_a)
+        stream.get_authoritative_structure(
+            closed, "EURUSD", "5m", 0.00001,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope_a,
+        )
+        _, b_key = _saved_b_error_case(
+            Session, "EURUSD", closed,
+            _saved_coverage_reason(
+                "2026-09-15T20:15:00+00:00",
+                "2026-09-15T20:45:00+00:00",
+                "2026-09-15T20:30:00+00:00",
+            ),
+        )
+        with Session() as db:
+            db.add(RuntimeSetting(
+                setting_name="live_auto_trade_enabled", setting_value="true",
+                updated_at=pd.Timestamp("2026-09-15T00:00:00Z").to_pydatetime(),
+                updated_by="user",
+            ))
+            db.commit()
+            a_before = (
+                db.query(IndicatorStreamState).filter_by(symbol=a_key, timeframe="5m").one().updated_at,
+                db.query(IndicatorCandle).filter_by(symbol=a_key, timeframe="5m").count(),
+                db.query(IndicatorEvent).filter_by(symbol=a_key, timeframe="5m").count(),
+            )
+        fresh = closed.copy(deep=True)
+        fresh.attrs["ctrader_stream_scope"] = scope_b
+        monkeypatch.setattr(
+            "ctrader_connector.fetch_ctrader_historical_candles",
+            lambda *_args, **_kwargs: fresh.copy(deep=True),
+        )
+        result = stream.get_authoritative_structure(
+            fresh, "EURUSD", "5m", 0.00001,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope_b,
+        )
+        assert result["storage_symbol"] == b_key
+        with Session() as db:
+            assert (
+                db.query(IndicatorStreamState).filter_by(symbol=a_key, timeframe="5m").one().updated_at,
+                db.query(IndicatorCandle).filter_by(symbol=a_key, timeframe="5m").count(),
+                db.query(IndicatorEvent).filter_by(symbol=a_key, timeframe="5m").count(),
+            ) == a_before
+            assert db.get(RuntimeSetting, "live_auto_trade_enabled").setting_value == "true"
+            assert db.query(TradeSubmissionAttempt).count() == 0
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("scope", "timeframe"),
+    [("CTRADER:DEMO:47784297", "5m"), ("CTRADER:DEMO:47810571", "15m")],
+)
+def test_saved_b_coverage_revalidation_does_not_run_for_a_or_15m(
+    monkeypatch, scope, timeframe,
+):
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        closed = _frame()
+        closed.index = pd.date_range("2026-09-15T20:10:00Z", periods=8, freq="5min")
+        storage = storage_symbol_for_scope("EURUSD", scope)
+        stream.get_authoritative_structure(
+            closed, "EURUSD", timeframe, 0.00001,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope,
+        )
+        with Session() as db:
+            state = db.query(IndicatorStreamState).filter_by(
+                symbol=storage, timeframe=timeframe
+            ).one()
+            state.status = "RECONCILIATION_REQUIRED"
+            state.reconciliation_reason = _saved_coverage_reason(
+                "2026-09-15T20:15:00+00:00",
+                "2026-09-15T20:45:00+00:00",
+                "2026-09-15T20:30:00+00:00",
+            )
+            db.commit()
+        monkeypatch.setattr(
+            "ctrader_connector.fetch_ctrader_historical_candles",
+            lambda *_args: pytest.fail("out-of-scope broker history was fetched"),
+        )
+        with pytest.raises(stream.IndicatorStreamUnavailable, match="missing 2026-09-15T20:30"):
+            stream.get_authoritative_structure(
+                closed, "EURUSD", timeframe, 0.00001,
+                analyzer=_analysis, session_factory=Session, stream_scope=scope,
+            )
+        with Session() as db:
+            assert db.query(IndicatorStreamState).filter_by(
+                symbol=storage, timeframe=timeframe
+            ).one().status == "RECONCILIATION_REQUIRED"
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
+def test_b_account_wrong_scope_broker_frame_cannot_retire_saved_error(monkeypatch):
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        closed = _frame()
+        closed.index = pd.date_range("2026-09-15T20:10:00Z", periods=8, freq="5min")
+        scope, storage = _saved_b_error_case(
+            Session, "EURUSD", closed,
+            _saved_coverage_reason(
+                "2026-09-15T20:15:00+00:00",
+                "2026-09-15T20:45:00+00:00",
+                "2026-09-15T20:30:00+00:00",
+            ),
+        )
+        wrong_account = closed.copy(deep=True)
+        wrong_account.attrs["ctrader_stream_scope"] = "CTRADER:DEMO:47784297"
+        monkeypatch.setattr(
+            "ctrader_connector.fetch_ctrader_historical_candles",
+            lambda *_args, **_kwargs: wrong_account.copy(deep=True),
+        )
+        with pytest.raises(stream.IndicatorStreamUnavailable, match="missing 2026-09-15T20:30"):
+            stream.get_authoritative_structure(
+                closed, "EURUSD", "5m", 0.00001,
+                analyzer=_analysis, session_factory=Session, stream_scope=scope,
+            )
+        with Session() as db:
+            assert db.query(IndicatorStreamState).filter_by(
+                symbol=storage, timeframe="5m"
+            ).one().status == "RECONCILIATION_REQUIRED"
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
+def test_b_account_ready_stream_never_refetches_revalidation_history(monkeypatch):
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        scope = "CTRADER:DEMO:47810571"
+        closed = _frame()
+        closed.attrs["ctrader_stream_scope"] = scope
+        stream.get_authoritative_structure(
+            closed, "EURUSD", "5m", 0.00001,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope,
+        )
+        monkeypatch.setattr(
+            "ctrader_connector.fetch_ctrader_historical_candles",
+            lambda *_args: pytest.fail("READY stream fetched revalidation history"),
+        )
+        again = stream.get_authoritative_structure(
+            closed, "EURUSD", "5m", 0.00001,
+            analyzer=_analysis, session_factory=Session, stream_scope=scope,
+        )
+        assert again["stream_status"] == "READY"
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
+def test_b_account_raw_broker_validation_failure_preserves_saved_block(monkeypatch):
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        closed = _frame()
+        closed.index = pd.date_range("2026-09-15T20:10:00Z", periods=8, freq="5min")
+        reason = _saved_coverage_reason(
+            "2026-09-15T20:15:00+00:00",
+            "2026-09-15T20:45:00+00:00",
+            "2026-09-15T20:30:00+00:00",
+        )
+        scope, storage = _saved_b_error_case(Session, "EURUSD", closed, reason)
+        monkeypatch.setattr(
+            "ctrader_connector.fetch_ctrader_historical_candles",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                ValueError("invalid raw broker candle in historical response")
+            ),
+        )
+        with pytest.raises(stream.IndicatorStreamUnavailable, match="missing 2026-09-15T20:30"):
+            stream.get_authoritative_structure(
+                closed, "EURUSD", "5m", 0.00001,
+                analyzer=_analysis, session_factory=Session, stream_scope=scope,
+            )
+        with Session() as db:
+            state = db.query(IndicatorStreamState).filter_by(
+                symbol=storage, timeframe="5m",
+            ).one()
+            assert state.status == "RECONCILIATION_REQUIRED"
+            assert state.reconciliation_reason == reason
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
+def test_b_account_irreversible_saved_error_is_not_revalidated(monkeypatch):
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        closed = _frame()
+        scope, storage = _saved_b_error_case(
+            Session, "EURUSD", closed,
+            "automatic V3B 5m reconciliation blocked: event claimed submission is irreversible",
+        )
+        monkeypatch.setattr(
+            "ctrader_connector.fetch_ctrader_historical_candles",
+            lambda *_args: pytest.fail("irreversible error fetched history"),
+        )
+        with pytest.raises(stream.IndicatorStreamUnavailable, match="irreversible"):
+            stream.get_authoritative_structure(
+                closed, "EURUSD", "5m", 0.00001,
+                analyzer=_analysis, session_factory=Session, stream_scope=scope,
+            )
+        with Session() as db:
+            assert db.query(IndicatorStreamState).filter_by(
+                symbol=storage, timeframe="5m"
+            ).one().status == "RECONCILIATION_REQUIRED"
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()

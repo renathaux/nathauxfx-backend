@@ -17,7 +17,7 @@ import hashlib
 import threading
 
 import pandas as pd
-from ctrader_account_context import current_identity
+from ctrader_account_context import AccountIdentity, current_identity, pinned_account
 
 from services import indicator_event_stream_service as stream
 from services.broker_account_state_service import load_active_account_selection
@@ -164,6 +164,26 @@ def account_scoped_get_authoritative_structure(
             and stream._normal_timeframe(timeframe) == "5m"
         ),
     }
+    if (
+        scope == "CTRADER:DEMO:47810571"
+        and public in {"EURUSD", "XAUUSD"}
+        and stream._normal_timeframe(timeframe) == "5m"
+    ):
+        def fetch_closed_history(start, end):
+            from ctrader_connector import fetch_ctrader_historical_candles
+            from strategies import strict_trader
+
+            with pinned_account(AccountIdentity("47810571", "demo")):
+                fresh = fetch_ctrader_historical_candles(
+                    public, "5m", start, end, strict_raw=True,
+                )
+            if getattr(fresh, "attrs", {}).get("ctrader_stream_scope") != scope:
+                raise stream.IndicatorStreamUnavailable(
+                    "fresh broker history account scope does not match V3B stream"
+                )
+            return strict_trader.closed_frame(fresh, 5)
+
+        kwargs["revalidation_fetcher"] = fetch_closed_history
     try:
         result = original(frame, storage, timeframe, point_size, **kwargs)
     except stream.IndicatorStreamUnavailable as exc:
