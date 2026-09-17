@@ -9,6 +9,7 @@ def wire_transport():
     import json
     from services.broker_integration_test_adapter import DemoSocket
     transport = object.__new__(DemoSocket)
+    transport.account_id = 47784297
     sent = []
     transport.sock = SimpleNamespace(settimeout=lambda seconds: None)
     transport.connector = SimpleNamespace(websocket_send_text=lambda sock, msg: sent.append(json.loads(msg)))
@@ -81,12 +82,18 @@ def test_application_auth_disconnect_remains_failure(wire_transport):
 @pytest.fixture
 def network(monkeypatch):
     import ctrader_connector
+    import ctrader_account_context
     monkeypatch.setattr(ctrader_connector, 'get_active_ctrader_account_id', lambda: '47784297')
+    monkeypatch.setattr(ctrader_account_context, 'selected_identity',
+                        lambda: (SimpleNamespace(account_id=str(ctrader_connector.get_active_ctrader_account_id()), environment='demo')
+                                 if ctrader_connector.get_active_ctrader_account_id() else None))
     class Network:
         calls = []
         is_live = False
         truncated = False
         volume = 1000
+        max_volume = 1000000
+        lot_size = 10000000
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def request(self, kind, payload, response):
@@ -95,7 +102,7 @@ def network(monkeypatch):
             if kind == 2149: return {'ctidTraderAccount':[{'ctidTraderAccountId':47784297, 'isLive': self.is_live}]}
             if kind == 2121: return {**common, 'trader':{'ctidTraderAccountId':47784297, 'accountType':0, 'accessRights':0, 'isLimitedRisk':False}}
             if kind == 2114: return {**common,'symbol':[{'symbolId':1, 'symbolName':'EURUSD'}]}
-            if kind == 2116: return {**common,'symbol':[{'symbolId':1,'minVolume': self.volume,'stepVolume':1000,'maxVolume':100000,'digits':5,'slDistance':10,'tpDistance':10,'distanceSetIn':1,'tradingMode':0}]}
+            if kind == 2116: return {**common,'symbol':[{'symbolId':1,'minVolume': self.volume,'stepVolume':1000,'maxVolume':self.max_volume,'lotSize':self.lot_size,'digits':5,'slDistance':10,'tpDistance':10,'distanceSetIn':1,'tradingMode':0}]}
             if kind == 2124: return {**common, 'position': [], 'order': []}
             if kind == 2175: return {**common, 'order': [], 'hasMore': self.truncated}
             if kind == 2133: return {**common, 'deal': [], 'hasMore': self.truncated}
@@ -107,15 +114,61 @@ def network(monkeypatch):
 def test_pinned_adapter_uses_raw_full_metadata_cents_and_protection(network):
     from services.broker_integration_test_adapter import CTraderTestAdapter
     from services.broker_integration_test_service import TestRequest
-    adapter = CTraderTestAdapter(lambda: network)
+    adapter = CTraderTestAdapter(lambda account_id, environment: network)
     evidence = adapter.fresh_preflight(TestRequest('47784297','one','EURUSD',True))
     assert evidence.min_volume == 1000
-    row = SimpleNamespace(account_id='47784297', symbol_id=1, volume=1000, reference='bit-unique')
+    row = SimpleNamespace(account_id='47784297', environment='demo', symbol_id=1, volume=1000, reference='bit-unique')
     adapter.submit(row)
     order = [payload for kind, payload in network.calls if kind == 2106][0]
     assert order['volume'] == 1000 and order['ctidTraderAccountId'] == 47784297
     assert order['clientOrderId'] == 'bit-unique' and order['label'] == 'bit-unique'
     assert order['relativeStopLoss'] > 0 and order['relativeTakeProfit'] > 0
+
+
+def test_selected_live_account_submission_uses_live_host_and_exact_account(monkeypatch):
+    import ctrader_connector
+    import ctrader_account_context
+    from services.broker_integration_test_adapter import CTraderTestAdapter
+    monkeypatch.setattr(ctrader_connector, 'get_active_ctrader_account_id', lambda: '47810571')
+    monkeypatch.setattr(ctrader_account_context, 'selected_identity',
+                        lambda: SimpleNamespace(account_id='47810571', environment='live'))
+    opened = []
+    sent = []
+
+    class Transport:
+        token = 'fixture-token'
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def request(self, kind, payload, expected):
+            sent.append((kind, payload))
+            if kind == 2149:
+                return {'ctidTraderAccount': [{'ctidTraderAccountId': 47810571, 'isLive': True}]}
+            return {'ctidTraderAccountId': 47810571}
+
+    def open_transport(account_id, environment):
+        opened.append((account_id, environment))
+        return Transport()
+
+    adapter = CTraderTestAdapter(open_transport)
+    adapter.protection = (500, 500)
+    row = SimpleNamespace(account_id='47810571', environment='live', symbol_id=1,
+                          volume=1000, reference='bit-live-test')
+    adapter.submit(row)
+    assert opened == [('47810571', 'live')]
+    orders = [payload for kind, payload in sent if kind == 2106]
+    assert len(orders) == 1
+    assert orders[0]['ctidTraderAccountId'] == 47810571
+    assert orders[0]['volume'] == 1000
+
+
+def test_tiny_lot_request_rejects_broker_minimum_above_point_zero_one_lot(network):
+    from services.broker_integration_test_adapter import CTraderTestAdapter
+    from services.broker_integration_test_service import TestRequest
+    network.volume = 200000
+    with pytest.raises(ValueError, match='INVALID_BROKER_VOLUME'):
+        CTraderTestAdapter(lambda account_id, environment: network).fresh_preflight(
+            TestRequest('47784297', 'tiny-limit', 'EURUSD', True))
+    assert not any(kind == 2106 for kind, _ in network.calls)
 
 
 @pytest.mark.parametrize('change', [{'is_live':True}, {'is_live':None}, {'volume':None}, {'truncated':True}])
@@ -124,21 +177,21 @@ def test_adapter_refuses_missing_authority_or_cleanup(network, change):
     from services.broker_integration_test_service import TestRequest
     for key, value in change.items(): setattr(network, key, value)
     with pytest.raises((ValueError, TypeError)):
-        CTraderTestAdapter(lambda: network).fresh_preflight(TestRequest('47784297','one','EURUSD',True))
+        CTraderTestAdapter(lambda account_id, environment: network).fresh_preflight(TestRequest('47784297','one','EURUSD',True))
     assert not any(kind == 2106 for kind, _ in network.calls)
 
 
 def test_complete_empty_history_is_not_closure(network):
     from services.broker_integration_test_adapter import CTraderTestAdapter
-    row = SimpleNamespace(account_id='47784297', symbol_id=1, volume=1000,
+    row = SimpleNamespace(account_id='47784297', environment='demo', symbol_id=1, volume=1000,
         reference='bit-unique', created_at=datetime.now(timezone.utc))
-    assert not CTraderTestAdapter(lambda: network).reconcile(row).complete
+    assert not CTraderTestAdapter(lambda account_id, environment: network).reconcile(row).complete
 
 
 @pytest.mark.parametrize('change', ['none', 'wrong_reference', 'wrong_side', 'added_volume', 'partial_history', 'wrong_close_volume', 'pending_close'])
 def test_reconciliation_requires_exact_open_and_close_evidence(network, change):
     from services.broker_integration_test_adapter import CTraderTestAdapter
-    row = SimpleNamespace(account_id='47784297', symbol_id=1, volume=1000,
+    row = SimpleNamespace(account_id='47784297', environment='demo', symbol_id=1, volume=1000,
         reference='bit-unique', created_at=datetime.now(timezone.utc), broker_position_id='18')
     data = {'symbolId':1,'tradeSide':1,'volume':1000,'label':'bit-unique'}
     order = {'orderId':17,'positionId':18,'clientOrderId':'bit-unique','tradeData':data}
@@ -158,7 +211,7 @@ def test_reconciliation_requires_exact_open_and_close_evidence(network, change):
         if kind == 2124: return {'position':[],'order':[{'positionId':18}] if change == 'pending_close' else []}
         return original(kind,payload,expected)
     network.request = request
-    adapter = CTraderTestAdapter(lambda: network)
+    adapter = CTraderTestAdapter(lambda account_id, environment: network)
     if change == 'partial_history':
         with pytest.raises(ValueError): adapter.reconcile(row)
     else:
@@ -172,6 +225,7 @@ def test_transport_ignores_unrelated_response_and_enforces_account(monkeypatch):
     import json
     from services.broker_integration_test_adapter import DemoSocket
     transport = object.__new__(DemoSocket)
+    transport.account_id = 47784297
     sent = []
     transport.sock = SimpleNamespace(settimeout=lambda seconds: None)
     transport.connector = SimpleNamespace(websocket_send_text=lambda sock, msg: sent.append(json.loads(msg)))
@@ -223,7 +277,7 @@ def test_adapter_blockers_have_safe_specific_codes(network, change, code):
         return original(kind, payload, expected)
     network.request = request
     with pytest.raises(Exception) as error:
-        CTraderTestAdapter(lambda:network).fresh_preflight(TestRequest('47784297','codes','EURUSD',True))
+        CTraderTestAdapter(lambda account_id, environment: network).fresh_preflight(TestRequest('47784297','codes','EURUSD',True))
     assert safe_error_code(error.value) == code
 
 
@@ -234,7 +288,7 @@ def test_runtime_selection_must_match_before_any_open(network, monkeypatch, sele
     from services.broker_integration_test_service import TestRequest
     monkeypatch.setattr(ctrader_connector, 'get_active_ctrader_account_id', lambda: selected)
     with pytest.raises(ValueError, match='SELECTED_ACCOUNT_MISMATCH'):
-        CTraderTestAdapter(lambda:network).fresh_preflight(TestRequest('47784297','selection','EURUSD',True))
+        CTraderTestAdapter(lambda account_id, environment: network).fresh_preflight(TestRequest('47784297','selection','EURUSD',True))
     assert network.calls == []
 
 
@@ -242,7 +296,7 @@ def test_selection_switch_after_preflight_and_during_auth_blocks_dispatch(networ
     import ctrader_connector
     from services.broker_integration_test_adapter import CTraderTestAdapter
     from services.broker_integration_test_service import TestRequest
-    adapter = CTraderTestAdapter(lambda:network)
+    adapter = CTraderTestAdapter(lambda account_id, environment: network)
     adapter.fresh_preflight(TestRequest('47784297','selection','EURUSD',True))
     original = network.request
     def switch(kind, payload, response):
@@ -251,8 +305,52 @@ def test_selection_switch_after_preflight_and_during_auth_blocks_dispatch(networ
         return original(kind,payload,response)
     network.request = switch
     with pytest.raises(ValueError, match='SELECTED_ACCOUNT_MISMATCH'):
-        adapter.submit(SimpleNamespace(account_id='47784297',symbol_id=1,volume=1000,reference='ref'))
+        adapter.submit(SimpleNamespace(account_id='47784297',environment='demo',symbol_id=1,volume=1000,reference='ref'))
     assert not any(kind == 2106 for kind, _ in network.calls)
+
+
+def test_selection_cannot_change_while_opening_request_is_in_flight(network, monkeypatch):
+    import threading
+    import ctrader_connector
+    from ctrader_account_context import account_state_lock
+    from services.broker_integration_test_adapter import CTraderTestAdapter
+    from services.broker_integration_test_service import TestRequest
+    selected = ['47784297']
+    monkeypatch.setattr(ctrader_connector, 'get_active_ctrader_account_id', lambda: selected[0])
+    adapter = CTraderTestAdapter(lambda account_id, environment: network)
+    adapter.fresh_preflight(TestRequest('47784297', 'switch-race', 'EURUSD', True))
+    entered = threading.Event()
+    release = threading.Event()
+    switched = threading.Event()
+    original = network.request
+
+    def request(kind, payload, response):
+        if kind == 2106:
+            entered.set()
+            assert release.wait(3)
+        return original(kind, payload, response)
+
+    network.request = request
+    row = SimpleNamespace(account_id='47784297', environment='demo', symbol_id=1,
+                          volume=1000, reference='bit-switch-race')
+    opening = threading.Thread(target=adapter.submit, args=(row,))
+
+    def switch():
+        with account_state_lock:
+            selected[0] = '47810571'
+            switched.set()
+
+    changing = threading.Thread(target=switch)
+    opening.start()
+    try:
+        assert entered.wait(3)
+        changing.start()
+        assert not switched.wait(0.2)
+    finally:
+        release.set()
+        opening.join(3)
+        changing.join(3)
+    assert switched.is_set()
 
 
 @pytest.mark.parametrize('missing', [None, 'price', 'opened', 'closed', 'nan_price', 'future_time'])
@@ -260,7 +358,7 @@ def test_authoritative_multiple_fills_price_and_times(network, monkeypatch, miss
     import ctrader_connector
     from services.broker_integration_test_adapter import CTraderTestAdapter
     now = int(datetime.now(timezone.utc).timestamp()*1000)
-    row = SimpleNamespace(account_id='47784297',symbol_id=1,volume=1000,reference='ref',created_at=datetime.now(timezone.utc))
+    row = SimpleNamespace(account_id='47784297',environment='demo',symbol_id=1,volume=1000,reference='ref',created_at=datetime.now(timezone.utc))
     data = {'symbolId':1,'tradeSide':1,'volume':1000,'label':'ref'}
     order = {'orderId':17,'positionId':18,'clientOrderId':'ref','tradeData':data}
     opening = [dict(dealId=20,orderId=17,positionId=18,symbolId=1,tradeSide=1,filledVolume=400,executionPrice=1.1,executionTimestamp=now),
@@ -279,7 +377,7 @@ def test_authoritative_multiple_fills_price_and_times(network, monkeypatch, miss
     network.request = request
     # Cleanup reconciliation remains allowed after selection changes.
     monkeypatch.setattr(ctrader_connector, 'get_active_ctrader_account_id', lambda:'47810571')
-    evidence = CTraderTestAdapter(lambda:network).reconcile(row)
+    evidence = CTraderTestAdapter(lambda account_id, environment: network).reconcile(row)
     if missing:
         assert not evidence.complete
     else:
@@ -293,7 +391,7 @@ def test_malformed_quote_reports_quote_code(network):
     from services.broker_integration_test_service import TestRequest
     network.quote = lambda symbol_id: {'ctidTraderAccountId':47784297,'symbolId':symbol_id, 'timestamp':None}
     with pytest.raises(ValueError, match='QUOTE_INVALID'):
-        CTraderTestAdapter(lambda:network).fresh_preflight(TestRequest('47784297','quote','EURUSD',True))
+        CTraderTestAdapter(lambda account_id, environment: network).fresh_preflight(TestRequest('47784297','quote','EURUSD',True))
 
 
 def test_prepared_restart_rechecks_runtime_selection_before_dispatch(network, monkeypatch, tmp_path):
@@ -307,7 +405,7 @@ def test_prepared_restart_rechecks_runtime_selection_before_dispatch(network, mo
     engine = create_engine(f"sqlite:///{tmp_path/'prepared.db'}")
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
-    adapter = CTraderTestAdapter(lambda:network)
+    adapter = CTraderTestAdapter(lambda account_id, environment: network)
     service = BrokerIntegrationTestService(factory, adapter)
     request = TestRequest('47784297','prepared','EURUSD',True)
     original = adapter.fresh_preflight
@@ -361,7 +459,7 @@ def test_real_adapter_service_persists_multiple_fills_and_closes_after_selection
                 return {'position':[] if closed else [{'positionId':18,'tradeData':data}], 'order':[]}
         return original(kind,payload,response)
     network.request = request
-    service = BrokerIntegrationTestService(factory,CTraderTestAdapter(lambda:network))
+    service = BrokerIntegrationTestService(factory,CTraderTestAdapter(lambda account_id, environment: network))
     test = TestRequest('47784297','real-adapter','EURUSD',True)
     result = service.run(test)
     assert result['state'] == 'CLOSED'
@@ -369,6 +467,6 @@ def test_real_adapter_service_persists_multiple_fills_and_closes_after_selection
     assert result['broker_closed_at'] > result['broker_opened_at']
     assert len(submitted) == len(closed) == 1
     assert closed[0]['ctidTraderAccountId'] == 47784297
-    restored = BrokerIntegrationTestService(factory,CTraderTestAdapter(lambda:network))
+    restored = BrokerIntegrationTestService(factory,CTraderTestAdapter(lambda account_id, environment: network))
     assert restored.run(test) == result
     assert ctrader_connector.get_active_ctrader_account_id() == '47810571'

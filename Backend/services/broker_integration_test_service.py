@@ -8,7 +8,7 @@ from typing import Protocol
 
 from sqlalchemy import select, update
 from models import BrokerIntegrationTestSubmission as Submission
-from services.account_execution_coordination import TEST_ACCOUNT, ExecutionFenced, account_lock
+from services.account_execution_coordination import ExecutionFenced, account_lock
 from services.broker_integration_test_errors import BlockerCode as Code, BrokerTestBlocked, safe_error_code
 
 
@@ -59,7 +59,7 @@ class BrokerAdapter(Protocol):
 
 
 def validate_request(request):
-    if (request.account_id != TEST_ACCOUNT or request.symbol != 'EURUSD'
+    if (not re.fullmatch(r'[0-9]{1,20}', str(request.account_id)) or request.symbol != 'EURUSD'
             or request.confirmed is not True
             or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', request.test_id)):
         raise BrokerTestBlocked(Code.INVALID_REQUEST)
@@ -73,8 +73,8 @@ class BrokerIntegrationTestService:
     def preflight(self, request):
         validate_request(request)
         evidence = self.adapter.fresh_preflight(request)
-        if evidence.account_id != TEST_ACCOUNT or evidence.is_live is not False:
-            raise BrokerTestBlocked(Code.DEMO_PROOF_REQUIRED)
+        if evidence.account_id != request.account_id or evidence.is_live not in (True, False):
+            raise BrokerTestBlocked(Code.IDENTITY_MISMATCH)
         if evidence.symbol != 'EURUSD' or evidence.symbol_id <= 0:
             raise BrokerTestBlocked(Code.SYMBOL_METADATA_INVALID)
         if evidence.cleanup_ready is not True:
@@ -99,11 +99,11 @@ class BrokerIntegrationTestService:
                 if row is None:
                     if recover:
                         raise BrokerTestBlocked(Code.RECOVERY_ID_UNKNOWN)
-                    if session.scalar(select(Submission.test_id).where(Submission.unresolved_account == TEST_ACCOUNT)):
-                        raise ExecutionFenced('Another unresolved DEMO broker integration test')
+                    if session.scalar(select(Submission.test_id).where(Submission.unresolved_account == request.account_id)):
+                        raise ExecutionFenced('Another unresolved broker integration test')
                     evidence = self.preflight(request)
                     row = Submission(test_id=request.test_id, account_id=request.account_id,
-                        unresolved_account=request.account_id, environment='demo', symbol='EURUSD',
+                        unresolved_account=request.account_id, environment='live' if evidence['is_live'] else 'demo', symbol='EURUSD',
                         symbol_id=evidence['symbol_id'], side='BUY', volume=evidence['min_volume'],
                         reference='bit-' + hashlib.sha256(request.test_id.encode()).hexdigest()[:40],
                         state='PREPARED', created_at=datetime.now(timezone.utc), preflight_evidence=evidence)
@@ -120,12 +120,14 @@ class BrokerIntegrationTestService:
                             return self._result(row)
                         # Revalidate after any PREPARED crash; persist marker before network.
                         fresh = self.preflight(request)
+                        if ((fresh['is_live'] is True) != (row.environment == 'live')):
+                            raise BrokerTestBlocked(Code.IDENTITY_MISMATCH)
                         if fresh['symbol_id'] != row.symbol_id or fresh['min_volume'] != row.volume:
                             raise BrokerTestBlocked(Code.SYMBOL_METADATA_INVALID)
                         marked = session.execute(update(Submission).where(
                             Submission.test_id == row.test_id,
                             Submission.request_started_at.is_(None),
-                            Submission.unresolved_account == TEST_ACCOUNT,
+                            Submission.unresolved_account == request.account_id,
                         ).values(request_started_at=datetime.now(timezone.utc), state='REQUEST_STARTED'))
                         if marked.rowcount != 1:
                             raise ExecutionFenced('Opening marker already claimed')
@@ -156,7 +158,7 @@ class BrokerIntegrationTestService:
                         marked = session.execute(update(Submission).where(
                             Submission.test_id == row.test_id,
                             Submission.close_started_at.is_(None),
-                            Submission.unresolved_account == TEST_ACCOUNT,
+                            Submission.unresolved_account == request.account_id,
                         ).values(close_started_at=datetime.now(timezone.utc), state='CLOSING'))
                         if marked.rowcount != 1:
                             raise BrokerTestBlocked(Code.UNRESOLVED_CLOSE)
