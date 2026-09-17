@@ -198,3 +198,41 @@ def test_runtime_install_does_not_enable_any_trading_switch():
     assert result["broker_handoff_enabled"] is False
     assert result["live_auto_enabled"] is False
     assert api.LIVE_AUTO_TRADE_ENABLED["enabled"] is False
+
+
+def test_active_v3b_cycle_ignores_legacy_15m_dashboard_block():
+    api, _prepare, _locked, _fresh, _protect, legacy_cycle = _fake_api()
+    api.LIVE_AUTO_TRADE_ENABLED["enabled"] = True
+    api.LIVE_ACCOUNT_STATE.update({"connected": True, "execution_ready": True})
+    broker_core = api.execute_live_order_core
+    install_live_v3b_runtime(api, strict_trader_module=SimpleNamespace())
+    legacy_panel = {
+        symbol: {
+            "signal": "WAIT",
+            "blocked_reason": "WAIT_INDICATOR_EVENT_STREAM_UNAVAILABLE",
+        }
+        for symbol in ("EURUSD", "XAUUSD")
+    }
+    with patch("services.live_v3b_runtime_install.live_v3b_enabled", return_value=True), patch(
+        "services.live_v3b_runtime_install.build_live_v3b_candidate",
+        side_effect=lambda symbol, *_args, **_kwargs: {
+            **_payload(),
+            "symbol": symbol,
+            "live_v3b_ready": True,
+        },
+    ), patch(
+        "services.live_v3b_runtime_install.dispatch_v3b_to_live_core",
+        return_value={"ok": False, "reason": "simulated downstream safety veto"},
+    ) as dispatch:
+        result = api.run_ctrader_auto_trade_checks(legacy_panel)
+
+    assert len(result) == 2
+    assert dispatch.call_count == 2
+    assert [call.args[0]["symbol"] for call in dispatch.call_args_list] == ["EURUSD", "XAUUSD"]
+    assert all(item["reason"] == "simulated downstream safety veto" for item in result)
+    assert [call.args[:2] for call in api.get_ctrader_market_data.call_args_list] == [
+        ("EURUSD", "5m"),
+        ("XAUUSD", "5m"),
+    ]
+    legacy_cycle.assert_not_called()
+    broker_core.assert_not_called()
