@@ -88,6 +88,9 @@ def settings_risk_post(payload: dict):
         strategy_update["protected_stop_percent"] = payload["protectedSlPercentOfTp2"]
 
     try:
+        # Validate the strategy-owned values against the complete active profile
+        # before writing either store. This catches impossible protected-stop
+        # geometry (for example protected SL beyond the trigger).
         if strategy_update:
             current = active_strategy_config.get_active_values()
             active_strategy_config.validate({**current, **strategy_update}, merge_defaults=True)
