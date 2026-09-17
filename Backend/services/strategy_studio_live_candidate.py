@@ -73,8 +73,8 @@ def _bundle_scope_matches(market_bundle, account_scope: str) -> bool:
         attrs = getattr(frame, "attrs", None)
         if not isinstance(attrs, dict):
             continue
-        source_scope = attrs.get("ctrader_stream_scope")
-        if source_scope and str(source_scope) != account_scope:
+        source_scope = attrs.get("ctrader_stream_scope") or attrs.get("stream_scope")
+        if source_scope and str(source_scope).upper() != str(account_scope).upper():
             return False
     return True
 
@@ -190,8 +190,48 @@ def _persist_eligible_setup(factory, *, setup_id, owner_id, strategy_id,
         session.close()
 
 
+def _evaluate_latest(definition, timeline, timestamps, public_symbol, account_balance, prior_state):
+    """Return the latest evaluation and the state immediately before it.
+
+    A provided prior_state evaluates only the newest candle.  With no durable
+    runtime state (including after a restart), replay the closed-candle timeline
+    so an immediate-next-candle confirmation is reconstructed deterministically.
+    """
+    latest = pd.Timestamp(timestamps[-1])
+    if isinstance(prior_state, EvaluationState):
+        before = prior_state
+        result = evaluate_strategy(
+            definition,
+            timeline,
+            latest,
+            before,
+            symbol=public_symbol,
+            account_balance=float(account_balance),
+        )
+        return latest, before, result
+
+    state = EvaluationState()
+    before_latest = state
+    result = None
+    for raw_timestamp in timestamps:
+        stamp = pd.Timestamp(raw_timestamp)
+        before = state
+        result = evaluate_strategy(
+            definition,
+            timeline,
+            stamp,
+            state,
+            symbol=public_symbol,
+            account_balance=float(account_balance),
+        )
+        state = result.next_state
+        if stamp == latest:
+            before_latest = before
+    return latest, before_latest, result
+
+
 def build_studio_candidate(owner_id, account_identity, symbol, market_bundle,
-                           *, account_balance, prior_state, session_factory=None) -> dict:
+                           *, account_balance, prior_state=None, session_factory=None) -> dict:
     owner = str(owner_id or "").strip()
     if not owner:
         raise ValueError("owner_id is required")
@@ -246,15 +286,14 @@ def build_studio_candidate(owner_id, account_identity, symbol, market_bundle,
             account_scope=scope,
             strategy_id=strategy_id,
         )
-    timestamp = pd.Timestamp(timestamps[-1])
-    state = prior_state if isinstance(prior_state, EvaluationState) else EvaluationState()
-    result = evaluate_strategy(
+
+    timestamp, state_before_latest, result = _evaluate_latest(
         definition,
         timeline,
-        timestamp,
-        state,
-        symbol=public_symbol,
-        account_balance=float(account_balance),
+        timestamps,
+        public_symbol,
+        account_balance,
+        prior_state,
     )
 
     if result.signal not in {"BUY", "SELL"}:
@@ -267,7 +306,7 @@ def build_studio_candidate(owner_id, account_identity, symbol, market_bundle,
             setup_id=result.setup_id,
         )
 
-    setup_facts = _pending_identity(state, timeline, timestamp)
+    setup_facts = _pending_identity(state_before_latest, timeline, timestamp)
     stable_setup_id = _setup_id(
         owner_id=owner,
         strategy_id=strategy_id,
@@ -315,6 +354,7 @@ def build_studio_candidate(owner_id, account_identity, symbol, market_bundle,
         "tp1": result.tp1,
         "tp2": result.tp2,
         "risk_budget": result.risk_budget,
+        "tp1_definition": copy.deepcopy(definition.get("tp1") or {}),
         "evaluator_steps": result.steps,
         "next_state": result.next_state,
     }
