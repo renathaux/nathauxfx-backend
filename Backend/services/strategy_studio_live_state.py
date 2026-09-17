@@ -43,12 +43,11 @@ def studio_live_enabled(owner_id, session_factory=None) -> bool:
 
 
 def get_enabled_studio_live_owner(session_factory=None) -> str | None:
-    """Return the sole enabled owner, otherwise fail closed.
+    """Return the sole enabled owner; reject ambiguous enabled state.
 
-    The background execution loop has no request/user context.  It may use a
-    Studio strategy only when durable state identifies exactly one enabled
-    owner. Zero or multiple enabled owners returns None so V3B remains the
-    authority rather than guessing which owner should trade.
+    Zero enabled owners means the Studio gate is OFF and V3B remains the LIVE
+    authority. More than one enabled owner is an invalid durable state and must
+    fail closed rather than silently falling back to another candidate source.
     """
     factory = session_factory or SessionLocal
     with factory() as session:
@@ -59,6 +58,8 @@ def get_enabled_studio_live_owner(session_factory=None) -> str | None:
             .limit(2)
             .all()
         )
-    if len(rows) != 1:
+    if not rows:
         return None
+    if len(rows) != 1:
+        raise RuntimeError("STRATEGY_STUDIO_LIVE_OWNER_AMBIGUOUS")
     return str(rows[0].owner_id)
