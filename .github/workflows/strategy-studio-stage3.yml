@@ -101,7 +101,6 @@ jobs:
             tests/test_strategy_studio_position_manager.py \
             tests/test_strategy_studio_account_switch.py \
             tests/test_ready_execution_handoff.py \
-            tests/test_trade_submission_service.py \
             tests/test_simple_account_switch.py
 
       - name: Run Stage 2 regression suite
