@@ -40,3 +40,25 @@ def get_studio_live_state(owner_id, session_factory=None) -> dict:
 
 def studio_live_enabled(owner_id, session_factory=None) -> bool:
     return bool(get_studio_live_state(owner_id, session_factory).get("enabled"))
+
+
+def get_enabled_studio_live_owner(session_factory=None) -> str | None:
+    """Return the sole enabled owner, otherwise fail closed.
+
+    The background execution loop has no request/user context.  It may use a
+    Studio strategy only when durable state identifies exactly one enabled
+    owner. Zero or multiple enabled owners returns None so V3B remains the
+    authority rather than guessing which owner should trade.
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        rows = (
+            session.query(StrategyStudioLiveState)
+            .filter(StrategyStudioLiveState.enabled.is_(True))
+            .order_by(StrategyStudioLiveState.owner_id.asc())
+            .limit(2)
+            .all()
+        )
+    if len(rows) != 1:
+        return None
+    return str(rows[0].owner_id)
