@@ -28,13 +28,18 @@ jobs:
           pip install -r requirements.txt
           pip install pytest httpx2
 
-      - name: Run Strategy Studio Stage 2 tests
+      - name: Run Strategy Studio Stage 2 and regression tests
         env:
           DATABASE_URL: "sqlite:///:memory:"
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           python -c 'import sys, pytest; from db import Base, engine; import models; Base.metadata.create_all(engine); sys.exit(pytest.main(sys.argv[1:]))' -q \
+            tests/test_strategy_studio_schema.py \
+            tests/test_strategy_studio_service.py \
+            tests/test_strategy_studio_routes.py \
             tests/test_strategy_engine_market_facts.py \
             tests/test_strategy_engine_evaluator.py \
             tests/test_strategy_simulator.py \
-            tests/test_strategy_simulator_routes.py
+            tests/test_strategy_simulator_routes.py \
+            tests/test_simple_account_switch.py \
+            tests/test_ready_execution_handoff.py
