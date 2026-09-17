@@ -21,10 +21,8 @@ from __future__ import annotations
 import copy
 import os
 
-from services.paper_v3b_bridge import (
-    PAPER_V3B_MODEL,
-    build_paper_v3b_candidate,
-)
+from services import paper_v3b_bridge
+from services.paper_v3b_bridge import PAPER_V3B_MODEL
 
 
 LIVE_V3B_MODEL = "LIVE_V3B_M5_FROZEN"
@@ -86,7 +84,7 @@ def build_live_v3b_candidate(
     if authoritative_updater is not None:
         kwargs["authoritative_updater"] = authoritative_updater
 
-    candidate = build_paper_v3b_candidate(symbol, data_5m, **kwargs)
+    candidate = paper_v3b_bridge.build_paper_v3b_candidate(symbol, data_5m, **kwargs)
     if not isinstance(candidate, dict) or not candidate.get("paper_entry_ready"):
         reason = (
             (candidate or {}).get("paper_entry_reason")
