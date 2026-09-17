@@ -38,4 +38,6 @@ jobs:
 
       - name: Run Strategy Studio simulator tests
         run: |
-          PYTHONDONTWRITEBYTECODE=1 python -m pytest -q tests/test_strategy_engine_market_facts.py
+          PYTHONDONTWRITEBYTECODE=1 python -m pytest -q \
+            tests/test_strategy_engine_market_facts.py \
+            tests/test_strategy_engine_evaluator.py
