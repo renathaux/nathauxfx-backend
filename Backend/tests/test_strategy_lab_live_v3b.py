@@ -208,6 +208,9 @@ def test_closed_5m_candidate_history_contract_and_durable_claim_allow_one_mock_b
     assert candidate["paper_entry_details"]["second_5m_same_direction"] is True
     assert candidate["paper_entry_details"]["second_5m_stays_beyond_bos_level"] is True
     assert candidate["setup_identity"]["setup_timeframe"] == "5m"
+    assert candidate["v3b_setup_state"]["indicator_event_id"] == candidate["source_indicator_event_id"]
+    assert candidate["v3b_setup_state"]["m5_confirmation_id"] == candidate["m5_confirmation_id"]
+    assert candidate["v3b_setup_state"]["signal_setup_id"] == candidate["signal_setup_id"]
 
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
@@ -274,6 +277,12 @@ def test_closed_5m_candidate_history_contract_and_durable_claim_allow_one_mock_b
             )
         rows = list_v3b_transitions(scope, session_factory=sessions)
         assert len(broker_sends) == 1
+        assert broker_sends[0]["source_indicator_event_id"] == candidate["v3b_setup_state"]["indicator_event_id"]
+        assert broker_sends[0]["m5_confirmation_id"] == candidate["v3b_setup_state"]["m5_confirmation_id"]
+        assert broker_sends[0]["entry"] == candidate["v3b_setup_state"]["entry"]
+        assert broker_sends[0]["sl"] == candidate["v3b_setup_state"]["sl"]
+        assert broker_sends[0]["tp1"] == candidate["v3b_setup_state"]["tp1"]
+        assert broker_sends[0]["tp2"] == candidate["v3b_setup_state"]["tp2"]
         assert len(rows) == 2
         assert rows[0]["signal"] == "BUY"
         assert rows[0]["execution_status"] == "EXECUTED"
@@ -314,6 +323,8 @@ def test_live_candidate_fails_closed_without_setup_fingerprint():
 
     assert result["live_v3b_ready"] is False
     assert result["live_v3b_reason"] == "WAIT_V3B_LIVE_SETUP_ID"
+    assert result["live_v3b_details"]["source_candidate"]["v3b_setup_state"]["signal"] == "BUY"
+    assert result["live_v3b_details"]["source_candidate"]["v3b_setup_state"]["execution_status"] == "BLOCKED"
 
 
 def test_live_final_gate_can_block_without_broker_handoff():
@@ -333,6 +344,9 @@ def test_live_final_gate_can_block_without_broker_handoff():
     assert result["live_v3b_ready"] is False
     assert result["signal"] == "WAIT"
     assert result["live_v3b_reason"] == "WAIT_TEST_EXECUTION_SAFETY"
+    assert result["v3b_setup_state"]["signal"] == "BUY"
+    assert result["v3b_setup_state"]["lifecycle_state"] == "BLOCKED"
+    assert result["v3b_setup_state"]["execution_block_reason"] == "WAIT_TEST_EXECUTION_SAFETY"
     handoff = build_live_v3b_execution_payload(result)
     assert handoff["ok"] is False
     assert handoff["payload"] is None

@@ -84,7 +84,19 @@ def record_v3b_transition(
                 .order_by(V3BSignalTransition.ordinal.desc())
                 .first()
             )
-            if latest and latest.signal == signal:
+            same_setup = (
+                latest is not None and latest.signal == signal
+                and (signal == "WAIT" or not setup_id or latest.setup_id == str(setup_id))
+            )
+            if same_setup:
+                if signal == "WAIT" and event_id and latest.event_id != str(event_id):
+                    # A developing BOS remains a WAIT transition, but its
+                    # identity and closed-candle time must not be lost behind
+                    # an earlier generic WAIT poll.
+                    latest.event_id = str(event_id)
+                    latest.signal_timestamp = timestamp
+                    latest.reason = str(reason)[:255] if reason else None
+                    latest.updated_at = datetime.now(timezone.utc)
                 if (
                     signal != "WAIT"
                     and setup_id

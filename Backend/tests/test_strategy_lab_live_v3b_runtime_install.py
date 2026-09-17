@@ -308,3 +308,356 @@ def test_ready_buy_is_recorded_before_blocked_broker_handoff():
     assert eurusd_calls[0].kwargs["setup_id"] == "setup-1"
     assert eurusd_calls[1].kwargs["execution_status"] == "BLOCKED"
     assert eurusd_calls[1].kwargs["reason"] == "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT"
+    eurusd_status = [call for call in api.set_auto_trade_status.call_args_list
+                     if call.kwargs["symbol"] == "EURUSD"][-1]
+    assert eurusd_status.kwargs["signal"] == "BUY"
+    assert eurusd_status.kwargs["status"] == "BLOCKED"
+    assert eurusd_status.kwargs["details"]["source_candidate"]["source_indicator_event_id"] == "bos-1"
+    assert eurusd_status.kwargs["details"]["source_candidate"]["m5_confirmation_id"] == "confirmation-1"
+
+
+def test_repeated_poll_preserves_executed_setup_without_second_dispatch():
+    from ctrader_account_context import AccountIdentity
+
+    api, *_ = _fake_api()
+    api.LIVE_AUTO_TRADE_ENABLED["enabled"] = True
+    api.LIVE_ACCOUNT_STATE.update({"connected": True, "execution_ready": True})
+    api.get_ctrader_market_data.return_value = SimpleNamespace(
+        attrs={"ctrader_stream_scope": "CTRADER:DEMO:47810571"}
+    )
+    install_live_v3b_runtime(api, strict_trader_module=SimpleNamespace())
+    candidate = {
+        **_payload(), "live_v3b_ready": True,
+        "v3b_setup_state": {"signal": "BUY", "lifecycle_state": "ELIGIBLE"},
+    }
+    polls = {"count": 0}
+
+    def record(_scope, symbol, signal, _time, **kwargs):
+        if symbol != "EURUSD" or signal != "BUY":
+            return {"signal": "WAIT"}
+        if kwargs.get("execution_status") == "EXECUTED":
+            return {"signal": "BUY", "signal_setup_id": "setup-v3b", "execution_status": "EXECUTED"}
+        polls["count"] += 1
+        return {"signal": "BUY", "signal_setup_id": "setup-v3b",
+                "execution_status": "EXECUTED" if polls["count"] > 1 else "CANDIDATE"}
+
+    with patch("services.live_v3b_runtime_install.live_v3b_enabled", return_value=True), patch(
+        "services.live_v3b_runtime_install.selected_identity",
+        return_value=AccountIdentity("47810571", "demo"),
+    ), patch(
+        "services.live_v3b_runtime_install.build_live_v3b_candidate",
+        side_effect=lambda symbol, *_args, **_kwargs: candidate if symbol == "EURUSD" else {
+            "symbol": symbol, "signal": "WAIT", "live_v3b_ready": False},
+    ), patch("services.v3b_signal_history.record_v3b_transition", side_effect=record), patch(
+        "services.live_v3b_runtime_install.dispatch_v3b_to_live_core",
+        return_value={"ok": True, "submitted": True},
+    ) as dispatch:
+        api.run_ctrader_auto_trade_checks({})
+        api.run_ctrader_auto_trade_checks({})
+
+    assert dispatch.call_count == 1
+    statuses = [call.kwargs for call in api.set_auto_trade_status.call_args_list
+                if call.kwargs["symbol"] == "EURUSD"]
+    assert statuses[-1]["status"] == "EXECUTED"
+    assert statuses[-1]["details"]["source_candidate"]["v3b_setup_state"]["lifecycle_state"] == "CONSUMED"
+
+
+def test_ambiguous_broker_result_remains_reconciliation_required_on_replay():
+    from ctrader_account_context import AccountIdentity
+
+    api, *_ = _fake_api()
+    api.LIVE_AUTO_TRADE_ENABLED["enabled"] = True
+    api.LIVE_ACCOUNT_STATE.update({"connected": True, "execution_ready": True})
+    api.get_ctrader_market_data.return_value = SimpleNamespace(
+        attrs={"ctrader_stream_scope": "CTRADER:DEMO:47810571"}
+    )
+    install_live_v3b_runtime(api, strict_trader_module=SimpleNamespace())
+    candidate = {**_payload(), "live_v3b_ready": True,
+                 "v3b_setup_state": {"signal": "BUY", "lifecycle_state": "ELIGIBLE"}}
+    history = {}
+
+    def record(_scope, symbol, signal, _time, **kwargs):
+        if symbol != "EURUSD" or signal != "BUY":
+            return {"signal": "WAIT"}
+        if kwargs.get("execution_status"):
+            history.update(signal="BUY", signal_setup_id="setup-v3b",
+                           execution_status=kwargs["execution_status"])
+        return history or {"signal": "BUY", "signal_setup_id": "setup-v3b",
+                           "execution_status": "CANDIDATE"}
+
+    with patch("services.live_v3b_runtime_install.live_v3b_enabled", return_value=True), patch(
+        "services.live_v3b_runtime_install.selected_identity",
+        return_value=AccountIdentity("47810571", "demo"),
+    ), patch("services.live_v3b_runtime_install.build_live_v3b_candidate",
+             side_effect=lambda symbol, *_args, **_kwargs: candidate if symbol == "EURUSD" else {
+                 "symbol": symbol, "signal": "WAIT", "live_v3b_ready": False}), patch(
+        "services.v3b_signal_history.record_v3b_transition", side_effect=record,
+    ), patch("services.live_v3b_runtime_install.dispatch_v3b_to_live_core",
+             return_value={"ok": False, "submitted": True, "reason": "broker timeout",
+                           "execution_result": {"broker_result": "AMBIGUOUS"}}) as dispatch:
+        api.run_ctrader_auto_trade_checks({})
+        api.run_ctrader_auto_trade_checks({})
+
+    assert dispatch.call_count == 1
+    assert history["execution_status"] == "RECONCILIATION_REQUIRED"
+    statuses = [call.kwargs for call in api.set_auto_trade_status.call_args_list
+                if call.kwargs["symbol"] == "EURUSD"]
+    assert statuses[-1]["status"] == "RECONCILIATION_REQUIRED"
+
+
+def test_durable_submission_marker_prevents_replay_after_executor_exception():
+    from ctrader_account_context import AccountIdentity
+
+    api, *_ = _fake_api()
+    api.LIVE_AUTO_TRADE_ENABLED["enabled"] = True
+    api.LIVE_ACCOUNT_STATE.update({"connected": True, "execution_ready": True})
+    api.get_ctrader_market_data.return_value = SimpleNamespace(
+        attrs={"ctrader_stream_scope": "CTRADER:DEMO:47810571"}
+    )
+    marker = {"status": "ELIGIBLE"}
+    api.get_event_lifecycles = Mock(side_effect=lambda *_args, **kwargs: {
+        "event-v3b": {"LIVE": {"status": marker["status"]}}
+    })
+    install_live_v3b_runtime(api, strict_trader_module=SimpleNamespace())
+    candidate = {**_payload(), "live_v3b_ready": True,
+                 "v3b_setup_state": {"signal": "BUY", "lifecycle_state": "ELIGIBLE"}}
+    history = {}
+
+    def record(_scope, symbol, signal, _time, **kwargs):
+        if symbol != "EURUSD" or signal != "BUY":
+            return {"signal": "WAIT"}
+        if kwargs.get("execution_status"):
+            history.update(signal="BUY", signal_setup_id="setup-v3b",
+                           execution_status=kwargs["execution_status"])
+        return history or {"signal": "BUY", "signal_setup_id": "setup-v3b",
+                           "execution_status": "CANDIDATE"}
+
+    def uncertain_send(_candidate, **_kwargs):
+        marker["status"] = "RECONCILIATION_REQUIRED"
+        raise RuntimeError("network dropped after durable request-start marker")
+
+    with patch("services.live_v3b_runtime_install.live_v3b_enabled", return_value=True), patch(
+        "services.live_v3b_runtime_install.selected_identity",
+        return_value=AccountIdentity("47810571", "demo"),
+    ), patch("services.live_v3b_runtime_install.build_live_v3b_candidate",
+             side_effect=lambda symbol, *_args, **_kwargs: candidate if symbol == "EURUSD" else {
+                 "symbol": symbol, "signal": "WAIT", "live_v3b_ready": False}), patch(
+        "services.v3b_signal_history.record_v3b_transition", side_effect=record,
+    ), patch("services.live_v3b_runtime_install.dispatch_v3b_to_live_core",
+             side_effect=uncertain_send) as dispatch:
+        with pytest.raises(RuntimeError, match="network dropped"):
+            api.run_ctrader_auto_trade_checks({})
+        api.run_ctrader_auto_trade_checks({})
+        marker["status"] = "CONSUMED"
+        api.run_ctrader_auto_trade_checks({})
+
+    assert dispatch.call_count == 1
+    assert history["execution_status"] == "EXECUTED"
+    statuses = [call.kwargs for call in api.set_auto_trade_status.call_args_list
+                if call.kwargs["symbol"] == "EURUSD"]
+    assert [row["status"] for row in statuses[-2:]] == ["RECONCILIATION_REQUIRED", "EXECUTED"]
+    api.get_event_lifecycles.assert_called_with(
+        ["event-v3b"], owner_id="OWNER", account_id="47810571")
+
+
+def test_selection_change_before_dispatch_never_sends_previous_account_candidate():
+    from ctrader_account_context import AccountIdentity
+
+    api, *_ = _fake_api()
+    api.LIVE_AUTO_TRADE_ENABLED["enabled"] = True
+    api.LIVE_ACCOUNT_STATE.update({"connected": True, "execution_ready": True})
+    api.get_ctrader_market_data.return_value = SimpleNamespace(
+        attrs={"ctrader_stream_scope": "CTRADER:DEMO:47810571"}
+    )
+    install_live_v3b_runtime(api, strict_trader_module=SimpleNamespace())
+    candidate = {**_payload(), "live_v3b_ready": True,
+                 "v3b_setup_state": {"signal": "BUY", "lifecycle_state": "ELIGIBLE"}}
+    picks = {"count": 0}
+    def switched_selection():
+        picks["count"] += 1
+        return AccountIdentity("47810571" if picks["count"] == 1 else "47784297", "demo")
+    with patch("services.live_v3b_runtime_install.live_v3b_enabled", return_value=True), patch(
+        "services.live_v3b_runtime_install.selected_identity", side_effect=switched_selection,
+    ), patch("services.live_v3b_runtime_install.build_live_v3b_candidate",
+             side_effect=lambda symbol, *_args, **_kwargs: candidate if symbol == "EURUSD" else {
+                 "symbol": symbol, "signal": "WAIT", "live_v3b_ready": False}), patch(
+        "services.v3b_signal_history.record_v3b_transition",
+        return_value={"signal": "BUY", "signal_setup_id": "setup-v3b", "execution_status": "CANDIDATE"},
+    ), patch("services.live_v3b_runtime_install.dispatch_v3b_to_live_core") as dispatch:
+        result = api.run_ctrader_auto_trade_checks({})
+    dispatch.assert_not_called()
+    assert result[0]["reason"] == "WAIT_V3B_ACCOUNT_SELECTION_CHANGED"
+
+
+def test_other_worker_submitting_does_not_poison_history_as_reconciliation():
+    from ctrader_account_context import AccountIdentity
+
+    api, *_ = _fake_api()
+    api.LIVE_AUTO_TRADE_ENABLED["enabled"] = True
+    api.LIVE_ACCOUNT_STATE.update({"connected": True, "execution_ready": True})
+    api.get_ctrader_market_data.return_value = SimpleNamespace(
+        attrs={"ctrader_stream_scope": "CTRADER:DEMO:47810571"}
+    )
+    marker = {"status": "SUBMITTING"}
+    api.get_event_lifecycles = Mock(side_effect=lambda *_args, **_kwargs: {
+        "event-v3b": {"LIVE": {"status": marker["status"]}}
+    })
+    install_live_v3b_runtime(api, strict_trader_module=SimpleNamespace())
+    candidate = {**_payload(), "live_v3b_ready": True,
+                 "v3b_setup_state": {"signal": "BUY", "lifecycle_state": "ELIGIBLE"}}
+    records = []
+
+    def record(_scope, symbol, signal, _time, **kwargs):
+        if symbol == "EURUSD" and signal == "BUY":
+            records.append(kwargs.get("execution_status"))
+        return {"signal": signal, "signal_setup_id": "setup-v3b",
+                "execution_status": "CANDIDATE"}
+
+    with patch("services.live_v3b_runtime_install.live_v3b_enabled", return_value=True), patch(
+        "services.live_v3b_runtime_install.selected_identity",
+        return_value=AccountIdentity("47810571", "demo"),
+    ), patch("services.live_v3b_runtime_install.build_live_v3b_candidate",
+             side_effect=lambda symbol, *_args, **_kwargs: candidate if symbol == "EURUSD" else {
+                 "symbol": symbol, "signal": "WAIT", "live_v3b_ready": False}), patch(
+        "services.v3b_signal_history.record_v3b_transition", side_effect=record,
+    ), patch("services.live_v3b_runtime_install.dispatch_v3b_to_live_core",
+             return_value={"ok": False, "submitted": True, "reason": "definitely rejected",
+                           "execution_result": {"broker_result": "DEFINITELY_REJECTED"}}) as dispatch:
+        api.run_ctrader_auto_trade_checks({})
+        assert dispatch.call_count == 0
+        assert records == [None]
+        marker["status"] = "ELIGIBLE"
+        api.run_ctrader_auto_trade_checks({})
+
+    assert dispatch.call_count == 1
+    assert "RECONCILIATION_REQUIRED" not in records
+    assert records[-1] == "BLOCKED"
+
+
+def test_partial_bos_history_uses_nested_canonical_identity():
+    from ctrader_account_context import AccountIdentity
+
+    api, *_ = _fake_api()
+    api.get_ctrader_market_data.return_value = SimpleNamespace(
+        attrs={"ctrader_stream_scope": "CTRADER:DEMO:47810571"}
+    )
+    install_live_v3b_runtime(api, strict_trader_module=SimpleNamespace())
+    partial = {
+        "symbol": "EURUSD", "signal": "WAIT", "live_v3b_ready": False,
+        "live_v3b_reason": "WAIT_V3B_NEXT_5M_CONFIRMATION",
+        "live_v3b_details": {"source_candidate": {
+            "source_indicator_event_id": "bos-1",
+            "five_m_break_close_time": "2026-09-17T04:35:00Z",
+            "v3b_setup_state": {"signal": "WAIT", "lifecycle_state": "WAITING_CONFIRMATION"},
+        }},
+    }
+    with patch("services.live_v3b_runtime_install.live_v3b_enabled", return_value=True), patch(
+        "services.live_v3b_runtime_install.selected_identity",
+        return_value=AccountIdentity("47810571", "demo"),
+    ), patch("services.live_v3b_runtime_install.build_live_v3b_candidate",
+             side_effect=lambda symbol, *_args, **_kwargs: partial if symbol == "EURUSD" else {
+                 "symbol": symbol, "signal": "WAIT", "live_v3b_ready": False}), patch(
+        "services.v3b_signal_history.record_v3b_transition",
+    ) as record:
+        api.run_ctrader_auto_trade_checks({})
+    call = [call for call in record.call_args_list if call.args[1] == "EURUSD"][0]
+    assert call.kwargs["event_id"] == "bos-1"
+    assert call.args[3] == "2026-09-17T04:35:00Z"
+
+
+def test_closed_5m_replay_preserves_one_event_from_partial_to_consumed():
+    from ctrader_account_context import AccountIdentity
+    from services.live_v3b_service import build_live_v3b_candidate as evaluate
+    import pandas as pd
+
+    index = pd.to_datetime(["2026-09-17T04:25:00Z", "2026-09-17T04:30:00Z", "2026-09-17T04:35:00Z"])
+    frame = pd.DataFrame({
+        "Open": [1.0998, 1.1000, 1.1017], "High": [1.1002, 1.1020, 1.1028],
+        "Low": [1.0995, 1.0995, 1.1015], "Close": [1.1000, 1.1018, 1.1025],
+    }, index=index)
+    event = {
+        "event_id": "replay-bos", "symbol": "EURUSD", "timeframe": "5m",
+        "timestamp": index[1].isoformat(), "event_type": "BOS",
+        "direction": "BULLISH", "broken_level": 1.1015,
+        "broken_swing_timestamp": "2026-09-17T04:20:00Z",
+        "event_invalidation_swing": {"type": "LOW", "price": 1.1000},
+        "tradable": True,
+    }
+
+    class Strict:
+        @staticmethod
+        def closed_frame(value, minutes):
+            assert minutes == 5
+            return value.copy()
+
+        @staticmethod
+        def point_size(symbol):
+            return 0.00001
+
+    def evaluate_symbol(symbol, data, **_kwargs):
+        if symbol != "EURUSD":
+            return {"symbol": symbol, "signal": "WAIT", "live_v3b_ready": False}
+        return evaluate(
+            symbol, data, strict_trader_module=Strict,
+            setup_id_builder=lambda _candidate, _side: "replay-setup",
+            authoritative_reader=lambda *_args: {"events": [event]}, enabled=True,
+        )
+
+    api, *_ = _fake_api()
+    api.LIVE_AUTO_TRADE_ENABLED["enabled"] = True
+    api.LIVE_ACCOUNT_STATE.update({"connected": True, "execution_ready": True})
+    stage = [0]
+    # The test frame is explicitly bound to the selected account at fetch time.
+    def scoped_fetch(symbol, *_args, **_kwargs):
+        result = frame.iloc[:2].copy() if stage[0] == 0 else frame.copy()
+        result.attrs["ctrader_stream_scope"] = "CTRADER:DEMO:47810571"
+        return result
+    api.get_ctrader_market_data.side_effect = scoped_fetch
+    expected_partial = evaluate_symbol("EURUSD", scoped_fetch("EURUSD"))
+    assert expected_partial["live_v3b_details"]["source_candidate"]["source_indicator_event_id"] == "replay-bos"
+    install_live_v3b_runtime(api, strict_trader_module=Strict)
+    recorded = {}
+
+    def record(scope, symbol, signal, _time, **kwargs):
+        assert scope == "CTRADER:DEMO:47810571"
+        if symbol != "EURUSD":
+            return {"signal": "WAIT"}
+        if signal == "WAIT":
+            assert kwargs["event_id"] == "replay-bos"
+            return {"signal": "WAIT", "event_id": "replay-bos"}
+        if not kwargs.get("execution_status"):
+            assert kwargs["event_id"] == "replay-bos"
+        if kwargs.get("execution_status") == "EXECUTED":
+            recorded.update(signal="BUY", signal_setup_id="replay-setup",
+                            execution_status="EXECUTED")
+        return recorded or {"signal": "BUY", "signal_setup_id": "replay-setup",
+                            "execution_status": "CANDIDATE"}
+
+    with patch("services.live_v3b_runtime_install.live_v3b_enabled", return_value=True), patch(
+        "services.live_v3b_runtime_install.selected_identity",
+        return_value=AccountIdentity("47810571", "demo"),
+    ), patch("services.live_v3b_runtime_install.build_live_v3b_candidate",
+             side_effect=evaluate_symbol), patch(
+        "services.v3b_signal_history.record_v3b_transition", side_effect=record,
+    ), patch("services.live_v3b_runtime_install.dispatch_v3b_to_live_core",
+             return_value={"ok": True, "submitted": True}) as dispatch:
+        first_cycle = api.run_ctrader_auto_trade_checks({})
+        assert any(call.kwargs["symbol"] == "EURUSD" for call in api.set_auto_trade_status.call_args_list), first_cycle
+        partial = [call.kwargs for call in api.set_auto_trade_status.call_args_list
+                   if call.kwargs["symbol"] == "EURUSD"][-1]
+        stage[0] = 1
+        api.run_ctrader_auto_trade_checks({})
+        eligible = [call.kwargs for call in api.set_auto_trade_status.call_args_list
+                    if call.kwargs["symbol"] == "EURUSD"][-1]
+        api.run_ctrader_auto_trade_checks({})
+        replay = [call.kwargs for call in api.set_auto_trade_status.call_args_list
+                  if call.kwargs["symbol"] == "EURUSD"][-1]
+
+    assert partial["details"]["source_candidate"]["v3b_setup_state"]["indicator_event_id"] == "replay-bos"
+    assert partial["details"]["source_candidate"]["v3b_setup_state"]["second_5m_same_direction"] is None
+    assert eligible["details"]["source_candidate"]["v3b_setup_state"]["indicator_event_id"] == "replay-bos"
+    assert eligible["details"]["source_candidate"]["v3b_setup_state"]["signal"] == "BUY"
+    assert eligible["status"] == replay["status"] == "EXECUTED"
+    assert dispatch.call_count == 1
+    assert dispatch.call_args.args[0]["source_indicator_event_id"] == "replay-bos"
+    assert dispatch.call_args.args[0]["signal_setup_id"] == "replay-setup"

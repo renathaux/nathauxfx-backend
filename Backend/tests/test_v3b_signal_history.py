@@ -84,3 +84,57 @@ def test_invalid_scope_fails_closed_without_legacy_or_unscoped_rows():
         assert list_v3b_transitions("EURUSD", session_factory=sessions) == []
     finally:
         engine.dispose()
+
+
+def test_waiting_bos_updates_current_wait_transition_with_canonical_event_identity():
+    engine, sessions = _sessions()
+    try:
+        record_v3b_transition(SCOPE, "EURUSD", "WAIT", START, session_factory=sessions)
+        record_v3b_transition(
+            SCOPE, "EURUSD", "WAIT", START + timedelta(minutes=5),
+            event_id="bos-1", reason="WAIT_V3B_NEXT_5M_CONFIRMATION",
+            session_factory=sessions,
+        )
+        rows = list_v3b_transitions(SCOPE, session_factory=sessions)
+        assert len(rows) == 1
+        assert rows[0]["event_id"] == "bos-1"
+        assert rows[0]["timestamp"] == "2026-09-17T04:35:00Z"
+        assert rows[0]["reason"] == "WAIT_V3B_NEXT_5M_CONFIRMATION"
+    finally:
+        engine.dispose()
+
+
+def test_new_same_side_setup_gets_distinct_history_and_replay_stays_irreversible():
+    engine, sessions = _sessions()
+    try:
+        first = record_v3b_transition(
+            SCOPE, "EURUSD", "BUY", START, event_id="bos-a",
+            setup_id="setup-a", session_factory=sessions,
+        )
+        record_v3b_transition(
+            SCOPE, "EURUSD", "BUY", START,
+            setup_id="setup-a", execution_status="EXECUTED",
+            session_factory=sessions,
+        )
+        second = record_v3b_transition(
+            SCOPE, "EURUSD", "BUY", START + timedelta(minutes=10),
+            event_id="bos-b", setup_id="setup-b", session_factory=sessions,
+        )
+        assert second["id"] != first["id"]
+        assert second["signal_setup_id"] == "setup-b"
+        assert second["execution_status"] == "CANDIDATE"
+        record_v3b_transition(
+            SCOPE, "EURUSD", "BUY", START + timedelta(minutes=10),
+            setup_id="setup-b", execution_status="EXECUTED",
+            session_factory=sessions,
+        )
+        replay = record_v3b_transition(
+            SCOPE, "EURUSD", "BUY", START + timedelta(minutes=10),
+            event_id="bos-b", setup_id="setup-b", session_factory=sessions,
+        )
+        rows = list_v3b_transitions(SCOPE, session_factory=sessions)
+        assert replay["execution_status"] == "EXECUTED"
+        assert [(row["signal_setup_id"], row["execution_status"]) for row in rows] == [
+            ("setup-b", "EXECUTED"), ("setup-a", "EXECUTED")]
+    finally:
+        engine.dispose()

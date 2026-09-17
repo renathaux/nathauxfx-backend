@@ -211,3 +211,22 @@ def test_non_v3b_history_remains_legacy_when_durable_rows_are_supplied():
         "history": [{"symbol": "EURUSD", "signal": "WAIT"}],
     }
     assert enrich_dashboard_payload(payload, {}, signal_history=[{"signal": "BUY"}]) == payload
+
+
+def test_previous_account_candidate_cannot_overwrite_selected_account_dashboard():
+    payload = {
+        "_meta": {"live_strategy_identity": "LIVE — V3B", "account_scope": "CTRADER:DEMO:47810571"},
+        "EURUSD": {"signal": "WAIT", "blocked_reason": "WAIT_OWN_SCOPE"},
+    }
+    statuses = {"EURUSD": {
+        "status": "BLOCKED", "reason": "WAIT_PREVIOUS_ACCOUNT",
+        "details": {"account_scope": "CTRADER:DEMO:47784297", "source_candidate": {
+            "signal": "BUY", "source_indicator_event_id": "other-account-event",
+        }},
+    }}
+    result = enrich_dashboard_payload(payload, statuses)
+    assert result["EURUSD"] == payload["EURUSD"]
+
+    statuses["EURUSD"]["details"].pop("account_scope")
+    unscoped = enrich_dashboard_payload(payload, statuses)
+    assert unscoped["EURUSD"] == payload["EURUSD"]
