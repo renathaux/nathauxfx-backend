@@ -77,6 +77,31 @@ def test_partial_final_bucket_is_excluded():
     assert pd.Timestamp("2026-09-17T00:15:00Z") not in result.index
 
 
+def test_partial_initial_bucket_is_excluded():
+    frame = _frame([
+        (1.00, 1.03, 0.99, 1.02),
+        (1.02, 1.05, 1.01, 1.04),
+        (1.04, 1.06, 1.03, 1.05),
+        (1.05, 1.07, 1.04, 1.06),
+        (1.06, 1.08, 1.05, 1.07),
+    ], start="2026-09-17T00:05:00Z")
+    result = aggregate_closed(frame, "15m", end_exclusive=pd.Timestamp("2026-09-17T00:30:00Z"))
+    assert pd.Timestamp("2026-09-17T00:00:00Z") not in result.index
+    assert list(result.index) == [pd.Timestamp("2026-09-17T00:15:00Z")]
+
+
+def test_bucket_with_missing_5m_candle_is_excluded():
+    frame = _frame([
+        (1.00, 1.03, 0.99, 1.02),
+        (1.02, 1.05, 1.01, 1.04),
+        (1.04, 1.06, 1.03, 1.05),
+        (1.05, 1.07, 1.04, 1.06),
+    ])
+    frame = frame.drop(pd.Timestamp("2026-09-17T00:05:00Z"))
+    result = aggregate_closed(frame, "15m", end_exclusive=pd.Timestamp("2026-09-17T00:20:00Z"))
+    assert pd.Timestamp("2026-09-17T00:00:00Z") not in result.index
+
+
 def test_market_facts_exposes_bos_or_choch_and_trend_values():
     # This fixture deliberately produces enough pivots and a later breakout for
     # the existing SMC engine.  The assertion is on the shared facts contract,
