@@ -77,30 +77,7 @@ jobs:
           if grep -q "def select_auto_execution_candidate" Backend/api.py; then
             echo "Task 5 API wiring already present"
           else
-            python - <<'PY'
-          from pathlib import Path
-          path = Path("scripts/apply_task5_api_patch.py")
-          text = path.read_text(encoding="utf-8")
-          old = '''    text = replace_once(
-                  text,
-                  '        "signal_setup_id": get_signal_setup_id(plan, side),\\n',
-                  '        "signal_setup_id": plan.get("signal_setup_id") or get_signal_setup_id(plan, side),\\n',
-                  "preserve Studio setup id",
-              )
-          '''
-          new = '''    setup_anchor = '        "signal_setup_id": get_signal_setup_id(plan, side),\\n'
-              if setup_anchor not in text:
-                  raise RuntimeError("preserve Studio setup id: anchor not found")
-              text = text.replace(
-                  setup_anchor,
-                  '        "signal_setup_id": plan.get("signal_setup_id") or get_signal_setup_id(plan, side),\\n',
-                  1,
-              )
-          '''
-          if old not in text:
-              raise RuntimeError("temporary patch-runner anchor block not found")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
-          PY
+            python -c 'from pathlib import Path; p=Path("scripts/apply_task5_api_patch.py"); t=p.read_text(encoding="utf-8"); old="    if count != 1:\n"; new="    if count != 1 and not (label == \"preserve Studio setup id\" and count == 2):\n"; assert t.count(old) == 1; p.write_text(t.replace(old, new, 1), encoding="utf-8")'
             python scripts/apply_task5_api_patch.py
           fi
 
