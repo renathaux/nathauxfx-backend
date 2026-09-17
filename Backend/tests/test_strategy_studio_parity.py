@@ -33,13 +33,16 @@ class FakeModule:
     def evaluate_event(event, timestamp, _prefix, frame5, side, _leg, _settings, _end, previous_close=None):
         del previous_close
         confirmation_time = frame5.index[1]
+        entry = float(frame5.iloc[1].Close)
+        stop = 1.0945
+        risk = abs(entry - stop)
         trade = {
             "side": side,
             "event_timestamp": pd.Timestamp(timestamp).isoformat(),
             "m5_confirmation_timestamp": pd.Timestamp(confirmation_time).isoformat(),
-            "entry": float(frame5.iloc[1].Close),
-            "sl": 1.0945,
-            "tp2": 1.11365,
+            "entry": entry,
+            "sl": stop,
+            "tp2": entry + 1.9 * risk,
             "broken_level": float(event["broken_level"]),
         }
         return trade, None, {}
