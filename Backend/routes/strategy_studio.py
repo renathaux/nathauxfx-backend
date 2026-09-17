@@ -140,6 +140,20 @@ def _parity_summary(report: dict) -> dict:
     }
 
 
+def _unavailable_readiness(reason: str) -> dict:
+    return {
+        "ready": False,
+        "parity_verified": False,
+        "parity_status": "REQUIRES_VERIFICATION",
+        "active_strategy_id": None,
+        "configured_symbols": [],
+        "account_scope": None,
+        "unresolved_reconciliation": False,
+        "reports": {},
+        "reason": reason,
+    }
+
+
 def evaluate_live_handoff_readiness(owner: str) -> dict:
     """Recompute entry parity from durable selected-account candles.
 
@@ -150,15 +164,8 @@ def evaluate_live_handoff_readiness(owner: str) -> dict:
     active = _active_strategy(owner)
     if not active:
         return {
-            "ready": False,
-            "parity_verified": False,
-            "parity_status": "REQUIRES_VERIFICATION",
-            "active_strategy_id": None,
-            "configured_symbols": [],
-            "account_scope": None,
+            **_unavailable_readiness("STRATEGY_STUDIO_ACTIVE_STRATEGY_REQUIRED"),
             "unresolved_reconciliation": has_unresolved_studio_reconciliation(owner),
-            "reports": {},
-            "reason": "STRATEGY_STUDIO_ACTIVE_STRATEGY_REQUIRED",
         }
 
     definition = active.get("definition") or {}
@@ -385,7 +392,12 @@ def strategy_parity_run(payload: ParityRunRequest, request: Request):
 def strategy_live_status(request: Request):
     owner = owner_key(_actor(request))
     state = get_studio_live_state(owner)
-    readiness = evaluate_live_handoff_readiness(owner)
+    try:
+        readiness = evaluate_live_handoff_readiness(owner)
+    except Exception as exc:
+        readiness = _unavailable_readiness(
+            f"STRATEGY_STUDIO_READINESS_UNAVAILABLE: {exc}"
+        )
     return {
         "ok": True,
         **state,
