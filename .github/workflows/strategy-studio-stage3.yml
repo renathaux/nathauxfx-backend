@@ -1,0 +1,47 @@
+name: Strategy Studio Stage 3
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  parity-shadow-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: Backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: Backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest httpx2
+
+      - name: Run Stage 3 parity, handoff, management, and V3B regressions
+        env:
+          DATABASE_URL: "sqlite:///:memory:"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python -c 'import sys, pytest; from db import Base, engine; import models; Base.metadata.create_all(engine); sys.exit(pytest.main(sys.argv[1:]))' -q \
+            tests/test_strategy_studio_parity.py \
+            tests/test_strategy_studio_real_history_parity_snapshot.py \
+            tests/test_strategy_studio_submission.py \
+            tests/test_strategy_studio_live_candidate.py \
+            tests/test_strategy_studio_live_handoff.py \
+            tests/test_strategy_studio_position_manager.py \
+            tests/test_strategy_studio_account_switch.py \
+            tests/test_strategy_engine_evaluator.py \
+            tests/test_strategy_engine_market_facts.py \
+            tests/test_strategy_lab_v3b.py \
+            tests/test_strategy_lab_v3b_choch_acceptance.py

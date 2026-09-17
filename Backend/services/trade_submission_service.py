@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from db import SessionLocal
-from models import ExecutionProtocolState, IndicatorEventLifecycle, TradeSubmissionAttempt
+from models import (
+    ExecutionProtocolState,
+    IndicatorEventLifecycle,
+    StrategySetupLifecycle,
+    TradeSubmissionAttempt,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +27,8 @@ BLOCKING_ATTEMPT_STATUSES = {
 }
 EXECUTION_PROTOCOL_VERSION = "indicator-event-execution-v2"
 DEFAULT_OWNER_ID = "OWNER"
+INDICATOR_EVENT_LIFECYCLE = "INDICATOR_EVENT"
+STRATEGY_STUDIO_LIFECYCLE = "STRATEGY_STUDIO"
 
 ACCEPTED = "ACCEPTED"
 DEFINITELY_REJECTED = "DEFINITELY_REJECTED"
@@ -91,6 +98,67 @@ def verify_execution_protocol(*, session_factory=None, session=None):
             current.close()
 
 
+def _lifecycle_kind(attempt):
+    return str(
+        getattr(attempt, "lifecycle_kind", None) or INDICATOR_EVENT_LIFECYCLE
+    ).upper()
+
+
+def _load_lifecycle_for_attempt(session, attempt, *, for_update=False):
+    """Load the lifecycle owned by one submission attempt, optionally locked."""
+    if _lifecycle_kind(attempt) == STRATEGY_STUDIO_LIFECYCLE:
+        query = session.query(StrategySetupLifecycle).filter(
+            StrategySetupLifecycle.setup_id == str(attempt.signal_setup_id),
+            StrategySetupLifecycle.owner_id == str(attempt.owner_id),
+            StrategySetupLifecycle.account_id == str(attempt.account_id),
+            StrategySetupLifecycle.symbol == str(attempt.symbol),
+        )
+    else:
+        query = session.query(IndicatorEventLifecycle).filter(
+            IndicatorEventLifecycle.event_id == str(attempt.event_id),
+            IndicatorEventLifecycle.mode == str(attempt.mode).upper(),
+            IndicatorEventLifecycle.owner_id == str(attempt.owner_id),
+            IndicatorEventLifecycle.account_id == str(attempt.account_id),
+        )
+    if for_update:
+        query = query.with_for_update()
+    return query.one_or_none()
+
+
+def _transition_lifecycle_status(session, attempt, allowed, status, now, *, result=None):
+    """Atomically transition the lifecycle paired with an attempt."""
+    if _lifecycle_kind(attempt) == STRATEGY_STUDIO_LIFECYCLE:
+        values = {
+            StrategySetupLifecycle.status: status,
+            StrategySetupLifecycle.updated_at: now,
+        }
+        if status == "CONSUMED":
+            position_id = str((result or {}).get("position_id") or "") or None
+            if position_id:
+                values[StrategySetupLifecycle.broker_position_id] = position_id
+        return session.query(StrategySetupLifecycle).filter(
+            StrategySetupLifecycle.setup_id == str(attempt.signal_setup_id),
+            StrategySetupLifecycle.owner_id == str(attempt.owner_id),
+            StrategySetupLifecycle.account_id == str(attempt.account_id),
+            StrategySetupLifecycle.symbol == str(attempt.symbol),
+            StrategySetupLifecycle.status.in_(allowed),
+        ).update(values, synchronize_session=False)
+
+    lifecycle_values = {
+        IndicatorEventLifecycle.status: status,
+        IndicatorEventLifecycle.updated_at: now,
+    }
+    if status == "CONSUMED":
+        lifecycle_values[IndicatorEventLifecycle.consumed_at] = now
+    return session.query(IndicatorEventLifecycle).filter(
+        IndicatorEventLifecycle.event_id == str(attempt.event_id),
+        IndicatorEventLifecycle.mode == str(attempt.mode).upper(),
+        IndicatorEventLifecycle.owner_id == str(attempt.owner_id),
+        IndicatorEventLifecycle.account_id == str(attempt.account_id),
+        IndicatorEventLifecycle.status.in_(allowed),
+    ).update(lifecycle_values, synchronize_session=False)
+
+
 def claim_submission(event_id, mode, account_id, symbol, signal_setup_id, payload, *, owner_id=DEFAULT_OWNER_ID, direction=None, session_factory=None, _db_retry_count=0):
     direction = str(direction or (payload or {}).get("action") or (payload or {}).get("signal") or "").upper()
     if not all([event_id, owner_id, account_id, symbol, signal_setup_id, direction]):
@@ -138,10 +206,12 @@ def claim_submission(event_id, mode, account_id, symbol, signal_setup_id, payloa
             existing.request_started_at = None
             existing.updated_at = now
             existing.last_error = None
+            existing.lifecycle_kind = INDICATOR_EVENT_LIFECYCLE
             session.commit()
             return {"ok": True, "idempotency_key": key, "broker_request_id": key, "broker_client_order_id": client_id, "broker_label": broker_references["label"], "broker_comment": broker_references["comment"], "attempt_id": existing.id}
         attempt = TradeSubmissionAttempt(
-            event_id=str(event_id), mode=str(mode).upper(), account_id=str(account_id),
+            event_id=str(event_id), lifecycle_kind=INDICATOR_EVENT_LIFECYCLE,
+            mode=str(mode).upper(), account_id=str(account_id),
             owner_id=str(owner_id), direction=direction,
             symbol=identity["symbol"], signal_setup_id=str(signal_setup_id),
             idempotency_key=key, attempt_status="SUBMITTING", claimed_at=now,
@@ -171,6 +241,175 @@ def claim_submission(event_id, mode, account_id, symbol, signal_setup_id, payloa
     except Exception as exc:
         session.rollback()
         return {"ok": False, "reason": f"submission claim failed: {exc}", "idempotency_key": key}
+    finally:
+        session.close()
+
+
+def claim_strategy_submission(setup_id, account_id, symbol, direction, payload, *, owner_id, strategy_id, session_factory=None, _db_retry_count=0):
+    """Atomically claim one eligible Strategy Studio setup for LIVE submission.
+
+    This function does not call the broker. It only claims durable state and
+    creates the same submission-attempt envelope used by the existing execution
+    protocol. The Strategy Studio LIVE feature gate is enforced by the caller;
+    merely having this function available never enables Studio LIVE execution.
+    """
+    public_symbol = str(symbol or "").upper().replace("/", "")
+    public_direction = str(direction or "").upper()
+    setup_id = str(setup_id or "")
+    owner_id = str(owner_id or "")
+    strategy_id = str(strategy_id or "")
+    account_id = str(account_id or "")
+    event_id = f"studio:{setup_id}"
+    if not all([setup_id, owner_id, strategy_id, account_id, public_symbol, public_direction]):
+        return {"ok": False, "reason": "missing durable Strategy Studio submission identity"}
+    if public_direction not in {"BUY", "SELL"}:
+        return {"ok": False, "reason": "invalid Strategy Studio submission direction"}
+    if len(event_id) > 80:
+        return {"ok": False, "reason": "Strategy Studio setup identity exceeds submission limit"}
+
+    factory = session_factory or SessionLocal
+    identity, key = submission_identity(
+        event_id, "LIVE", owner_id, account_id, public_symbol, setup_id
+    )
+    broker_references = broker_order_references(key)
+    client_id = broker_references["client_order_id"]
+    now = datetime.now(timezone.utc)
+    session = factory()
+    try:
+        if not verify_execution_protocol(session=session):
+            session.rollback()
+            return {"ok": False, "reason": "execution protocol fence absent or incompatible"}
+
+        lifecycle = session.query(StrategySetupLifecycle).filter(
+            StrategySetupLifecycle.setup_id == setup_id,
+            StrategySetupLifecycle.owner_id == owner_id,
+            StrategySetupLifecycle.strategy_id == strategy_id,
+            StrategySetupLifecycle.account_id == account_id,
+            StrategySetupLifecycle.symbol == public_symbol,
+            StrategySetupLifecycle.direction == public_direction,
+        ).with_for_update().one_or_none()
+        if lifecycle is None or str(lifecycle.status).upper() != "ELIGIBLE":
+            session.rollback()
+            return {
+                "ok": False,
+                "reason": "Strategy Studio setup is not atomically claimable for this scope",
+                "status": getattr(lifecycle, "status", None),
+                "idempotency_key": key,
+            }
+
+        changed = session.query(StrategySetupLifecycle).filter(
+            StrategySetupLifecycle.setup_id == setup_id,
+            StrategySetupLifecycle.owner_id == owner_id,
+            StrategySetupLifecycle.strategy_id == strategy_id,
+            StrategySetupLifecycle.account_id == account_id,
+            StrategySetupLifecycle.symbol == public_symbol,
+            StrategySetupLifecycle.direction == public_direction,
+            StrategySetupLifecycle.status == "ELIGIBLE",
+        ).update({
+            StrategySetupLifecycle.status: "SUBMITTING",
+            StrategySetupLifecycle.updated_at: now,
+        }, synchronize_session=False)
+        if changed != 1:
+            session.rollback()
+            return {
+                "ok": False,
+                "reason": "Strategy Studio setup claim lost",
+                "idempotency_key": key,
+            }
+
+        existing = session.query(TradeSubmissionAttempt).filter_by(
+            idempotency_key=key
+        ).with_for_update().one_or_none()
+        if existing is not None:
+            if (
+                existing.attempt_status != "FAILED_BEFORE_SEND"
+                or _lifecycle_kind(existing) != STRATEGY_STUDIO_LIFECYCLE
+            ):
+                session.rollback()
+                return {
+                    "ok": False,
+                    "reason": "submission already claimed",
+                    "status": existing.attempt_status,
+                    "idempotency_key": key,
+                }
+            existing.attempt_status = "SUBMITTING"
+            existing.claimed_at = now
+            existing.request_started_at = None
+            existing.updated_at = now
+            existing.last_error = None
+            session.commit()
+            return {
+                "ok": True,
+                "idempotency_key": key,
+                "broker_request_id": key,
+                "broker_client_order_id": client_id,
+                "broker_label": broker_references["label"],
+                "broker_comment": broker_references["comment"],
+                "attempt_id": existing.id,
+            }
+
+        attempt = TradeSubmissionAttempt(
+            event_id=event_id,
+            lifecycle_kind=STRATEGY_STUDIO_LIFECYCLE,
+            mode="LIVE",
+            account_id=account_id,
+            owner_id=owner_id,
+            direction=public_direction,
+            symbol=identity["symbol"],
+            signal_setup_id=setup_id,
+            idempotency_key=key,
+            attempt_status="SUBMITTING",
+            claimed_at=now,
+            broker_request_id=key,
+            broker_client_order_id=client_id,
+            request_payload_fingerprint=_hash(_json(payload)),
+            reconciliation_status="NOT_REQUIRED",
+            updated_at=now,
+        )
+        session.add(attempt)
+        session.commit()
+        return {
+            "ok": True,
+            "idempotency_key": key,
+            "broker_request_id": key,
+            "broker_client_order_id": client_id,
+            "broker_label": broker_references["label"],
+            "broker_comment": broker_references["comment"],
+            "attempt_id": attempt.id,
+        }
+    except IntegrityError:
+        session.rollback()
+        return {"ok": False, "reason": "submission already claimed", "idempotency_key": key}
+    except OperationalError as exc:
+        session.rollback()
+        if (
+            _db_retry_count < MAX_SAFE_DB_RETRIES
+            and _retryable_postgres_transaction_error(exc)
+        ):
+            time.sleep(0.01 * (2 ** _db_retry_count))
+            return claim_strategy_submission(
+                setup_id,
+                account_id,
+                public_symbol,
+                public_direction,
+                payload,
+                owner_id=owner_id,
+                strategy_id=strategy_id,
+                session_factory=factory,
+                _db_retry_count=_db_retry_count + 1,
+            )
+        return {
+            "ok": False,
+            "reason": f"Strategy Studio submission claim failed: {exc}",
+            "idempotency_key": key,
+        }
+    except Exception as exc:
+        session.rollback()
+        return {
+            "ok": False,
+            "reason": f"Strategy Studio submission claim failed: {exc}",
+            "idempotency_key": key,
+        }
     finally:
         session.close()
 
@@ -209,10 +448,9 @@ def recover_unsent_claim(key, *, session_factory=None, _db_retry_count=0):
         unlocked = session.query(TradeSubmissionAttempt).filter_by(idempotency_key=str(key)).one_or_none()
         if unlocked is None:
             session.rollback(); return False
-        session.query(IndicatorEventLifecycle).filter_by(
-            event_id=unlocked.event_id, mode=unlocked.mode,
-            owner_id=unlocked.owner_id, account_id=unlocked.account_id,
-        ).with_for_update().one()
+        lifecycle = _load_lifecycle_for_attempt(session, unlocked, for_update=True)
+        if lifecycle is None:
+            session.rollback(); return False
         row = session.query(TradeSubmissionAttempt).filter_by(idempotency_key=str(key)).with_for_update().one_or_none()
         if row is None or row.attempt_status != "SUBMITTING" or row.request_started_at is not None:
             session.rollback(); return False
@@ -226,16 +464,9 @@ def recover_unsent_claim(key, *, session_factory=None, _db_retry_count=0):
             TradeSubmissionAttempt.reconciliation_status: "NOT_REQUIRED",
             TradeSubmissionAttempt.updated_at: now,
         }, synchronize_session=False)
-        lifecycle_changed = session.query(IndicatorEventLifecycle).filter(
-            IndicatorEventLifecycle.event_id == row.event_id,
-            IndicatorEventLifecycle.mode == row.mode,
-            IndicatorEventLifecycle.owner_id == row.owner_id,
-            IndicatorEventLifecycle.account_id == row.account_id,
-            IndicatorEventLifecycle.status == "SUBMITTING",
-        ).update({
-            IndicatorEventLifecycle.status: "ELIGIBLE",
-            IndicatorEventLifecycle.updated_at: now,
-        }, synchronize_session=False)
+        lifecycle_changed = _transition_lifecycle_status(
+            session, row, {"SUBMITTING"}, "ELIGIBLE", now
+        )
         if attempt_changed != 1 or lifecycle_changed != 1:
             logger.error("Failed closed while recovering unsent claim %s", key)
             session.rollback(); return False
@@ -404,10 +635,9 @@ def _transition_attempt(key, allowed, status, *, result=None, error=None, reques
         unlocked = session.query(TradeSubmissionAttempt).filter_by(idempotency_key=str(key)).one_or_none()
         if unlocked is None:
             session.rollback(); return False
-        session.query(IndicatorEventLifecycle).filter_by(
-            event_id=unlocked.event_id, mode=unlocked.mode,
-            owner_id=unlocked.owner_id, account_id=unlocked.account_id,
-        ).with_for_update().one()
+        lifecycle = _load_lifecycle_for_attempt(session, unlocked, for_update=True)
+        if lifecycle is None:
+            session.rollback(); return False
         row = session.query(TradeSubmissionAttempt).filter_by(idempotency_key=str(key)).with_for_update().one_or_none()
         if row is None or row.attempt_status not in allowed:
             session.rollback(); return False
@@ -436,19 +666,14 @@ def _transition_attempt(key, allowed, status, *, result=None, error=None, reques
             logger.error("Invalid or lost submission transition %s -> %s for %s", sorted(allowed), status, key)
             session.rollback(); return False
         if lifecycle_status:
-            lifecycle_values = {
-                IndicatorEventLifecycle.status: lifecycle_status,
-                IndicatorEventLifecycle.updated_at: now,
-            }
-            if lifecycle_status == "CONSUMED":
-                lifecycle_values[IndicatorEventLifecycle.consumed_at] = now
-            lifecycle_changed = session.query(IndicatorEventLifecycle).filter(
-                IndicatorEventLifecycle.event_id == row.event_id,
-                IndicatorEventLifecycle.mode == row.mode,
-                IndicatorEventLifecycle.owner_id == row.owner_id,
-                IndicatorEventLifecycle.account_id == row.account_id,
-                IndicatorEventLifecycle.status.in_(allowed),
-            ).update(lifecycle_values, synchronize_session=False)
+            lifecycle_changed = _transition_lifecycle_status(
+                session,
+                row,
+                allowed,
+                lifecycle_status,
+                now,
+                result=result,
+            )
             if lifecycle_changed != 1:
                 logger.error("Failed closed while transitioning lifecycle for submission %s", key)
                 session.rollback(); return False

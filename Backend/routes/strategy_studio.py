@@ -1,15 +1,20 @@
-"""Authenticated Strategy Studio CRUD API.
+"""Authenticated Strategy Studio CRUD and read-only parity diagnostics.
 
-Stage 1 is persistence/UI metadata only.  Nothing in this module imports or
-invokes LIVE/PAPER execution, cTrader order handling, or production strategy
-configuration.
+Strategy Studio parity/status endpoints are observation-only. They do not place
+orders, alter LIVE Auto, switch accounts, or enable the LIVE handoff gate.
 """
 from __future__ import annotations
+
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 
+from ctrader_account_context import selected_identity
 from services.customer_forex_guard import _bearer
+from services.strategy_simulator_data_source import load_simulation_5m
+from services.strategy_studio_live_state import get_studio_live_state
+from services.strategy_studio_parity import compare_v3b_entry_decisions
 from services.strategy_studio_schema import (
     normalize_definition,
     strategy_summary,
@@ -45,6 +50,12 @@ class StrategyCloneRequest(BaseModel):
 
 class ConfirmRequest(BaseModel):
     confirm: bool = False
+
+
+class ParityRunRequest(BaseModel):
+    symbol: str
+    start: datetime
+    end: datetime
 
 
 def owner_key(actor):
@@ -196,3 +207,49 @@ def strategy_delete(strategy_id: str, payload: ConfirmRequest, request: Request)
         return {"ok": True, "deleted": bool(deleted), "strategy_id": strategy_id}
     except Exception as exc:
         raise _service_http_error(exc) from exc
+
+
+@router.post("/parity/run")
+def strategy_parity_run(payload: ParityRunRequest, request: Request):
+    owner = owner_key(_actor(request))
+    symbol = str(payload.symbol or "").upper().replace("/", "")
+    if symbol not in {"EURUSD", "XAUUSD"}:
+        raise HTTPException(status_code=400, detail="PARITY_SYMBOL_UNSUPPORTED")
+    if payload.end <= payload.start:
+        raise HTTPException(status_code=400, detail="PARITY_RANGE_INVALID")
+    identity = selected_identity()
+    if identity is None:
+        raise HTTPException(status_code=409, detail="CTRADER_ACCOUNT_NOT_SELECTED")
+    try:
+        frame = load_simulation_5m(
+            symbol,
+            payload.start,
+            payload.end,
+            stream_scope=identity.scope,
+        )
+        report = compare_v3b_entry_decisions(
+            symbol,
+            frame,
+            account_scope=identity.scope,
+        )
+        state = get_studio_live_state(owner)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        **report,
+        "live_handoff_enabled": bool(state.get("enabled")),
+    }
+
+
+@router.get("/live-status")
+def strategy_live_status(request: Request):
+    owner = owner_key(_actor(request))
+    state = get_studio_live_state(owner)
+    return {
+        "ok": True,
+        **state,
+        "parity_status": "REQUIRES_VERIFICATION",
+        "entry_parity_only": True,
+        "post_entry_management_compared": False,
+    }
