@@ -3,9 +3,8 @@
 The production trading engine already keeps its authoritative per-symbol V3B
 runtime result in ``LIVE_AUTO_STATUS_BY_SYMBOL``.  The legacy dashboard payload,
 however, can still contain the older 15m strategy block reason.  This module
-adds the current V3B runtime fields to dashboard JSON responses without changing
-signals, execution eligibility, risk, order submission, lifecycle state, or the
-legacy fields themselves.
+projects the current V3B runtime state into dashboard JSON without changing
+signals, execution eligibility, risk, order submission, or lifecycle state.
 """
 from __future__ import annotations
 
@@ -51,10 +50,9 @@ def _is_v3b_payload(payload, live_status_by_symbol):
 def enrich_dashboard_payload(payload, live_status_by_symbol):
     """Return a copy with authoritative V3B runtime diagnostics per symbol.
 
-    Existing legacy ``block_reason`` / ``blocked_reason`` fields are intentionally
-    left untouched.  The frontend's V3B renderer prefers the explicit
-    ``live_v3b_*`` fields, while any remaining legacy consumers continue to see
-    the payload they already expect.
+    Generic dashboard blocker fields follow the active V3B runtime rather than
+    the obsolete 15m diagnostic. This is presentation-only; the trading engine
+    and stored indicator-stream state are not changed.
     """
     if not isinstance(payload, dict):
         return payload
@@ -63,6 +61,17 @@ def enrich_dashboard_payload(payload, live_status_by_symbol):
     statuses = live_status_by_symbol if isinstance(live_status_by_symbol, dict) else {}
     if not _is_v3b_payload(result, statuses):
         return result
+    meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else {}
+    explicit_v3b_identity = any(
+        "V3B" in _text(value).upper()
+        for value in (
+            meta.get("live_strategy_identity"),
+            meta.get("live_strategy_id"),
+            meta.get("live_strategy_model"),
+            result.get("live_strategy_identity"),
+            result.get("live_strategy_model"),
+        )
+    )
 
     for symbol in ("EURUSD", "XAUUSD"):
         plan = result.get(symbol)
@@ -89,6 +98,15 @@ def enrich_dashboard_payload(payload, live_status_by_symbol):
         plan["live_v3b_details"] = details
         plan["live_v3b_status"] = status.get("status")
         plan["live_v3b_checked_at"] = status.get("checked_at")
+
+        if _text(reason) and ("V3B" in _text(reason).upper() or explicit_v3b_identity):
+            waiting = _text(status.get("status")).upper() in {"WAIT", "BLOCKED"}
+            active_reason = reason if waiting else None
+            plan["block_reason"] = active_reason
+            plan["blocked_reason"] = active_reason
+            plan["plan_reason"] = active_reason
+            plan["blocked_by"] = "v3b_runtime" if waiting else None
+            plan["blocker_rule_name"] = "v3b_runtime" if waiting else None
 
     return result
 

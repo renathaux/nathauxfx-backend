@@ -1,6 +1,38 @@
 from services.v3b_dashboard_state import enrich_dashboard_payload
 
 
+def test_active_v3b_dashboard_does_not_expose_legacy_15m_stream_block():
+    payload = {
+        "_meta": {"live_strategy_identity": "LIVE — V3B"},
+        "EURUSD": {
+            "signal": "WAIT",
+            "block_reason": "WAIT_INDICATOR_EVENT_STREAM_UNAVAILABLE",
+            "blocked_reason": "WAIT_INDICATOR_EVENT_STREAM_UNAVAILABLE",
+            "blocked_by": "WAIT_INDICATOR_EVENT_STREAM_UNAVAILABLE",
+            "plan_reason": "WAIT_INDICATOR_EVENT_STREAM_UNAVAILABLE",
+            "signal_data_source": {"latest_5m_time": "2026-09-17T01:15:00+00:00"},
+        },
+    }
+    statuses = {
+        "EURUSD": {
+            "status": "WAIT",
+            "reason": "WAIT_V3B_PAPER_5M_BOS",
+            "checked_at": 1789608000.0,
+            "details": {"source_candidate": {"symbol": "EURUSD", "signal": "WAIT"}},
+        }
+    }
+
+    result = enrich_dashboard_payload(payload, statuses)["EURUSD"]
+
+    assert result["signal"] == "WAIT"
+    assert result["blocked_reason"] == "WAIT_V3B_PAPER_5M_BOS"
+    assert result["block_reason"] == "WAIT_V3B_PAPER_5M_BOS"
+    assert result["plan_reason"] == "WAIT_V3B_PAPER_5M_BOS"
+    assert result["blocked_by"] == "v3b_runtime"
+    assert result["signal_data_source"]["latest_5m_time"] == "2026-09-17T01:15:00+00:00"
+    assert payload["EURUSD"]["blocked_reason"] == "WAIT_INDICATOR_EVENT_STREAM_UNAVAILABLE"
+
+
 def test_enrich_dashboard_payload_prefers_live_v3b_runtime_state():
     payload = {
         "EURUSD": {
@@ -52,10 +84,71 @@ def test_enrich_dashboard_payload_prefers_live_v3b_runtime_state():
         assert plan["live_v3b_reason"] == "WAIT_V3B_PAPER_5M_BOS"
         assert plan["live_v3b_status"] == "WAIT"
         assert plan["live_v3b_details"]["source_candidate"]["symbol"] == symbol
-        # Preserve compatibility fields; the V3B frontend renderer will prefer
-        # the explicit live_v3b_* fields instead of rewriting legacy payloads.
-        assert plan["block_reason"] == "WAIT_NO_FRESH_15M_SMC_BREAK"
-        assert plan["blocked_reason"] == "WAIT_NO_FRESH_15M_SMC_BREAK"
+        assert plan["block_reason"] == "WAIT_V3B_PAPER_5M_BOS"
+        assert plan["blocked_reason"] == "WAIT_V3B_PAPER_5M_BOS"
+
+
+def test_v3b_dashboard_keeps_real_5m_authority_block_fail_closed():
+    payload = {
+        "_meta": {"live_strategy_identity": "LIVE — V3B"},
+        "EURUSD": {
+            "signal": "WAIT",
+            "blocked_reason": "WAIT_INDICATOR_EVENT_STREAM_UNAVAILABLE",
+            "execution_allowed": False,
+        },
+    }
+    statuses = {
+        "EURUSD": {
+            "status": "WAIT",
+            "reason": "WAIT_V3B_5M_AUTHORITY_STALE",
+            "checked_at": 1789608000.0,
+            "details": {"source_candidate": {"symbol": "EURUSD", "signal": "WAIT"}},
+        }
+    }
+
+    result = enrich_dashboard_payload(payload, statuses)["EURUSD"]
+
+    assert result["blocked_reason"] == "WAIT_V3B_5M_AUTHORITY_STALE"
+    assert result["signal"] == "WAIT"
+    assert result["execution_allowed"] is False
+
+
+def test_active_v3b_dashboard_shows_broker_block_instead_of_legacy_15m_block():
+    payload = {
+        "_meta": {"live_strategy_identity": "LIVE — V3B"},
+        "EURUSD": {
+            "signal": "WAIT",
+            "blocked_reason": "WAIT_INDICATOR_EVENT_STREAM_UNAVAILABLE",
+        },
+    }
+    statuses = {
+        "EURUSD": {
+            "status": "BLOCKED",
+            "reason": "Live Auto paused — broker disconnected",
+            "details": {},
+        }
+    }
+
+    result = enrich_dashboard_payload(payload, statuses)["EURUSD"]
+
+    assert result["blocked_reason"] == "Live Auto paused — broker disconnected"
+    assert result["blocked_by"] == "v3b_runtime"
+    assert result["signal"] == "WAIT"
+
+
+def test_v3b_dashboard_does_not_hide_legacy_block_without_v3b_runtime_status():
+    payload = {
+        "_meta": {"live_strategy_identity": "LIVE — V3B"},
+        "EURUSD": {
+            "signal": "WAIT",
+            "blocked_reason": "WAIT_INDICATOR_EVENT_STREAM_UNAVAILABLE",
+        },
+    }
+
+    result = enrich_dashboard_payload(payload, {})["EURUSD"]
+
+    assert result["blocked_reason"] == "WAIT_INDICATOR_EVENT_STREAM_UNAVAILABLE"
+    assert result["signal"] == "WAIT"
 
 
 def test_enrich_dashboard_payload_is_noop_for_non_v3b_payload():
