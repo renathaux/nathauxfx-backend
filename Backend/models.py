@@ -117,6 +117,33 @@ class IndicatorEventLifecycle(Base):
     consumed_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class V3BSignalTransition(Base):
+    """Durable account-scoped V3B signal state, independent of order execution."""
+
+    __tablename__ = "v3b_signal_transitions"
+    __table_args__ = (
+        UniqueConstraint("account_scope", "symbol", "ordinal", name="uq_v3b_signal_stream_ordinal"),
+        Index("ix_v3b_signal_scope_time", "account_scope", "signal_timestamp"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_scope = Column(String(100), nullable=False)
+    symbol = Column(String(20), nullable=False)
+    ordinal = Column(Integer, nullable=False)
+    signal = Column(String(10), nullable=False)
+    signal_timestamp = Column(DateTime(timezone=True), nullable=False)
+    strategy_profile = Column(String(50), nullable=False, default="V3B_M5_FROZEN")
+    event_id = Column(String(80), nullable=True)
+    confirmation_id = Column(String(80), nullable=True)
+    setup_id = Column(String(80), nullable=True)
+    signal_creation_state = Column(String(30), nullable=False)
+    execution_status = Column(String(30), nullable=False)
+    reason = Column(String(255), nullable=True)
+    confidence = Column(Float, nullable=True)
+    entry = Column(Float, nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class TradeSubmissionAttempt(Base):
     """Durable exactly-once claim and broker reconciliation record."""
 

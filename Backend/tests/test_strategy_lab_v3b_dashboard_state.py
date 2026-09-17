@@ -187,3 +187,27 @@ def test_v3b_runtime_reason_can_activate_bridge_without_meta_identity():
 
     assert result["EURUSD"]["live_v3b_reason"] == "WAIT_V3B_RUNTIME_EVALUATION"
     assert result["EURUSD"]["live_v3b_details"]["error"] == "example"
+
+
+def test_v3b_history_replaces_legacy_history_without_rewriting_blocked_buy():
+    payload = {
+        "_meta": {"live_strategy_identity": "LIVE — V3B"},
+        "EURUSD": {"signal": "WAIT"},
+        "history": [{"symbol": "EURUSD", "signal": "WAIT", "timestamp": "2026-09-01T00:00:00Z"}],
+    }
+    durable = [{
+        "symbol": "EURUSD", "signal": "BUY", "execution_status": "BLOCKED",
+        "reason": "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT",
+        "timestamp": "2026-09-17T04:40:00Z",
+    }]
+    result = enrich_dashboard_payload(payload, {}, signal_history=durable)
+    assert result["history"] == durable
+    assert result["history"][0]["signal"] == "BUY"
+
+
+def test_non_v3b_history_remains_legacy_when_durable_rows_are_supplied():
+    payload = {
+        "_meta": {"live_strategy_identity": "LIVE — V1"},
+        "history": [{"symbol": "EURUSD", "signal": "WAIT"}],
+    }
+    assert enrich_dashboard_payload(payload, {}, signal_history=[{"signal": "BUY"}]) == payload

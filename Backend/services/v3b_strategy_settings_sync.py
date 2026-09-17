@@ -128,8 +128,19 @@ def _install_execution_profile():
 
     def validate_management_contract(payload):
         payload = payload if isinstance(payload, dict) else {}
-        expected = _management_values_from_payload(payload)
+        try:
+            values = active_config.get_active_values(force_refresh=True, fail_closed=True)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "reason": "WAIT_V3B_STRATEGY_CONFIG_UNAVAILABLE",
+                "details": {"error": str(exc)},
+            }
+        target_rr = float(values["target_rr"])
+        trigger_fraction = float(values["protection_trigger_percent"]) / 100.0
+        protected_fraction = float(values["protected_stop_percent"]) / 100.0
         checks = {}
+        expected_rounded_levels = {}
         try:
             entry = float(payload.get("entry"))
             sl = float(payload.get("sl"))
@@ -141,10 +152,21 @@ def _install_execution_profile():
             tp2 = float(payload.get("tp2"))
             protected = float(payload.get("protected_sl_price"))
             side = str(payload.get("side") or payload.get("action") or "").upper()
+            symbol = str(payload.get("symbol") or "").upper().replace("/", "")
+            digits = profile._v3b_price_precision(symbol)
             risk = abs(entry - sl)
-            reward = abs(tp2 - entry)
-            trigger_path = abs(trigger - entry)
-            protected_path = abs(protected - entry)
+            sign = 1.0 if side == "BUY" else -1.0 if side == "SELL" else 0.0
+            raw_tp2 = entry + sign * target_rr * risk
+            raw_trigger = entry + (raw_tp2 - entry) * trigger_fraction
+            raw_protected = entry + (raw_tp2 - entry) * protected_fraction
+            if digits is not None:
+                expected_rounded_levels = {
+                    "tp2": round(raw_tp2, digits),
+                    "protection_trigger_price": round(raw_trigger, digits),
+                    "protected_sl_price": round(raw_protected, digits),
+                }
+            stamped = payload.get("strategy_config")
+            stamped = stamped if isinstance(stamped, dict) else {}
             directional = (
                 side == "BUY" and sl < entry < protected <= trigger < tp2
             ) or (
@@ -152,22 +174,39 @@ def _install_execution_profile():
             )
             checks = {
                 "profile": profile.is_v3b_execution_profile(payload),
+                "supported_symbol_precision": digits is not None,
                 "directional_levels": directional,
-                "target_rr": risk > 0 and abs((reward / risk) - expected["target_rr"]) <= 1e-6,
-                "trigger_fraction": reward > 0 and abs(
-                    (trigger_path / reward) - expected["protection_trigger_fraction"]
-                ) <= 1e-6,
-                "protected_fraction": reward > 0 and abs(
-                    (protected_path / reward) - expected["protected_stop_fraction"]
-                ) <= 1e-6,
+                "declared_target_rr": _matches(payload.get("risk_reward_ratio"), target_rr)
+                and _matches(payload.get("v3b_frozen_target_rr", target_rr), target_rr),
+                "declared_trigger_fraction": _matches(
+                    payload.get("protection_trigger_tp2_fraction"), trigger_fraction
+                ),
+                "declared_protected_fraction": _matches(
+                    payload.get("protected_stop_tp2_fraction"), protected_fraction
+                ),
+                "current_strategy_config": not stamped or all(
+                    _matches(stamped.get(key), value) for key, value in values.items()
+                ),
+                "strategy_profile": payload.get("strategy_config_profile")
+                in {None, active_config.ACTIVE_STRATEGY_PROFILE},
+                "tp2_rounded_geometry": risk > 0
+                and profile._same_rounded_price(tp2, raw_tp2, digits),
+                "trigger_rounded_geometry": risk > 0
+                and profile._same_rounded_price(trigger, raw_trigger, digits),
+                "protected_rounded_geometry": risk > 0
+                and profile._same_rounded_price(protected, raw_protected, digits),
                 "no_partial_close": payload.get("no_partial_close_at_protection_trigger") is True,
             }
-        except (TypeError, ValueError, ZeroDivisionError):
+        except (TypeError, ValueError, ZeroDivisionError, OverflowError):
             checks = {"numeric_levels": False}
         return {
             "ok": bool(checks) and all(checks.values()),
             "reason": None if checks and all(checks.values()) else "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT",
-            "details": {"checks": checks, "expected": expected},
+            "details": {
+                "checks": checks,
+                "active_values": dict(values),
+                "expected_rounded_levels": expected_rounded_levels,
+            },
         }
 
     def stamp_active_trade(trade, payload):

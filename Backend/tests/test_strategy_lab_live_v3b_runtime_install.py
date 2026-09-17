@@ -7,6 +7,18 @@ from services.live_v3b_execution_profile import V3B_EXECUTION_PROFILE
 from services.live_v3b_runtime_install import install_live_v3b_runtime
 
 
+@pytest.fixture(autouse=True)
+def _active_v3b_config(monkeypatch):
+    monkeypatch.setattr(
+        "services.active_strategy_config_service.get_active_values",
+        lambda **_kwargs: {
+            "target_rr": 1.90,
+            "protection_trigger_percent": 70.0,
+            "protected_stop_percent": 60.0,
+        },
+    )
+
+
 def _payload():
     return {
         "ok": True,
@@ -24,6 +36,7 @@ def _payload():
         "protected_stop_tp2_fraction": 0.60,
         "no_partial_close_at_protection_trigger": True,
         "v3b_frozen_target_rr": 1.90,
+        "risk_reward_ratio": 1.90,
         "strategy_execution_profile": V3B_EXECUTION_PROFILE,
         "live_strategy_model": "LIVE_V3B_M5_FROZEN",
         "signal_setup_id": "setup-v3b",
@@ -140,6 +153,19 @@ def test_v3b_prepare_restores_frozen_trigger_and_profile_after_legacy_prepare():
     assert prepared["v3b_frozen_management"]["ok"] is True
 
 
+def test_runtime_prepare_uses_current_profile_validator_not_stale_import():
+    api, *_ = _fake_api()
+    install_live_v3b_runtime(api, strict_trader_module=SimpleNamespace())
+    with patch(
+        "services.live_v3b_execution_profile.validate_frozen_management_contract",
+        return_value={"ok": False, "reason": "TEST_PROFILE_VALIDATOR"},
+    ) as validator:
+        result = api.prepare_ctrader_trade(_payload())
+    validator.assert_called_once()
+    assert result["ok"] is False
+    assert result["reason"] == "TEST_PROFILE_VALIDATOR"
+
+
 def test_v3b_fresh_gate_bypasses_only_v1_ema_and_consolidation():
     api, _prepare, _locked, fresh, *_ = _fake_api()
     install_live_v3b_runtime(api, strict_trader_module=SimpleNamespace())
@@ -204,6 +230,9 @@ def test_active_v3b_cycle_ignores_legacy_15m_dashboard_block():
     api, _prepare, _locked, _fresh, _protect, legacy_cycle = _fake_api()
     api.LIVE_AUTO_TRADE_ENABLED["enabled"] = True
     api.LIVE_ACCOUNT_STATE.update({"connected": True, "execution_ready": True})
+    api.get_ctrader_market_data.return_value = SimpleNamespace(
+        attrs={"ctrader_stream_scope": "CTRADER:DEMO:47810571"}
+    )
     broker_core = api.execute_live_order_core
     install_live_v3b_runtime(api, strict_trader_module=SimpleNamespace())
     legacy_panel = {
@@ -213,7 +242,9 @@ def test_active_v3b_cycle_ignores_legacy_15m_dashboard_block():
         }
         for symbol in ("EURUSD", "XAUUSD")
     }
-    with patch("services.live_v3b_runtime_install.live_v3b_enabled", return_value=True), patch(
+    with patch("services.live_v3b_runtime_install.selected_identity", return_value=SimpleNamespace(scope="CTRADER:DEMO:47810571")), patch(
+        "services.v3b_signal_history.record_v3b_transition"
+    ), patch("services.live_v3b_runtime_install.live_v3b_enabled", return_value=True), patch(
         "services.live_v3b_runtime_install.build_live_v3b_candidate",
         side_effect=lambda symbol, *_args, **_kwargs: {
             **_payload(),
@@ -236,3 +267,43 @@ def test_active_v3b_cycle_ignores_legacy_15m_dashboard_block():
     ]
     legacy_cycle.assert_not_called()
     broker_core.assert_not_called()
+
+
+def test_ready_buy_is_recorded_before_blocked_broker_handoff():
+    from ctrader_account_context import AccountIdentity
+
+    api, *_ = _fake_api()
+    api.LIVE_AUTO_TRADE_ENABLED["enabled"] = True
+    api.LIVE_ACCOUNT_STATE.update({"connected": True, "execution_ready": True})
+    api.get_ctrader_market_data.return_value = SimpleNamespace(
+        attrs={"ctrader_stream_scope": "CTRADER:DEMO:47810571"}
+    )
+    install_live_v3b_runtime(api, strict_trader_module=SimpleNamespace())
+    candidate = {
+        **_payload(),
+        "live_v3b_ready": True,
+        "source_indicator_event_id": "bos-1",
+        "m5_confirmation_id": "confirmation-1",
+        "signal_setup_id": "setup-1",
+        "five_m_closed_candle_time": "2026-09-17T04:40:00Z",
+    }
+    with patch("services.live_v3b_runtime_install.live_v3b_enabled", return_value=True), patch(
+        "services.live_v3b_runtime_install.build_live_v3b_candidate",
+        side_effect=lambda symbol, *_args, **_kwargs: ({**candidate, "symbol": symbol}
+            if symbol == "EURUSD" else {"symbol": symbol, "signal": "WAIT", "live_v3b_ready": False}),
+    ), patch(
+        "services.live_v3b_runtime_install.dispatch_v3b_to_live_core",
+        return_value={"ok": False, "submitted": False, "reason": "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT"},
+    ), patch(
+        "services.live_v3b_runtime_install.selected_identity",
+        return_value=AccountIdentity("47810571", "demo"),
+    ), patch("services.v3b_signal_history.record_v3b_transition") as record:
+        api.run_ctrader_auto_trade_checks({})
+
+    eurusd_calls = [call for call in record.call_args_list if call.args[1] == "EURUSD"]
+    assert len(eurusd_calls) == 2
+    assert all(call.args[2] == "BUY" for call in eurusd_calls)
+    assert eurusd_calls[0].args[0] == "CTRADER:DEMO:47810571"
+    assert eurusd_calls[0].kwargs["setup_id"] == "setup-1"
+    assert eurusd_calls[1].kwargs["execution_status"] == "BLOCKED"
+    assert eurusd_calls[1].kwargs["reason"] == "WAIT_V3B_FROZEN_MANAGEMENT_CONTRACT"

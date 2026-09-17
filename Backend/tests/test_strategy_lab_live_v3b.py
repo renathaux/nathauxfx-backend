@@ -12,6 +12,7 @@ from services.live_v3b_service import (
     live_v3b_enabled,
 )
 from services.paper_v3b_bridge import build_paper_v3b_candidate
+from services.v3b_strategy_settings_sync import install_v3b_strategy_settings_sync
 
 
 class _Strict:
@@ -157,6 +158,129 @@ def test_enabled_eurusd_candidate_is_live_shaped_but_not_submitted():
     assert payload["side"] == "BUY"
     assert payload["source_indicator_event_id"] == "smc1_eur_live_v3b"
     assert payload["setup_identity"]["setup_timeframe"] == "5m"
+
+
+def test_active_management_settings_reach_candidate_even_if_live_service_was_imported_early(monkeypatch):
+    install_v3b_strategy_settings_sync()
+    monkeypatch.setattr(
+        "services.active_strategy_config_service.get_active_values",
+        lambda **_kwargs: {
+            "target_rr": 1.90,
+            "protection_trigger_percent": 70.0,
+            "protected_stop_percent": 55.0,
+        },
+    )
+    result = build_live_v3b_candidate(
+        "EURUSD", _eur_frame(), strict_trader_module=_Strict,
+        setup_id_builder=_setup_id,
+        authoritative_reader=_authority(_event("EURUSD")), enabled=True,
+    )
+    assert result["live_v3b_ready"] is True
+    assert result["strategy_config"]["protected_stop_percent"] == 55.0
+    assert result["protected_stop_tp2_fraction"] == pytest.approx(0.55)
+
+
+def test_closed_5m_candidate_history_contract_and_durable_claim_allow_one_mock_broker_send(monkeypatch):
+    from datetime import datetime, timezone
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from models import Base, ExecutionProtocolState, IndicatorEvent, IndicatorEventLifecycle
+    from services import live_v3b_execution_adapter as adapter
+    from services import trade_submission_service as submissions
+    from services.v3b_signal_history import list_v3b_transitions, record_v3b_transition
+
+    values = {"target_rr": 1.90, "protection_trigger_percent": 70.0, "protected_stop_percent": 55.0}
+    install_v3b_strategy_settings_sync()
+    monkeypatch.setattr(
+        "services.active_strategy_config_service.get_active_values",
+        lambda **_kwargs: dict(values),
+    )
+    candidate = build_live_v3b_candidate(
+        "EURUSD", _eur_frame(), strict_trader_module=_Strict,
+        setup_id_builder=_setup_id,
+        authoritative_reader=_authority(_event("EURUSD")), enabled=True,
+    )
+    assert candidate["live_v3b_ready"] is True
+    assert candidate["paper_entry_details"]["bos_body_ratio"] >= 0.50
+    assert candidate["paper_entry_details"]["second_5m_same_direction"] is True
+    assert candidate["paper_entry_details"]["second_5m_stays_beyond_bos_level"] is True
+    assert candidate["setup_identity"]["setup_timeframe"] == "5m"
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc)
+    with sessions() as session:
+        session.add(IndicatorEvent(
+            event_id=candidate["source_indicator_event_id"], symbol="EURUSD", timeframe="5m",
+            candle_timestamp=now, classification="BOS", direction="BUY", broken_level=1.1015,
+            opposite_swing=None, identity={}, payload={}, configuration_version="test",
+            is_historical=False, created_at=now,
+        ))
+        session.add(IndicatorEventLifecycle(
+            event_id=candidate["source_indicator_event_id"], mode="LIVE", owner_id="OWNER",
+            account_id="47810571", status="ELIGIBLE", updated_at=now,
+        ))
+        session.add(ExecutionProtocolState(
+            singleton_id=1, protocol_version=submissions.EXECUTION_PROTOCOL_VERSION,
+            updated_at=now,
+        ))
+        session.commit()
+
+    scope = "CTRADER:DEMO:47810571"
+    record_v3b_transition(scope, "EURUSD", "WAIT", "2026-09-10T09:55:00Z", session_factory=sessions)
+    record_v3b_transition(
+        scope, "EURUSD", "BUY", candidate["five_m_closed_candle_time"],
+        event_id=candidate["source_indicator_event_id"],
+        confirmation_id=candidate["m5_confirmation_id"],
+        setup_id=candidate["signal_setup_id"], session_factory=sessions,
+    )
+    broker_sends = []
+
+    def guarded_core(payload, source):
+        assert source == "auto"
+        assert payload["signal_setup_id"] == candidate["signal_setup_id"]
+        claim = submissions.claim_submission(
+            payload["source_indicator_event_id"], "LIVE", "47810571", "EURUSD",
+            payload["signal_setup_id"], payload, session_factory=sessions,
+        )
+        if not claim["ok"]:
+            return {"ok": False, "reason": claim["reason"]}
+        assert submissions.mark_request_started(claim["idempotency_key"], session_factory=sessions)
+        broker_sends.append(payload)
+        assert submissions.complete_submission(
+            claim["idempotency_key"],
+            {"ok": True, "broker_result": "ACCEPTED", "order_id": "mock-order"},
+            session_factory=sessions,
+        )
+        return {"ok": True, "broker_result": "ACCEPTED"}
+
+    try:
+        for _ in range(2):
+            result = adapter.dispatch_v3b_to_live_core(
+                candidate, executor=guarded_core, live_auto_enabled=True,
+                strategy_enabled=True, broker_handoff_enabled=True,
+                execution_profile_supported=True,
+                authoritative_live_state_loader=lambda **_kwargs: {"live_enabled": True},
+            )
+            record_v3b_transition(
+                scope, "EURUSD", "BUY", candidate["five_m_closed_candle_time"],
+                setup_id=candidate["signal_setup_id"],
+                execution_status="EXECUTED" if result["ok"] else "BLOCKED",
+                reason=result["reason"], session_factory=sessions,
+            )
+        rows = list_v3b_transitions(scope, session_factory=sessions)
+        assert len(broker_sends) == 1
+        assert len(rows) == 2
+        assert rows[0]["signal"] == "BUY"
+        assert rows[0]["execution_status"] == "EXECUTED"
+        assert rows[0]["event_id"] == candidate["source_indicator_event_id"]
+        assert rows[0]["m5_confirmation_id"] == candidate["m5_confirmation_id"]
+    finally:
+        engine.dispose()
 
 
 def test_enabled_gold_candidate_preserves_frozen_gold_geometry():

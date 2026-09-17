@@ -47,7 +47,7 @@ def _is_v3b_payload(payload, live_status_by_symbol):
     return False
 
 
-def enrich_dashboard_payload(payload, live_status_by_symbol):
+def enrich_dashboard_payload(payload, live_status_by_symbol, *, signal_history=None):
     """Return a copy with authoritative V3B runtime diagnostics per symbol.
 
     Generic dashboard blocker fields follow the active V3B runtime rather than
@@ -61,6 +61,9 @@ def enrich_dashboard_payload(payload, live_status_by_symbol):
     statuses = live_status_by_symbol if isinstance(live_status_by_symbol, dict) else {}
     if not _is_v3b_payload(result, statuses):
         return result
+    if signal_history is not None:
+        # The legacy process-memory list is never authoritative while V3B runs.
+        result["history"] = copy.deepcopy(signal_history[:10])
     meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else {}
     explicit_v3b_identity = any(
         "V3B" in _text(value).upper()
@@ -130,9 +133,20 @@ def install_v3b_dashboard_state_middleware(app, api_module):
         body = b"".join([chunk async for chunk in response.body_iterator])
         try:
             payload = json.loads(body.decode("utf-8"))
+            signal_history = None
+            if _is_v3b_payload(payload, getattr(api_module, "LIVE_AUTO_STATUS_BY_SYMBOL", {})):
+                from services.v3b_signal_history import list_v3b_transitions
+
+                meta = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
+                try:
+                    signal_history = list_v3b_transitions(meta.get("account_scope"), limit=10)
+                except Exception:
+                    # Never expose stale legacy rows as if they were V3B history.
+                    signal_history = []
             enriched = enrich_dashboard_payload(
                 payload,
                 getattr(api_module, "LIVE_AUTO_STATUS_BY_SYMBOL", {}),
+                signal_history=signal_history,
             )
             encoded = json.dumps(
                 enriched,

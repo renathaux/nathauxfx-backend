@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import copy
 import time
-from ctrader_account_context import account_state_operation
+from ctrader_account_context import account_state_operation, selected_identity
 
 from services.live_v3b_execution_adapter import (
     dispatch_v3b_to_live_core,
@@ -23,11 +23,10 @@ from services.live_v3b_execution_adapter import (
 from services.live_v3b_execution_profile import (
     V3B_EXECUTION_PROFILE,
     is_v3b_execution_profile,
-    stamp_active_trade_with_v3b_profile,
     stamp_v3b_identity,
-    validate_frozen_management_contract,
     validate_v3b_locked_entry_state,
 )
+from services import live_v3b_execution_profile as v3b_profile
 from services.live_v3b_service import (
     build_live_v3b_candidate,
     live_v3b_enabled,
@@ -71,6 +70,10 @@ def _copy_v3b_execution_fields(target, source):
         "five_m_closed_candle_time",
         "setup_candle_time",
         "strategy_setup_type",
+        "strategy_config_profile",
+        "strategy_config_version",
+        "strategy_config",
+        "risk_reward_ratio",
     ):
         if key in source:
             target[key] = copy.deepcopy(source.get(key))
@@ -240,7 +243,7 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
         if not isinstance(prepared, dict) or not prepared.get("ok"):
             return prepared
         _copy_v3b_execution_fields(prepared, payload)
-        contract = validate_frozen_management_contract(prepared)
+        contract = v3b_profile.validate_frozen_management_contract(prepared)
         if not contract.get("ok"):
             return {
                 **prepared,
@@ -323,7 +326,7 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
         symbol = api_module.normalize_symbol(payload.get("symbol"))
         active = api_module.LIVE_ACTIVE_ORDERS.get(symbol)
         if isinstance(active, dict):
-            stamp_active_trade_with_v3b_profile(active, payload)
+            v3b_profile.stamp_active_trade_with_v3b_profile(active, payload)
             for key in (
                 "signal_setup_id",
                 "source_indicator_event_id",
@@ -358,6 +361,7 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
         results = []
 
         for symbol in ("EURUSD", "XAUUSD"):
+            history_scope = None
             try:
                 data_5m = api_module.get_ctrader_market_data(
                     symbol,
@@ -365,6 +369,11 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
                     limit=250,
                     force_refresh=False,
                 )
+                frame_attrs = getattr(data_5m, "attrs", None)
+                frame_scope = frame_attrs.get("ctrader_stream_scope") if isinstance(frame_attrs, dict) else None
+                selection = selected_identity() if frame_scope else None
+                if frame_scope and selection and frame_scope == selection.scope:
+                    history_scope = frame_scope
                 candidate = build_live_v3b_candidate(
                     symbol,
                     data_5m,
@@ -381,6 +390,27 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
                 }
 
             side = str(candidate.get("side") or candidate.get("signal") or "WAIT").upper()
+            if history_scope:
+                from services.v3b_signal_history import record_v3b_transition
+
+                try:
+                    record_v3b_transition(
+                        history_scope, symbol, side if side in {"BUY", "SELL"} else "WAIT",
+                        candidate.get("five_m_closed_candle_time") or time.time(),
+                        event_id=candidate.get("source_indicator_event_id"),
+                        confirmation_id=candidate.get("m5_confirmation_id"),
+                        setup_id=candidate.get("signal_setup_id"),
+                        entry=candidate.get("entry") or candidate.get("entry_price"),
+                        reason=candidate.get("live_v3b_reason"),
+                    )
+                except Exception as exc:
+                    results.append(_blocked("WAIT_V3B_SIGNAL_HISTORY_UNAVAILABLE", {"error": str(exc)}))
+                    continue
+            elif candidate.get("live_v3b_ready"):
+                # A ready candidate without a frame bound to the selected account
+                # cannot be sent to the broker or attributed in durable history.
+                results.append(_blocked("WAIT_V3B_SIGNAL_HISTORY_SCOPE_UNAVAILABLE"))
+                continue
             if not candidate.get("live_v3b_ready"):
                 reason = candidate.get("live_v3b_reason") or "WAIT_V3B_LIVE_QUALIFICATION"
                 try:
@@ -400,6 +430,13 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
             if not broker_ready:
                 reason = "Live Auto paused — broker disconnected"
                 results.append(_blocked(reason))
+                if history_scope:
+                    record_v3b_transition(
+                        history_scope, symbol, side,
+                        candidate.get("five_m_closed_candle_time") or time.time(),
+                        setup_id=candidate.get("signal_setup_id"),
+                        execution_status="BLOCKED", reason=reason,
+                    )
                 try:
                     api_module.set_auto_trade_status(
                         symbol=symbol,
@@ -421,6 +458,14 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
                 execution_profile_supported=True,
             )
             results.append(result)
+            if history_scope:
+                record_v3b_transition(
+                    history_scope, symbol, side,
+                    candidate.get("five_m_closed_candle_time") or time.time(),
+                    setup_id=candidate.get("signal_setup_id"),
+                    execution_status="EXECUTED" if result.get("ok") else "BLOCKED",
+                    reason=result.get("reason"),
+                )
             try:
                 api_module.set_auto_trade_status(
                     symbol=symbol,

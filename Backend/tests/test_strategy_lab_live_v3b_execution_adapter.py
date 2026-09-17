@@ -15,6 +15,18 @@ from services import indicator_stream_account_scope as account_scope
 from services.v3b_strategy_settings_sync import install_v3b_strategy_settings_sync
 
 
+@pytest.fixture(autouse=True)
+def _active_v3b_config(monkeypatch):
+    monkeypatch.setattr(
+        "services.active_strategy_config_service.get_active_values",
+        lambda **_kwargs: {
+            "target_rr": 1.90,
+            "protection_trigger_percent": 70.0,
+            "protected_stop_percent": 60.0,
+        },
+    )
+
+
 def _candidate(symbol="EURUSD", side="BUY"):
     if symbol == "XAUUSD":
         entry = 4395.50
