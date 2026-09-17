@@ -244,9 +244,11 @@ def test_strict_historical_reader_rejects_raw_defects_before_normalization(defec
         assert "duplicate" in str(error.value) if defect == "duplicate" else "invalid" in str(error.value)
 
 
-@pytest.mark.parametrize("boundary_conflict", [False, True])
+@pytest.mark.parametrize("boundary_conflict,earlier_conflict", [
+    (False, False), (True, False), (False, True),
+])
 def test_strict_historical_reader_allows_only_matching_page_boundary_overlap(
-    boundary_conflict,
+    boundary_conflict, earlier_conflict,
 ):
     start = datetime(2026, 9, 12, tzinfo=timezone.utc)
     boundary = start + timedelta(minutes=4500)
@@ -265,7 +267,12 @@ def test_strict_historical_reader_allows_only_matching_page_boundary_overlap(
         repeated = bar(boundary)
         if boundary_conflict:
             repeated["deltaClose"] += 1
-        return {"payload": {"trendbar": [repeated, bar(end)]}}
+        rows = [repeated, bar(end)]
+        if earlier_conflict:
+            earlier = bar(start)
+            earlier["deltaClose"] += 1
+            rows.insert(0, earlier)
+        return {"payload": {"trendbar": rows}}
 
     with patch.object(ctrader_connector, "get_ctrader_config", return_value={
         "env": "demo", "account_id": "47810571"
@@ -282,7 +289,7 @@ def test_strict_historical_reader_allows_only_matching_page_boundary_overlap(
     ), patch.object(
         ctrader_connector, "send_ctrader_request", side_effect=page,
     ):
-        if boundary_conflict:
+        if boundary_conflict or earlier_conflict:
             with pytest.raises(ValueError, match="raw broker candle"):
                 ctrader_connector.fetch_ctrader_historical_candles(
                     "EURUSD", "5m", start, end, strict_raw=True,

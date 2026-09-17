@@ -4576,7 +4576,7 @@ def fetch_ctrader_historical_candles(
                         # cTrader may return preceding bars despite a bounded
                         # fromTimestamp. They are not disputed evidence and
                         # never enter the final requested-range frame.
-                        if pd.notna(timestamp) and (timestamp < cursor or timestamp > page_end):
+                        if pd.notna(timestamp) and (timestamp < start or timestamp > end):
                             continue
                         prices = [float(single.iloc[0][field]) for field in (
                             "Open", "High", "Low", "Close"
@@ -4592,10 +4592,8 @@ def fetch_ctrader_historical_candles(
                         ):
                             raise ValueError("duplicate, off-grid, or invalid OHLC")
                         seen_page_times.add(timestamp)
-                        if timestamp in strict_seen and (
-                            timestamp != cursor or strict_seen[timestamp] != tuple(prices)
-                        ):
-                            raise ValueError("conflicting or non-boundary page overlap")
+                        if timestamp in strict_seen and strict_seen[timestamp] != tuple(prices):
+                            raise ValueError("conflicting page overlap")
                         strict_seen[timestamp] = tuple(prices)
                     except (TypeError, ValueError, OverflowError) as exc:
                         raise ValueError(
