@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Guarded branch-only patch; workflow verifies syntax and focused safety tests before committing api.py.
 path = Path("Backend/api.py")
 text = path.read_text(encoding="utf-8")
 
