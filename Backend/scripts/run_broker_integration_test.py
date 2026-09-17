@@ -13,7 +13,8 @@ def main(argv=None):
     parser.add_argument('--account-id', required=True)
     parser.add_argument('--test-id', required=True)
     parser.add_argument('--symbol', required=True, choices=['EURUSD'])
-    parser.add_argument('--confirm-demo-broker-test', required=True, action='store_true')
+    parser.add_argument('--confirm-broker-test', '--confirm-demo-broker-test',
+                        dest='confirm_broker_test', required=True, action='store_true')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--preflight', action='store_true')
     mode.add_argument('--recover', action='store_true')
@@ -22,7 +23,7 @@ def main(argv=None):
     from services.broker_integration_test_adapter import CTraderTestAdapter
     from services.broker_integration_test_service import BrokerIntegrationTestService, TestRequest
     from services.broker_integration_test_errors import safe_error_code
-    request = TestRequest(args.account_id, args.test_id, args.symbol, args.confirm_demo_broker_test)
+    request = TestRequest(args.account_id, args.test_id, args.symbol, args.confirm_broker_test)
     service = BrokerIntegrationTestService(SessionLocal, CTraderTestAdapter())
     try:
         result = service.preflight(request) if args.preflight else service.run(request, recover=args.recover)

@@ -64,7 +64,7 @@ def test_invalid_request_never_sends(rig, change):
     assert broker.sends == 0
 
 
-@pytest.mark.parametrize('change', [{'is_live':True}, {'is_live':None}, {'account_id':'47810571'}, {'cleanup_ready':False}, {'min_volume':0}])
+@pytest.mark.parametrize('change', [{'is_live':None}, {'account_id':'47810571'}, {'cleanup_ready':False}, {'min_volume':0}])
 def test_preflight_fails_closed(rig, change):
     service, broker, factory, request = rig
     broker.preflight = replace(broker.preflight, **change)
@@ -85,6 +85,72 @@ def test_roundtrip_commits_before_send_and_duplicate_is_read_only(rig):
     with factory() as session:
         for model in (IndicatorEvent, IndicatorEventLifecycle, TradeSubmissionAttempt):
             assert session.query(model).count() == 0
+
+
+def test_selected_live_account_uses_minimum_volume_and_its_own_durable_scope(rig):
+    from models import BrokerIntegrationTestSubmission
+    service, broker, factory, request = rig
+    request = replace(request, account_id='47810571', test_id='active-live-minimum')
+    broker.preflight = replace(broker.preflight, account_id='47810571', is_live=True)
+    original_reconcile = broker.reconcile
+
+    def reconcile(row):
+        return replace(original_reconcile(row), account_id='47810571')
+
+    broker.reconcile = reconcile
+    result = service.run(request)
+    assert result['state'] == 'CLOSED'
+    assert result['account_scope'] == 'live:47810571'
+    assert broker.sends == broker.closes == 1
+    with factory() as session:
+        row = session.get(BrokerIntegrationTestSubmission, request.test_id)
+        assert row.environment == 'live'
+        assert row.volume == broker.preflight.min_volume == 1000
+
+
+def test_unresolved_live_test_fences_only_its_selected_account(rig):
+    from services.account_execution_coordination import ExecutionFenced, run_normal_submission
+    service, broker, factory, request = rig
+    request = replace(request, account_id='47810571', test_id='live-unresolved')
+    broker.preflight = replace(broker.preflight, account_id='47810571', is_live=True)
+    broker.unavailable = True
+    assert service.run(request)['state'] == 'NEEDS_RECOVERY'
+    with pytest.raises(ExecutionFenced):
+        run_normal_submission(factory, '47810571', lambda: 'wrongly submitted')
+    assert run_normal_submission(factory, '47784297', lambda: 'independent') == 'independent'
+
+
+def test_prepared_environment_change_never_starts_order_request(rig):
+    from models import BrokerIntegrationTestSubmission
+    service, broker, factory, request = rig
+    original = broker.fresh_preflight
+    calls = 0
+
+    def crash_after_prepare(request):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise SystemExit('after PREPARED commit')
+        return original(request)
+
+    broker.fresh_preflight = crash_after_prepare
+    with pytest.raises(SystemExit):
+        service.run(request)
+    broker.fresh_preflight = original
+    broker.preflight = replace(broker.preflight, is_live=True)
+    result = service.run(request)
+    assert result['state'] == 'NEEDS_RECOVERY'
+    assert broker.sends == 0
+    with factory() as session:
+        assert session.get(BrokerIntegrationTestSubmission, request.test_id).request_started_at is None
+
+
+def test_sqlite_account_coordination_does_not_block_independent_account(rig):
+    from services.account_execution_coordination import account_lock
+    _, _, factory, _ = rig
+    with account_lock(factory, '47784297'):
+        with account_lock(factory, '47810571'):
+            assert True
 
 
 def test_ambiguous_open_is_never_resent_after_restart(rig):
@@ -274,7 +340,7 @@ def test_label_less_closed_deal_is_not_exposed_while_open_identity_unresolved(ri
     assert exclude_test_closed_deals(factory, '47784297', history) == []
 
 
-@pytest.mark.parametrize('change,code', [({'is_live':True},'DEMO_PROOF_REQUIRED'),
+@pytest.mark.parametrize('change,code', [({'is_live':None},'IDENTITY_MISMATCH'),
     ({'min_volume':0},'INVALID_BROKER_VOLUME'), ({'cleanup_ready':False},'CLEANUP_UNAVAILABLE')])
 def test_cli_returns_known_safe_blocker_codes(rig, monkeypatch, capsys, change, code):
     import json
@@ -288,6 +354,23 @@ def test_cli_returns_known_safe_blocker_codes(rig, monkeypatch, capsys, change, 
     args = ['--account-id','47784297','--test-id','codes','--symbol','EURUSD','--confirm-demo-broker-test','--preflight']
     assert main(args) == 2
     assert json.loads(capsys.readouterr().out)['error_code'] == code
+
+
+def test_cli_accepts_neutral_confirmation_for_selected_account(rig, monkeypatch, capsys):
+    import json
+    import db
+    from scripts.run_broker_integration_test import main
+    import services.broker_integration_test_adapter as adapter
+    _, broker, factory, _ = rig
+    broker.preflight = replace(broker.preflight, account_id='47810571', is_live=True)
+    monkeypatch.setattr(db, 'SessionLocal', factory)
+    monkeypatch.setattr(adapter, 'CTraderTestAdapter', lambda: broker)
+    args = ['--account-id', '47810571', '--test-id', 'live-preflight', '--symbol', 'EURUSD',
+            '--confirm-broker-test', '--preflight']
+    assert main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['account_id'] == '47810571' and payload['is_live'] is True
+    assert broker.sends == 0
 
 
 def test_unknown_exception_secret_is_never_persisted(rig):

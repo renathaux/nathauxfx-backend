@@ -14,9 +14,6 @@ import uuid
 from services.broker_integration_test_service import Preflight, Reconciliation, BrokerIntegrationTestService
 from services.broker_integration_test_errors import BlockerCode as Code, BrokerTestBlocked
 
-ACCOUNT = 47784297
-
-
 class _DeadlineSocket:
     """Enforce the same deadline inside websocket ping/fragment loops."""
     def __init__(self, sock, deadline):
@@ -39,10 +36,12 @@ class _DeadlineSocket:
 
 
 class DemoSocket:
-    """Fresh, bounded, correlated connection; token refresh is intentionally absent."""
-    def __init__(self):
+    """Fresh, bounded, correlated connection pinned to one broker account."""
+    def __init__(self, account_id, environment):
         import ctrader_connector as connector
         from services.ctrader_token_service import load_tokens
+        self.account_id = int(account_id)
+        self.environment = environment
         self.connector = connector
         self.token = load_tokens().get('access_token') or os.getenv('CTRADER_ACCESS_TOKEN')
         self.sock = None
@@ -50,12 +49,13 @@ class DemoSocket:
             raise BrokerTestBlocked(Code.CREDENTIALS_UNAVAILABLE)
 
     def __enter__(self):
-        self.sock = self.connector.open_ctrader_json_socket('demo.ctraderapi.com', 5036)
+        host = 'live.ctraderapi.com' if self.environment == 'live' else 'demo.ctraderapi.com'
+        self.sock = self.connector.open_ctrader_json_socket(host, 5036)
         try:
             self.request(2100, {'clientId': os.environ['CTRADER_CLIENT_ID'],
                               'clientSecret': os.environ['CTRADER_CLIENT_SECRET']}, 2101)
             self.prove_demo()
-            self.request(2102, {'ctidTraderAccountId': ACCOUNT, 'accessToken': self.token}, 2103)
+            self.request(2102, {'ctidTraderAccountId': self.account_id, 'accessToken': self.token}, 2103)
             return self
         except BaseException:
             self.sock.close()
@@ -66,8 +66,8 @@ class DemoSocket:
 
     def prove_demo(self):
         result = self.request(2149, {'accessToken': self.token}, 2150)
-        accounts = [a for a in result.get('ctidTraderAccount', []) if str(a.get('ctidTraderAccountId')) == str(ACCOUNT)]
-        if len(accounts) != 1 or accounts[0].get('isLive') is not False:
+        accounts = [a for a in result.get('ctidTraderAccount', []) if str(a.get('ctidTraderAccountId')) == str(self.account_id)]
+        if len(accounts) != 1 or accounts[0].get('isLive') is not (self.environment == 'live'):
             raise BrokerTestBlocked(Code.DEMO_PROOF_REQUIRED)
 
     def _receive(self, deadline):
@@ -100,19 +100,19 @@ class DemoSocket:
                 result = {}
             if not isinstance(result, dict) or result.get('errorCode'):
                 raise BrokerTestBlocked(Code.BROKER_RESPONSE_INVALID)
-            if 'ctidTraderAccountId' in payload and str(result.get('ctidTraderAccountId')) != str(ACCOUNT):
+            if 'ctidTraderAccountId' in payload and str(result.get('ctidTraderAccountId')) != str(payload['ctidTraderAccountId']):
                 raise BrokerTestBlocked(Code.IDENTITY_MISMATCH)
             return result
 
     def quote(self, symbol_id):
-        self.request(2127, {'ctidTraderAccountId':ACCOUNT,'symbolId':[symbol_id], 'subscribeToSpotTimestamp':True}, 2128)
+        self.request(2127, {'ctidTraderAccountId':self.account_id,'symbolId':[symbol_id], 'subscribeToSpotTimestamp':True}, 2128)
         deadline = time.monotonic() + 15
         quote = {}
         while True:
             event = self._receive(deadline)
             payload = event.get('payload') or {}
             if (event.get('payloadType') == 2131 and payload.get('symbolId') == symbol_id
-                    and str(payload.get('ctidTraderAccountId')) == str(ACCOUNT)):
+                    and str(payload.get('ctidTraderAccountId')) == str(self.account_id)):
                 quote.update(payload)
                 if quote.get('bid') and quote.get('ask') and quote.get('timestamp'):
                     return quote
@@ -124,31 +124,32 @@ class CTraderTestAdapter:
         self.protection = None
 
     @staticmethod
-    def _assert_selected_account():
-        from ctrader_connector import get_active_ctrader_account_id
+    def _assert_selected_account(account_id, environment=None):
+        from ctrader_account_context import selected_identity
         try:
-            selected = get_active_ctrader_account_id()
+            selected = selected_identity()
         except Exception as exc:
             raise BrokerTestBlocked(Code.SELECTED_ACCOUNT_MISMATCH) from exc
-        if str(selected) != str(ACCOUNT):
+        if (selected is None or selected.account_id != str(account_id)
+                or (environment is not None and selected.environment != environment)):
             raise BrokerTestBlocked(Code.SELECTED_ACCOUNT_MISMATCH)
 
     @contextmanager
-    def _connection(self):
-        with self.transport_factory() as transport:
+    def _connection(self, account_id, environment):
+        with self.transport_factory(account_id, environment) as transport:
             # Verify on every operation even with injected transports.
             token = getattr(transport, 'token', None)
             accounts = transport.request(2149, {'accessToken':token}, 2150).get('ctidTraderAccount', [])
-            matched = [a for a in accounts if str(a.get('ctidTraderAccountId')) == str(ACCOUNT)]
-            if len(matched) != 1 or matched[0].get('isLive') is not False:
+            matched = [a for a in accounts if str(a.get('ctidTraderAccountId')) == str(account_id)]
+            if len(matched) != 1 or matched[0].get('isLive') is not (environment == 'live'):
                 raise BrokerTestBlocked(Code.DEMO_PROOF_REQUIRED)
             yield transport
 
     @staticmethod
-    def _history(transport, since):
+    def _history(transport, since, account_id):
         now = int(time.time() * 1000)
         start = int(since.replace(tzinfo=since.tzinfo or timezone.utc).timestamp() * 1000) - 60000
-        payload = {'ctidTraderAccountId':ACCOUNT,'fromTimestamp':start,'toTimestamp':now}
+        payload = {'ctidTraderAccountId':int(account_id),'fromTimestamp':start,'toTimestamp':now}
         orders = transport.request(2175, payload, 2176)
         deals = transport.request(2133, {**payload, 'maxRows':1000}, 2134)
         if orders.get('hasMore') is not False or deals.get('hasMore') is not False:
@@ -164,30 +165,36 @@ class CTraderTestAdapter:
             raise BrokerTestBlocked(Code.BROKER_RESPONSE_INVALID) from exc
 
     def _fresh_preflight(self, request):
-        if request.account_id != str(ACCOUNT) or request.symbol != 'EURUSD':
+        if request.symbol != 'EURUSD':
             raise BrokerTestBlocked(Code.INVALID_REQUEST)
-        self._assert_selected_account()
-        with self._connection() as transport:
-            trader = transport.request(2121, {'ctidTraderAccountId':ACCOUNT}, 2122)['trader']
-            if (str(trader.get('ctidTraderAccountId')) != str(ACCOUNT)
+        from ctrader_account_context import selected_identity
+        selected = selected_identity()
+        if selected is None or selected.account_id != request.account_id:
+            raise BrokerTestBlocked(Code.SELECTED_ACCOUNT_MISMATCH)
+        account = int(request.account_id)
+        environment = selected.environment
+        with self._connection(request.account_id, environment) as transport:
+            trader = transport.request(2121, {'ctidTraderAccountId':account}, 2122)['trader']
+            if (str(trader.get('ctidTraderAccountId')) != request.account_id
                     or trader.get('accountType') not in (0, 'HEDGED')
                     or trader.get('accessRights') not in (0, 'FULL_ACCESS')
                     or trader.get('isLimitedRisk') is not False):
                 raise BrokerTestBlocked(Code.ACCOUNT_PERMISSIONS_UNSUPPORTED)
-            symbols = transport.request(2114, {'ctidTraderAccountId':ACCOUNT,'includeArchivedSymbols':False}, 2115)['symbol']
+            symbols = transport.request(2114, {'ctidTraderAccountId':account,'includeArchivedSymbols':False}, 2115)['symbol']
             candidates = [s for s in symbols if s.get('symbolName') == 'EURUSD']
             if len(candidates) != 1:
                 raise BrokerTestBlocked(Code.SYMBOL_METADATA_INVALID)
             symbol_id = int(candidates[0]['symbolId'])
-            details = transport.request(2116, {'ctidTraderAccountId':ACCOUNT,'symbolId':[symbol_id]}, 2117)['symbol']
+            details = transport.request(2116, {'ctidTraderAccountId':account,'symbolId':[symbol_id]}, 2117)['symbol']
             if len(details) != 1 or int(details[0]['symbolId']) != symbol_id:
                 raise BrokerTestBlocked(Code.SYMBOL_METADATA_INVALID)
             symbol = details[0]
             try:
-                volume, step, maximum = (int(symbol[k]) for k in ('minVolume','stepVolume','maxVolume'))
+                volume, step, maximum, lot_size = (int(symbol[k]) for k in ('minVolume','stepVolume','maxVolume','lotSize'))
             except (KeyError, TypeError, ValueError) as exc:
                 raise BrokerTestBlocked(Code.INVALID_BROKER_VOLUME) from exc
-            if volume <= 0 or step <= 0 or volume % step or maximum < volume:
+            if (volume <= 0 or step <= 0 or volume % step or maximum < volume
+                    or lot_size <= 0 or volume * 100 > lot_size):
                 raise BrokerTestBlocked(Code.INVALID_BROKER_VOLUME)
             if symbol.get('tradingMode') not in (0, 'ENABLED'):
                 raise BrokerTestBlocked(Code.SYMBOL_METADATA_INVALID)
@@ -203,7 +210,7 @@ class CTraderTestAdapter:
                 bid, ask = int(quote['bid']) / 100000, int(quote['ask']) / 100000
             except (KeyError, TypeError, ValueError) as exc:
                 raise BrokerTestBlocked(Code.QUOTE_INVALID) from exc
-            if (quote_account != str(ACCOUNT) or quote_symbol != symbol_id
+            if (quote_account != request.account_id or quote_symbol != symbol_id
                     or abs(time.time()*1000 - quote_time) > 30000):
                 raise BrokerTestBlocked(Code.QUOTE_INVALID)
             if not 0 < bid < ask:
@@ -213,28 +220,28 @@ class CTraderTestAdapter:
             if max(distances) > 0.02:
                 raise BrokerTestBlocked(Code.PROTECTION_UNSUPPORTED)
             self.protection = tuple(math.ceil(d*100000) for d in distances)
-            existing = transport.request(2124, {'ctidTraderAccountId':ACCOUNT,'returnProtectionOrders':False}, 2125)
+            existing = transport.request(2124, {'ctidTraderAccountId':account,'returnProtectionOrders':False}, 2125)
             if existing.get('position') or existing.get('order'):
                 raise BrokerTestBlocked(Code.EXISTING_EXPOSURE)
-            self._history(transport, datetime.now(timezone.utc))
-            return Preflight(str(ACCOUNT), False, 'EURUSD', symbol_id, volume, step, maximum, bid, ask, True)
+            self._history(transport, datetime.now(timezone.utc), request.account_id)
+            self._assert_selected_account(request.account_id, environment)
+            return Preflight(request.account_id, environment == 'live', 'EURUSD', symbol_id, volume, step, maximum, bid, ask, True)
 
     def submit(self, row):
-        if row.account_id != str(ACCOUNT) or not self.protection:
+        if not self.protection:
             raise BrokerTestBlocked(Code.INVALID_REQUEST)
-        with self._connection() as transport:
-            self._assert_selected_account()
-            transport.request(2106, {'ctidTraderAccountId':ACCOUNT, 'symbolId':row.symbol_id,
+        from ctrader_account_context import account_state_lock
+        with account_state_lock, self._connection(row.account_id, row.environment) as transport:
+            self._assert_selected_account(row.account_id, row.environment)
+            transport.request(2106, {'ctidTraderAccountId':int(row.account_id), 'symbolId':row.symbol_id,
                 'orderType':1, 'tradeSide':1, 'volume':row.volume, 'label':row.reference,
-                'clientOrderId':row.reference, 'comment':'Dedicated DEMO broker integration test',
+                'clientOrderId':row.reference, 'comment':'Dedicated broker integration test',
                 'relativeStopLoss':self.protection[0], 'relativeTakeProfit':self.protection[1]}, 2126)
 
     def reconcile(self, row):
-        if row.account_id != str(ACCOUNT):
-            raise BrokerTestBlocked(Code.INVALID_REQUEST)
-        with self._connection() as transport:
-            orders, deals = self._history(transport, row.created_at)
-            current = transport.request(2124, {'ctidTraderAccountId':ACCOUNT,'returnProtectionOrders':False}, 2125)
+        with self._connection(row.account_id, row.environment) as transport:
+            orders, deals = self._history(transport, row.created_at, row.account_id)
+            current = transport.request(2124, {'ctidTraderAccountId':int(row.account_id),'returnProtectionOrders':False}, 2125)
         matched = [o for o in orders if o.get('clientOrderId') == row.reference
                    and (o.get('tradeData') or {}).get('label') == row.reference
                    and not o.get('closingOrder')]
@@ -288,7 +295,7 @@ class CTraderTestAdapter:
                 return Reconciliation(False)
         except (KeyError, TypeError, ValueError, OverflowError):
             return Reconciliation(False)
-        return Reconciliation(True, str(ACCOUNT), row.symbol_id, 'BUY', row.reference,
+        return Reconciliation(True, row.account_id, row.symbol_id, 'BUY', row.reference,
                               order_id, position_id, row.volume, open_volume, closed,
                               fill_price, opened_at, closed_at)
 
@@ -297,6 +304,6 @@ class CTraderTestAdapter:
         BrokerIntegrationTestService._verify(row, fresh)
         if fresh != evidence or fresh.open_volume <= 0:
             raise BrokerTestBlocked(Code.UNRESOLVED_CLOSE)
-        with self._connection() as transport:
-            transport.request(2111, {'ctidTraderAccountId':ACCOUNT,
+        with self._connection(row.account_id, row.environment) as transport:
+            transport.request(2111, {'ctidTraderAccountId':int(row.account_id),
                 'positionId':int(fresh.position_id),'volume':fresh.open_volume}, 2126)

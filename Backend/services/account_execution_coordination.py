@@ -10,7 +10,6 @@ from sqlalchemy import select, text
 from models import BrokerIntegrationTestSubmission
 from services.broker_integration_test_errors import BlockerCode
 
-TEST_ACCOUNT = '47784297'
 _execution_account = ContextVar('normal_execution_account', default=None)
 
 
@@ -20,7 +19,8 @@ class ExecutionFenced(RuntimeError):
 
 @contextmanager
 def account_lock(session_factory, account_id):
-    if str(account_id) != TEST_ACCOUNT:
+    account_id = str(account_id)
+    if not account_id.isdecimal():
         yield
         return
     with session_factory() as session:
@@ -29,19 +29,20 @@ def account_lock(session_factory, account_id):
         # Session-level advisory locks are unsafe behind transaction poolers.
         # A dedicated connection holds a transaction lock across all broker work.
         with engine.connect() as connection, connection.begin():
+            key = int.from_bytes(hashlib.sha256(('broker-test:' + account_id).encode()).digest()[:8], 'big', signed=True)
             acquired = connection.execute(text('SELECT pg_try_advisory_xact_lock(:key)'),
-                {'key': 477842970022}).scalar()
+                {'key': key}).scalar()
             if not acquired:
-                raise ExecutionFenced('DEMO broker test account busy')
+                raise ExecutionFenced('Broker test account busy')
             yield
     elif engine.dialect.name == 'sqlite':
-        identity = hashlib.sha256(str(engine.url).encode()).hexdigest()
-        path = os.path.join(tempfile.gettempdir(), f'flowsignal-demo-{identity}.lock')
+        identity = hashlib.sha256(f'{engine.url}:{account_id}'.encode()).hexdigest()
+        path = os.path.join(tempfile.gettempdir(), f'flowsignal-broker-test-{identity}.lock')
         with open(path, 'a') as handle:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
-                raise ExecutionFenced('DEMO broker test account busy') from exc
+                raise ExecutionFenced('Broker test account busy') from exc
             try:
                 yield
             finally:
@@ -65,24 +66,24 @@ def assert_execution_account(account_id):
 
 
 def _run_normal_submission(session_factory, account_id, callback):
-    if str(account_id) != TEST_ACCOUNT:
+    if not str(account_id).isdecimal():
         return callback()
     with account_lock(session_factory, account_id):
         with session_factory() as session:
             pending = session.scalar(select(BrokerIntegrationTestSubmission.test_id).where(
-                BrokerIntegrationTestSubmission.unresolved_account == TEST_ACCOUNT))
+                BrokerIntegrationTestSubmission.unresolved_account == str(account_id)))
             if pending:
-                raise ExecutionFenced('Unresolved DEMO broker integration test')
+                raise ExecutionFenced('Unresolved broker integration test')
         return callback()
 
 
 def exclude_test_positions(session_factory, account_id, positions, *, closed_history=False):
     """Exclude only durable exact identity matches, including terminal tests."""
-    if str(account_id) != TEST_ACCOUNT:
+    if not str(account_id).isdecimal():
         return positions
     with session_factory() as session:
         rows = session.scalars(select(BrokerIntegrationTestSubmission).where(
-            BrokerIntegrationTestSubmission.account_id == TEST_ACCOUNT)).all()
+            BrokerIntegrationTestSubmission.account_id == str(account_id))).all()
         if closed_history and any(row.unresolved_account and row.request_started_at
                                   and not row.broker_position_id for row in rows):
             error = ExecutionFenced('Closed history identity unresolved')
