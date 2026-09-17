@@ -5,7 +5,7 @@ from bisect import bisect_right
 
 import pandas as pd
 
-from indicators.smc.engine import analyze_structure
+from indicators.smc import analyze_structure
 from services.strategy_engine.types import CandleFacts, StructureEventFacts, TrendFacts
 
 
