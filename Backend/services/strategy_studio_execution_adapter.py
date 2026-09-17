@@ -11,6 +11,37 @@ import math
 from ctrader_connector import TRADE_LEVEL_RULES, normalize_symbol
 
 
+def studio_risk_reward_details(symbol, action, entry, sl, tp2):
+    side = str(action or "").strip().upper()
+    try:
+        entry_value = float(entry)
+        sl_value = float(sl)
+        tp2_value = float(tp2)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "Strategy Studio entry, SL, and TP2 must be valid numbers"}
+    if not all(math.isfinite(value) for value in (entry_value, sl_value, tp2_value)):
+        return {"ok": False, "reason": "Strategy Studio levels must be finite real numbers"}
+    if side == "BUY":
+        risk = entry_value - sl_value
+        reward = tp2_value - entry_value
+    elif side == "SELL":
+        risk = sl_value - entry_value
+        reward = entry_value - tp2_value
+    else:
+        return {"ok": False, "reason": "Action must be BUY or SELL"}
+    if risk <= 0 or reward <= 0:
+        return {"ok": False, "reason": "LIVE BLOCKED: invalid Strategy Studio SL/TP direction."}
+    return {
+        "ok": True,
+        "symbol": normalize_symbol(symbol),
+        "action": side,
+        "risk_distance": risk,
+        "reward_distance": reward,
+        "risk_reward_ratio": round(reward / risk, 4),
+        "strategy_studio_defined_rr": True,
+    }
+
+
 def normalize_studio_trade_levels(symbol, action, entry, sl, tp1, tp2, *, tp1_enabled: bool):
     public_symbol = normalize_symbol(symbol)
     side = str(action or "").strip().upper()
