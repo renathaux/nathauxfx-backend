@@ -54,10 +54,10 @@ def test_route_source_has_no_broker_or_live_mutation_calls():
         assert token not in source
 
 
-def test_api_mounts_strategy_simulator_router():
-    api_source = (Path(__file__).resolve().parents[1] / "api.py").read_text(encoding="utf-8")
-    assert "from routes.strategy_simulator import router as strategy_simulator_router" in api_source
-    assert "app.include_router(strategy_simulator_router)" in api_source
+def test_settings_aggregator_mounts_strategy_simulator_router():
+    settings_source = (Path(__file__).resolve().parents[1] / "routes" / "settings.py").read_text(encoding="utf-8")
+    assert "from routes.strategy_simulator import router as strategy_simulator_router" in settings_source
+    assert "router.include_router(strategy_simulator_router)" in settings_source
 
 
 def test_foreign_or_missing_strategy_returns_404(monkeypatch):
