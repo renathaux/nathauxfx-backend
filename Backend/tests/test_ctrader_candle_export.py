@@ -244,9 +244,11 @@ def test_strict_historical_reader_rejects_raw_defects_before_normalization(defec
         assert "duplicate" in str(error.value) if defect == "duplicate" else "invalid" in str(error.value)
 
 
-@pytest.mark.parametrize("boundary_conflict", [False, True])
+@pytest.mark.parametrize("boundary_conflict,earlier_conflict", [
+    (False, False), (True, False), (False, True),
+])
 def test_strict_historical_reader_allows_only_matching_page_boundary_overlap(
-    boundary_conflict,
+    boundary_conflict, earlier_conflict,
 ):
     start = datetime(2026, 9, 12, tzinfo=timezone.utc)
     boundary = start + timedelta(minutes=4500)
@@ -265,7 +267,12 @@ def test_strict_historical_reader_allows_only_matching_page_boundary_overlap(
         repeated = bar(boundary)
         if boundary_conflict:
             repeated["deltaClose"] += 1
-        return {"payload": {"trendbar": [repeated, bar(end)]}}
+        rows = [repeated, bar(end)]
+        if earlier_conflict:
+            earlier = bar(start)
+            earlier["deltaClose"] += 1
+            rows.insert(0, earlier)
+        return {"payload": {"trendbar": rows}}
 
     with patch.object(ctrader_connector, "get_ctrader_config", return_value={
         "env": "demo", "account_id": "47810571"
@@ -282,7 +289,7 @@ def test_strict_historical_reader_allows_only_matching_page_boundary_overlap(
     ), patch.object(
         ctrader_connector, "send_ctrader_request", side_effect=page,
     ):
-        if boundary_conflict:
+        if boundary_conflict or earlier_conflict:
             with pytest.raises(ValueError, match="raw broker candle"):
                 ctrader_connector.fetch_ctrader_historical_candles(
                     "EURUSD", "5m", start, end, strict_raw=True,
@@ -294,6 +301,50 @@ def test_strict_historical_reader_allows_only_matching_page_boundary_overlap(
             assert list(frame.index) == list(pd.to_datetime(
                 [start, boundary, end], utc=True,
             ))
+
+
+@pytest.mark.parametrize("symbol,extra_minutes", [
+    ("EURUSD", 25), ("XAUUSD", 155),
+])
+def test_strict_historical_reader_ignores_broker_bars_before_requested_start(
+    symbol, extra_minutes,
+):
+    start = datetime(2026, 9, 15, 20, 15, tzinfo=timezone.utc)
+
+    def bar(at):
+        return {
+            "utcTimestampInMinutes": int(at.timestamp() // 60),
+            "low": 115390,
+            "deltaOpen": 10, "deltaHigh": 20, "deltaClose": 15,
+        }
+
+    rows = [
+        bar(start - timedelta(minutes=extra_minutes)),
+        bar(start), bar(start + timedelta(minutes=5)),
+    ]
+    with patch.object(ctrader_connector, "get_ctrader_config", return_value={
+        "env": "demo", "account_id": "47810571"
+    }), patch.object(
+        ctrader_connector, "open_ctrader_json_socket", return_value=Mock()
+    ), patch.object(
+        ctrader_connector, "authorize_ctrader_socket"
+    ), patch.object(
+        ctrader_connector, "fetch_ctrader_symbol_details", return_value=[]
+    ), patch.object(
+        ctrader_connector, "resolve_ctrader_symbol", return_value={
+            "symbol_id": 41, "digits": 5,
+        }
+    ), patch.object(
+        ctrader_connector, "send_ctrader_request",
+        return_value={"payload": {"trendbar": rows}},
+    ):
+        frame = ctrader_connector.fetch_ctrader_historical_candles(
+            symbol, "5m", start, start + timedelta(minutes=10),
+            strict_raw=True,
+        )
+    assert list(frame.index) == list(pd.to_datetime(
+        [start, start + timedelta(minutes=5)], utc=True,
+    ))
 
 
 def test_chart_history_is_two_month_bounded_closed_and_read_only():

@@ -4573,12 +4573,16 @@ def fetch_ctrader_historical_candles(
                         if single is None or len(single) != 1:
                             raise ValueError("missing candle fields")
                         timestamp = pd.Timestamp(single.index[0])
+                        # cTrader may return preceding bars despite a bounded
+                        # fromTimestamp. They are not disputed evidence and
+                        # never enter the final requested-range frame.
+                        if pd.notna(timestamp) and (timestamp < start or timestamp > end):
+                            continue
                         prices = [float(single.iloc[0][field]) for field in (
                             "Open", "High", "Low", "Close"
                         )]
                         if (
                             pd.isna(timestamp) or timestamp in seen_page_times
-                            or timestamp < cursor or timestamp > page_end
                             or timestamp.minute % period_minutes
                             or timestamp.second or timestamp.microsecond
                             or not all(math.isfinite(price) for price in prices)
@@ -4588,10 +4592,8 @@ def fetch_ctrader_historical_candles(
                         ):
                             raise ValueError("duplicate, off-grid, or invalid OHLC")
                         seen_page_times.add(timestamp)
-                        if timestamp in strict_seen and (
-                            timestamp != cursor or strict_seen[timestamp] != tuple(prices)
-                        ):
-                            raise ValueError("conflicting or non-boundary page overlap")
+                        if timestamp in strict_seen and strict_seen[timestamp] != tuple(prices):
+                            raise ValueError("conflicting page overlap")
                         strict_seen[timestamp] = tuple(prices)
                     except (TypeError, ValueError, OverflowError) as exc:
                         raise ValueError(
