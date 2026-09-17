@@ -28,7 +28,7 @@ jobs:
           pip install -r requirements.txt
           pip install pytest httpx2
 
-      - name: Run Stage 3 parity, handoff, and V3B regressions
+      - name: Run Stage 3 parity, handoff, management, and V3B regressions
         env:
           DATABASE_URL: "sqlite:///:memory:"
           PYTHONDONTWRITEBYTECODE: "1"
@@ -39,6 +39,7 @@ jobs:
             tests/test_strategy_studio_submission.py \
             tests/test_strategy_studio_live_candidate.py \
             tests/test_strategy_studio_live_handoff.py \
+            tests/test_strategy_studio_position_manager.py \
             tests/test_strategy_engine_evaluator.py \
             tests/test_strategy_engine_market_facts.py \
             tests/test_strategy_lab_v3b.py \
