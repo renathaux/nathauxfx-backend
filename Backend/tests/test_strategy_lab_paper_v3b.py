@@ -66,6 +66,15 @@ def test_eurusd_bridge_builds_frozen_candidate_without_mutating_lifecycle():
     assert result["paper_entry_model"] == PAPER_V3B_MODEL
     assert result["signal"] == "BUY"
     assert result["source_indicator_event_id"] == "smc1_eur_v3b"
+    setup = result["v3b_setup_state"]
+    assert setup["indicator_event_id"] == "smc1_eur_v3b"
+    assert setup["m5_confirmation_id"] == result["m5_confirmation_id"]
+    assert setup["bos_body_pass"] is True
+    assert setup["second_5m_same_direction"] is True
+    assert setup["second_5m_stays_beyond_bos_level"] is True
+    assert setup["structural_sl_found"] is True
+    assert setup["entry_ready"] is True
+    assert setup["signal"] == "BUY"
     assert result["setup_identity"]["setup_timeframe"] == "5m"
     assert result["setup_identity"]["swing_type"] == "HIGH"
     assert result["risk_reward_ratio"] == pytest.approx(1.90)
@@ -186,6 +195,15 @@ def test_fresh_bos_before_second_close_exposes_time_bounded_progress_without_ent
     assert result["source_indicator_event_id"] == "fresh_bos_1205"
     assert result["paper_entry_details"]["bos_body_ratio"] == pytest.approx(1.1 / 1.4)
     assert result["paper_entry_details"]["bos_candle_time"] == index[-1].isoformat()
+    setup = result["v3b_setup_state"]
+    assert setup["indicator_event_id"] == "fresh_bos_1205"
+    assert setup["has_bos"] is True
+    assert setup["bos_body_pass"] is True
+    assert setup["second_5m_same_direction"] is None
+    assert setup["second_5m_stays_beyond_bos_level"] is None
+    assert setup["structural_sl_found"] is None
+    assert setup["lifecycle_state"] == "WAITING_CONFIRMATION"
+    assert setup["signal"] == "WAIT"
     assert "entry_price" not in result
 
     invalid_direction = dict(event, direction="UNKNOWN")
@@ -194,6 +212,36 @@ def test_fresh_bos_before_second_close_exposes_time_bounded_progress_without_ent
         authoritative_reader=_authority(invalid_direction),
     )
     assert invalid["paper_entry_reason"] == "WAIT_V3B_PAPER_5M_BOS"
+
+
+def test_new_closed_bos_progress_is_not_masked_by_expired_older_pair():
+    index = pd.to_datetime([
+        "2026-09-16T12:00:00Z", "2026-09-16T12:05:00Z",
+        "2026-09-16T12:10:00Z",
+    ])
+    frame = pd.DataFrame({
+        "Open": [1.1000, 1.1010, 1.1018],
+        "High": [1.1018, 1.1020, 1.1034],
+        "Low": [1.0998, 1.1008, 1.1017],
+        "Close": [1.1017, 1.1019, 1.1032],
+    }, index=index)
+    def event(event_id, timestamp, level):
+        return {
+            "event_id": event_id, "symbol": "EURUSD", "timeframe": "5m",
+            "timestamp": timestamp.isoformat(), "event_type": "BOS",
+            "direction": "BULLISH", "broken_level": level,
+            "broken_swing_timestamp": "2026-09-16T11:50:00Z",
+            "event_invalidation_swing": {"type": "LOW", "price": 1.0998},
+            "tradable": True,
+        }
+    events = [event("old-bos", index[0], 1.1015), event("new-bos", index[2], 1.1030)]
+    result = build_paper_v3b_candidate(
+        "EURUSD", frame, strict_trader_module=_Strict,
+        authoritative_reader=lambda *_args: {"events": events},
+    )
+    assert result["paper_entry_reason"] == "WAIT_V3B_PAPER_SECOND_5M"
+    assert result["v3b_setup_state"]["indicator_event_id"] == "new-bos"
+    assert result["v3b_setup_state"]["lifecycle_state"] == "WAITING_CONFIRMATION"
 
 
 def test_bridge_final_gate_can_fail_closed_without_opening_any_trade():
@@ -305,6 +353,16 @@ def test_verified_sep14_rejections_keep_their_exact_v3b_reason(
     assert result["source_indicator_event_id"] == event["event_id"]
     assert result["paper_entry_details"]["bos_candle_time"] == frame.index[0].isoformat()
     assert result["paper_entry_details"]["broken_level"] == broken_level
+    setup = result["v3b_setup_state"]
+    assert setup["indicator_event_id"] == event["event_id"]
+    assert setup["has_bos"] is True
+    assert setup["lifecycle_state"] == "INVALIDATED"
+    assert setup["signal"] == "WAIT"
+    if expected == "WAIT_V3B_PAPER_SECOND_5M":
+        assert setup["bos_body_pass"] is True
+        assert setup["second_5m_same_direction"] is False
+    else:
+        assert setup["bos_body_pass"] is False
 
 
 def test_verified_sep14_0250_bos_and_0255_confirmation_are_selected():

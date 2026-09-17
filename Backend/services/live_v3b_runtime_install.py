@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import copy
 import time
-from ctrader_account_context import account_state_operation, selected_identity
+from ctrader_account_context import (
+    AccountSelectionChanged, account_state_lock, account_state_operation,
+    current_identity, pinned_account, selected_identity,
+)
 
 from services.live_v3b_execution_adapter import (
     dispatch_v3b_to_live_core,
@@ -389,46 +392,138 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
                     "live_v3b_details": {"error": str(exc)},
                 }
 
-            side = str(candidate.get("side") or candidate.get("signal") or "WAIT").upper()
+            nested = candidate.get("live_v3b_details") if isinstance(candidate.get("live_v3b_details"), dict) else {}
+            source_candidate = nested.get("source_candidate") if isinstance(nested.get("source_candidate"), dict) else candidate
+            setup_state = source_candidate.get("v3b_setup_state") if isinstance(source_candidate.get("v3b_setup_state"), dict) else {}
+            side = str(setup_state.get("signal") or candidate.get("side") or candidate.get("signal") or "WAIT").upper()
+            if not history_scope and (candidate.get("live_v3b_ready") or setup_state):
+                # Never show or execute a 5m setup whose fetched frame cannot
+                # be tied to the selected cTrader account.
+                results.append(_blocked("WAIT_V3B_SIGNAL_HISTORY_SCOPE_UNAVAILABLE"))
+                continue
+            history_row = None
             if history_scope:
                 from services.v3b_signal_history import record_v3b_transition
 
                 try:
-                    record_v3b_transition(
-                        history_scope, symbol, side if side in {"BUY", "SELL"} else "WAIT",
-                        candidate.get("five_m_closed_candle_time") or time.time(),
-                        event_id=candidate.get("source_indicator_event_id"),
-                        confirmation_id=candidate.get("m5_confirmation_id"),
-                        setup_id=candidate.get("signal_setup_id"),
-                        entry=candidate.get("entry") or candidate.get("entry_price"),
+                    history_row = record_v3b_transition(
+                        history_scope, symbol,
+                        side if side in {"BUY", "SELL"} and source_candidate.get("signal_setup_id") else "WAIT",
+                        source_candidate.get("five_m_closed_candle_time")
+                        or source_candidate.get("five_m_break_close_time")
+                        or time.time(),
+                        event_id=source_candidate.get("source_indicator_event_id"),
+                        confirmation_id=source_candidate.get("m5_confirmation_id"),
+                        setup_id=source_candidate.get("signal_setup_id"),
+                        entry=source_candidate.get("entry") or source_candidate.get("entry_price"),
+                        execution_status=("BLOCKED" if setup_state.get("execution_status") == "BLOCKED"
+                                          and source_candidate.get("signal_setup_id") else None),
                         reason=candidate.get("live_v3b_reason"),
                     )
                 except Exception as exc:
                     results.append(_blocked("WAIT_V3B_SIGNAL_HISTORY_UNAVAILABLE", {"error": str(exc)}))
                     continue
-            elif candidate.get("live_v3b_ready"):
-                # A ready candidate without a frame bound to the selected account
-                # cannot be sent to the broker or attributed in durable history.
-                results.append(_blocked("WAIT_V3B_SIGNAL_HISTORY_SCOPE_UNAVAILABLE"))
-                continue
             if not candidate.get("live_v3b_ready"):
                 reason = candidate.get("live_v3b_reason") or "WAIT_V3B_LIVE_QUALIFICATION"
+                display_details = copy.deepcopy(candidate.get("live_v3b_details") or {})
+                if "source_candidate" not in display_details and isinstance(candidate.get("v3b_setup_state"), dict):
+                    display_details["source_candidate"] = copy.deepcopy(candidate)
+                if history_scope:
+                    display_details["account_scope"] = history_scope
+                blocked_setup = setup_state.get("execution_status") == "BLOCKED"
                 try:
                     api_module.set_auto_trade_status(
                         symbol=symbol,
                         signal=side,
                         action=side if side in {"BUY", "SELL"} else None,
-                        status="WAIT",
+                        status="BLOCKED" if blocked_setup else "WAIT",
                         reason=reason,
-                        details=candidate.get("live_v3b_details"),
+                        details=display_details,
                     )
                 except Exception:
                     pass
                 results.append(_blocked(reason, candidate.get("live_v3b_details")))
                 continue
 
+            # History is a display/audit projection, not the execution lock.
+            # A prior executor exception can leave its row at CANDIDATE even
+            # after the durable event lifecycle crossed the request-start
+            # boundary. Check that existing authoritative claim before any
+            # new handoff, using the same pinned account as the fetched frame.
+            event_id = candidate.get("source_indicator_event_id")
+            try:
+                lifecycle = (
+                    api_module.get_event_lifecycles(
+                        [event_id], owner_id="OWNER",
+                        account_id=history_scope.rsplit(":", 1)[-1],
+                    ).get(event_id, {}).get("LIVE") or {}
+                )
+                lifecycle_status = str(lifecycle.get("status") or "").upper()
+            except Exception as exc:
+                results.append(_blocked("WAIT_V3B_EVENT_LIFECYCLE_UNAVAILABLE", {"error": str(exc)}))
+                continue
+            if lifecycle_status in {"CONSUMED", "SUBMITTING", "RECONCILIATION_REQUIRED"}:
+                projected_status = ("EXECUTED" if lifecycle_status == "CONSUMED"
+                                    else lifecycle_status)
+                reason = f"indicator event unavailable: {lifecycle_status}"
+                display_candidate = copy.deepcopy(candidate)
+                state = display_candidate.get("v3b_setup_state")
+                if isinstance(state, dict):
+                    state.update(
+                        lifecycle_state="CONSUMED" if lifecycle_status == "CONSUMED" else "BLOCKED",
+                        execution_status=projected_status,
+                        execution_block_reason=None if lifecycle_status == "CONSUMED" else reason,
+                    )
+                if lifecycle_status != "SUBMITTING":
+                    # SUBMITTING is transient: the first worker can still
+                    # obtain a definitive rejection. Never turn an in-flight
+                    # claim into an irreversible reconciliation record.
+                    record_v3b_transition(
+                        history_scope, symbol, side,
+                        candidate.get("five_m_closed_candle_time") or time.time(),
+                        setup_id=candidate.get("signal_setup_id"),
+                        execution_status=projected_status, reason=reason,
+                    )
+                api_module.set_auto_trade_status(
+                    symbol=symbol, signal=side, action=side,
+                    status=projected_status, reason=reason,
+                    details={"source_candidate": display_candidate,
+                             "account_scope": history_scope},
+                )
+                results.append(_blocked(reason))
+                continue
+
+            if (isinstance(history_row, dict)
+                    and history_row.get("signal_setup_id") == candidate.get("signal_setup_id")
+                    and history_row.get("execution_status") in {"EXECUTED", "RUNNING", "SUBMITTED", "RECONCILIATION_REQUIRED"}):
+                # Preserve an irreversible prior outcome, but only after
+                # inspecting the authoritative event lifecycle above.
+                display_candidate = copy.deepcopy(candidate)
+                state = display_candidate.get("v3b_setup_state")
+                if isinstance(state, dict):
+                    state.update(lifecycle_state=("BLOCKED" if history_row["execution_status"] == "RECONCILIATION_REQUIRED"
+                                                  else "CONSUMED"),
+                                 execution_status=history_row["execution_status"],
+                                 execution_block_reason=(history_row.get("reason") if history_row["execution_status"] == "RECONCILIATION_REQUIRED"
+                                                         else None))
+                api_module.set_auto_trade_status(
+                    symbol=symbol, signal=side, action=side,
+                    status=history_row["execution_status"],
+                    reason=history_row.get("reason") or "V3B setup already submitted",
+                    details={"source_candidate": display_candidate,
+                             "account_scope": history_scope},
+                )
+                results.append(_blocked("WAIT_V3B_SETUP_ALREADY_SUBMITTED"))
+                continue
+
             if not broker_ready:
                 reason = "Live Auto paused — broker disconnected"
+                display_candidate = copy.deepcopy(candidate)
+                if isinstance(display_candidate.get("v3b_setup_state"), dict):
+                    display_candidate["v3b_setup_state"].update(
+                        lifecycle_state="BLOCKED", execution_status="BLOCKED",
+                        execution_block_reason=reason,
+                    )
                 results.append(_blocked(reason))
                 if history_scope:
                     record_v3b_transition(
@@ -444,26 +539,52 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
                         action=side,
                         status="BLOCKED",
                         reason=reason,
+                        details={"source_candidate": display_candidate, "account_scope": history_scope},
                     )
                 except Exception:
                     pass
                 continue
 
-            result = dispatch_v3b_to_live_core(
-                candidate,
-                executor=api_module.execute_live_order_core,
-                live_auto_enabled=live_auto_on,
-                strategy_enabled=True,
-                broker_handoff_enabled=v3b_broker_handoff_enabled(),
-                execution_profile_supported=True,
-            )
+            try:
+                # Selection writes and the existing execution core use this
+                # same lock. The market frame's captured identity remains
+                # pinned through the exact broker handoff.
+                with account_state_lock, pinned_account(selection):
+                    if current_identity() != selection:
+                        raise AccountSelectionChanged("market frame account differs from pinned operation")
+                    if selected_identity() != selection:
+                        raise AccountSelectionChanged("account selection changed before V3B handoff")
+                    result = dispatch_v3b_to_live_core(
+                        candidate,
+                        executor=api_module.execute_live_order_core,
+                        live_auto_enabled=live_auto_on,
+                        strategy_enabled=True,
+                        broker_handoff_enabled=v3b_broker_handoff_enabled(),
+                        execution_profile_supported=True,
+                    )
+            except AccountSelectionChanged:
+                results.append(_blocked("WAIT_V3B_ACCOUNT_SELECTION_CHANGED"))
+                continue
             results.append(result)
+            broker_outcome = result.get("execution_result") if isinstance(result.get("execution_result"), dict) else {}
+            broker_category = str(broker_outcome.get("broker_result") or "").upper()
+            ambiguous = (not result.get("ok") and broker_category
+                         and broker_category not in {"DEFINITELY_REJECTED", "FAILED_BEFORE_SEND"})
+            execution_status = ("EXECUTED" if result.get("ok") else
+                                "RECONCILIATION_REQUIRED" if ambiguous else "BLOCKED")
+            display_candidate = copy.deepcopy(candidate)
+            if isinstance(display_candidate.get("v3b_setup_state"), dict):
+                display_candidate["v3b_setup_state"].update(
+                    lifecycle_state="CONSUMED" if result.get("ok") else "BLOCKED",
+                    execution_status=execution_status,
+                    execution_block_reason=None if result.get("ok") else result.get("reason"),
+                )
             if history_scope:
                 record_v3b_transition(
                     history_scope, symbol, side,
                     candidate.get("five_m_closed_candle_time") or time.time(),
                     setup_id=candidate.get("signal_setup_id"),
-                    execution_status="EXECUTED" if result.get("ok") else "BLOCKED",
+                    execution_status=execution_status,
                     reason=result.get("reason"),
                 )
             try:
@@ -471,13 +592,15 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
                     symbol=symbol,
                     signal=side,
                     action=side if side in {"BUY", "SELL"} else None,
-                    status=("EXECUTED" if result.get("ok") else "BLOCKED"),
+                    status=execution_status,
                     reason=result.get("reason") or (
                         "V3B broker handoff accepted" if result.get("ok") else "V3B blocked"
                     ),
                     details={
                         "strategy_execution_profile": V3B_EXECUTION_PROFILE,
                         "submitted": bool(result.get("submitted")),
+                        "source_candidate": display_candidate,
+                        "account_scope": history_scope,
                     },
                 )
             except Exception:

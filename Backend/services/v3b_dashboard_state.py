@@ -85,6 +85,12 @@ def enrich_dashboard_payload(payload, live_status_by_symbol, *, signal_history=N
         reason = status.get("reason")
         details = status.get("details") if isinstance(status.get("details"), dict) else {}
         details = copy.deepcopy(details)
+        account_scope = _text(meta.get("account_scope"))
+        status_scope = _text(details.get("account_scope"))
+        if account_scope and status_scope != account_scope:
+            # A previous account's in-flight evaluation is never a display
+            # candidate for the currently selected account.
+            continue
 
         source_candidate = details.get("source_candidate")
         if not isinstance(source_candidate, dict):

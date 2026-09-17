@@ -76,6 +76,47 @@ def _wait(symbol, reason, details=None):
     return result
 
 
+def _setup_state(symbol, event, bos_open, body_ratio, side, *, lifecycle,
+                 second_open=None, same_direction=None, stays_beyond=None,
+                 confirmation_id=None, levels=None):
+    """Project evaluator facts for display; never qualify or mutate a setup."""
+    minimum = float(SUPPORTED[symbol].MIN_BOS_BODY_RATIO)
+    bos_close = bos_open + pd.Timedelta(minutes=5)
+    confirmation_close = second_open + pd.Timedelta(minutes=5) if second_open is not None else None
+    return {
+        "symbol": symbol,
+        "strategy_profile": "V3B_M5_FROZEN",
+        "event_id": str(event["event_id"]) if event.get("event_id") else None,
+        "indicator_event_id": str(event["event_id"]) if event.get("event_id") else None,
+        "m5_confirmation_id": confirmation_id,
+        "lifecycle_state": lifecycle,
+        "side": side,
+        "bos_type": str(event.get("event_type") or "BOS").upper(),
+        "bos_direction": str(event.get("direction") or "").upper(),
+        "bos_candle_time": bos_open.isoformat(),
+        "bos_close_time": bos_close.isoformat(),
+        "bos_level": event.get("broken_level"),
+        "has_bos": True,
+        "bos_body_ratio": float(body_ratio),
+        "minimum_bos_body_ratio": minimum,
+        "bos_body_pass": bool(body_ratio >= minimum),
+        "confirmation_candle_time": second_open.isoformat() if second_open is not None else None,
+        "confirmation_close_time": confirmation_close.isoformat() if confirmation_close is not None else None,
+        "second_5m_same_direction": same_direction,
+        "second_5m_stays_beyond_bos_level": stays_beyond,
+        "structural_sl_found": True if levels and levels.get("ok") else None,
+        "sl": levels.get("stop_loss") if levels else None,
+        "entry": levels.get("entry") if levels else None,
+        "tp1": levels.get("tp1") if levels else None,
+        "tp2": levels.get("tp2") if levels else None,
+        "signal": side if lifecycle == "ELIGIBLE" else "WAIT",
+        "entry_ready": lifecycle == "ELIGIBLE",
+        "execution_status": None,
+        "execution_block_reason": None,
+        "checked_at": pd.Timestamp.now(tz="UTC").isoformat(),
+    }
+
+
 def _confirmation_identity(symbol, event_id, side, candle_open, candle_close, broken_level):
     payload = {
         "symbol": symbol,
@@ -226,7 +267,7 @@ def build_paper_v3b_candidate(
         "candidate_event_ids": [item[3].get("event_id") for item in pairs],
         "candidate_event_types": [item[3].get("event_type") for item in pairs],
     })
-    if not pairs:
+    if not any(lag_candles == 0 for _bos, _second, lag_candles, _event in pairs):
         # The BOS candle is closed, but its immediately following candle has
         # not closed yet. Expose its current stage without making it eligible.
         for event in reversed((authority or {}).get("events") or []):
@@ -259,8 +300,14 @@ def build_paper_v3b_candidate(
                 if body_ratio >= float(strategy.MIN_BOS_BODY_RATIO)
                 else "WAIT_V3B_PAPER_BOS_BODY"
             )
-            return _wait(normalized, reason, details)
-        return _wait(normalized, "WAIT_V3B_PAPER_5M_BOS")
+            result = _wait(normalized, reason, details)
+            result["v3b_setup_state"] = _setup_state(
+                normalized, event, bos_open, body_ratio, details["side"],
+                lifecycle="WAITING_CONFIRMATION" if reason == "WAIT_V3B_PAPER_SECOND_5M" else "INVALIDATED",
+            )
+            return result
+        if not pairs:
+            return _wait(normalized, "WAIT_V3B_PAPER_5M_BOS")
     rejection = None
     selected = None
     for bos_open, second_open, lag_candles, event in pairs:
@@ -276,18 +323,23 @@ def build_paper_v3b_candidate(
             rejection = _wait(normalized, "WAIT_V3B_PAPER_5M_DATA_SHAPE")
             continue
         if body_ratio < float(strategy.MIN_BOS_BODY_RATIO):
-            rejection = rejection or _wait(normalized, "WAIT_V3B_PAPER_BOS_BODY", {
+            body_rejection = _wait(normalized, "WAIT_V3B_PAPER_BOS_BODY", {
                 "bos_candle_time": bos_open.isoformat(),
                 "broken_level": broken_level,
                 "bos_body_ratio": body_ratio,
                 "minimum_bos_body_ratio": float(strategy.MIN_BOS_BODY_RATIO),
                 "source_indicator_event_id": event.get("event_id"),
             })
+            body_rejection["v3b_setup_state"] = _setup_state(
+                normalized, event, bos_open, body_ratio, side, lifecycle="INVALIDATED",
+                second_open=second_open,
+            )
+            rejection = rejection or body_rejection
             continue
         same_direction = second_close > second_open_price if side == "BUY" else second_close < second_open_price
         stays_beyond = second_close > broken_level if side == "BUY" else second_close < broken_level
         if not (same_direction and stays_beyond):
-            rejection = rejection or _wait(normalized, "WAIT_V3B_PAPER_SECOND_5M", {
+            confirmation_rejection = _wait(normalized, "WAIT_V3B_PAPER_SECOND_5M", {
                 "bos_candle_time": bos_open.isoformat(),
                 "broken_level": broken_level,
                 "side": side,
@@ -297,6 +349,12 @@ def build_paper_v3b_candidate(
                 "minimum_bos_body_ratio": float(strategy.MIN_BOS_BODY_RATIO),
                 "source_indicator_event_id": event.get("event_id"),
             })
+            confirmation_rejection["v3b_setup_state"] = _setup_state(
+                normalized, event, bos_open, body_ratio, side, lifecycle="INVALIDATED",
+                second_open=second_open, same_direction=bool(same_direction),
+                stays_beyond=bool(stays_beyond),
+            )
+            rejection = rejection or confirmation_rejection
             continue
         selected = (bos_open, second_open, lag_candles, event, side, body_ratio, second_close, broken_level)
         break
@@ -442,6 +500,11 @@ def build_paper_v3b_candidate(
             "protected_stop_tp2_fraction": float(strategy.PROTECTED_STOP_TP2_FRACTION),
         },
     }
+    candidate["v3b_setup_state"] = _setup_state(
+        normalized, event, bos_open, body_ratio, side, lifecycle="ELIGIBLE",
+        second_open=second_open, same_direction=True, stays_beyond=True,
+        confirmation_id=confirmation_id, levels=levels,
+    )
 
     if final_gate is not None:
         gate = final_gate(

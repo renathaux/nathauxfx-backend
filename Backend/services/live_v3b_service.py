@@ -50,6 +50,18 @@ def _wait(symbol, reason, details=None):
     }
 
 
+def _blocked_setup(symbol, reason, candidate, details=None):
+    """Keep the qualified 5m facts visible without allowing execution."""
+    source = copy.deepcopy(candidate)
+    state = source.get("v3b_setup_state")
+    if isinstance(state, dict):
+        state.update(lifecycle_state="BLOCKED", execution_status="BLOCKED",
+                     execution_block_reason=reason)
+    return _wait(symbol, reason, {
+        **(details or {}), "source_candidate": source,
+    })
+
+
 def build_live_v3b_candidate(
     symbol,
     data_5m,
@@ -117,14 +129,13 @@ def build_live_v3b_candidate(
     try:
         setup_id = setup_id_builder(candidate, side)
     except Exception as exc:
-        return _wait(
-            symbol,
-            "WAIT_V3B_LIVE_SETUP_ID",
-            {"error": str(exc)},
-        )
+        return _blocked_setup(symbol, "WAIT_V3B_LIVE_SETUP_ID", candidate,
+                              {"error": str(exc)})
     if not setup_id:
-        return _wait(symbol, "WAIT_V3B_LIVE_SETUP_ID")
+        return _blocked_setup(symbol, "WAIT_V3B_LIVE_SETUP_ID", candidate)
     candidate["signal_setup_id"] = str(setup_id)
+    if isinstance(candidate.get("v3b_setup_state"), dict):
+        candidate["v3b_setup_state"]["signal_setup_id"] = str(setup_id)
 
     identity = candidate.get("setup_identity") or {}
     required = {
@@ -144,21 +155,15 @@ def build_live_v3b_candidate(
         field for field in required if identity.get(field) in {None, ""}
     )
     if missing or str(identity.get("setup_timeframe") or "").lower() != "5m":
-        return _wait(
-            symbol,
-            "WAIT_V3B_LIVE_DURABLE_IDENTITY",
-            {"missing_fields": missing},
-        )
+        return _blocked_setup(symbol, "WAIT_V3B_LIVE_DURABLE_IDENTITY", candidate,
+                              {"missing_fields": missing})
 
     if final_gate is not None:
         try:
             gate = final_gate(candidate, side)
         except Exception as exc:
-            return _wait(
-                symbol,
-                "WAIT_V3B_LIVE_FINAL_GATE_UNAVAILABLE",
-                {"error": str(exc)},
-            )
+            return _blocked_setup(symbol, "WAIT_V3B_LIVE_FINAL_GATE_UNAVAILABLE",
+                                  candidate, {"error": str(exc)})
         candidate["live_v3b_final_gate"] = copy.deepcopy(gate)
         if not isinstance(gate, dict) or not gate.get("ok"):
             reason = (gate or {}).get("reason") or "WAIT_V3B_LIVE_FINAL_GATE"
@@ -170,6 +175,11 @@ def build_live_v3b_candidate(
                 "live_v3b_ready": False,
                 "live_v3b_reason": reason,
             })
+            if isinstance(candidate.get("v3b_setup_state"), dict):
+                candidate["v3b_setup_state"].update(
+                    lifecycle_state="BLOCKED", execution_status="BLOCKED",
+                    execution_block_reason=reason,
+                )
 
     return candidate
 
