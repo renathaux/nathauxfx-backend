@@ -1,11 +1,12 @@
-"""Authenticated Strategy Studio CRUD and read-only parity diagnostics.
+"""Authenticated Strategy Studio CRUD, parity diagnostics, and gated LIVE handoff.
 
-Strategy Studio parity/status endpoints are observation-only. They do not place
-orders, alter LIVE Auto, switch accounts, or enable the LIVE handoff gate.
+The LIVE handoff endpoint only mutates StrategyStudioLiveState after explicit
+confirmation and fresh safety checks. It never places orders, alters LIVE Auto,
+or switches broker accounts.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
@@ -13,7 +14,11 @@ from pydantic import BaseModel
 from ctrader_account_context import selected_identity
 from services.customer_forex_guard import _bearer
 from services.strategy_simulator_data_source import load_simulation_5m
-from services.strategy_studio_live_state import get_studio_live_state
+from services.strategy_studio_live_state import (
+    get_studio_live_state,
+    has_unresolved_studio_reconciliation,
+    set_studio_live_state,
+)
 from services.strategy_studio_parity import compare_v3b_entry_decisions
 from services.strategy_studio_schema import (
     normalize_definition,
@@ -37,6 +42,7 @@ from services.user_auth_service import current_user, current_user_with_csrf
 
 
 router = APIRouter(prefix="/strategy-studio", tags=["strategy-studio"])
+PARITY_LOOKBACK_DAYS = 7
 
 
 class StrategyWriteRequest(BaseModel):
@@ -56,6 +62,12 @@ class ParityRunRequest(BaseModel):
     symbol: str
     start: datetime
     end: datetime
+
+
+class LiveHandoffRequest(BaseModel):
+    enabled: bool
+    confirm: bool = False
+    strategy_id: str | None = None
 
 
 def owner_key(actor):
@@ -103,6 +115,133 @@ def _service_http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, (StrategyStudioError, ValueError)):
         return HTTPException(status_code=400, detail=str(exc))
     return HTTPException(status_code=500, detail="STRATEGY_STUDIO_ERROR")
+
+
+def _active_strategy(owner: str):
+    strategies = list_strategies(owner)
+    return next(
+        (item for item in strategies if str(item.get("state") or "").upper() == "ACTIVE"),
+        None,
+    )
+
+
+def _parity_summary(report: dict) -> dict:
+    mismatches = list(report.get("mismatches") or [])
+    return {
+        "match": bool(report.get("match")),
+        "compared_setups": int(report.get("compared_setups") or 0),
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches[:20],
+        "account_scope": report.get("account_scope"),
+        "parity_scope": report.get("parity_scope"),
+        "post_entry_management_compared": bool(
+            report.get("post_entry_management_compared", False)
+        ),
+    }
+
+
+def evaluate_live_handoff_readiness(owner: str) -> dict:
+    """Recompute entry parity from durable selected-account candles.
+
+    Readiness is deliberately not persisted: every status read and every enable
+    request recomputes against the currently selected account, preventing stale
+    parity evidence from authorizing a different account or later data state.
+    """
+    active = _active_strategy(owner)
+    if not active:
+        return {
+            "ready": False,
+            "parity_verified": False,
+            "parity_status": "REQUIRES_VERIFICATION",
+            "active_strategy_id": None,
+            "configured_symbols": [],
+            "account_scope": None,
+            "unresolved_reconciliation": has_unresolved_studio_reconciliation(owner),
+            "reports": {},
+            "reason": "STRATEGY_STUDIO_ACTIVE_STRATEGY_REQUIRED",
+        }
+
+    definition = active.get("definition") or {}
+    symbols = [
+        str(symbol).upper().replace("/", "")
+        for symbol in (definition.get("symbols") or [])
+        if str(symbol or "").strip()
+    ]
+    identity = selected_identity()
+    unresolved = has_unresolved_studio_reconciliation(owner)
+    if identity is None:
+        return {
+            "ready": False,
+            "parity_verified": False,
+            "parity_status": "REQUIRES_VERIFICATION",
+            "active_strategy_id": active.get("strategy_id"),
+            "configured_symbols": symbols,
+            "account_scope": None,
+            "unresolved_reconciliation": unresolved,
+            "reports": {},
+            "reason": "CTRADER_ACCOUNT_NOT_SELECTED",
+        }
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=PARITY_LOOKBACK_DAYS)
+    reports = {}
+    parity_verified = bool(symbols)
+    parity_error = None
+    for symbol in symbols:
+        try:
+            frame = load_simulation_5m(
+                symbol,
+                start,
+                end,
+                stream_scope=identity.scope,
+            )
+            report = compare_v3b_entry_decisions(
+                symbol,
+                frame,
+                account_scope=identity.scope,
+            )
+            reports[symbol] = _parity_summary(report)
+            parity_verified = parity_verified and bool(report.get("match"))
+        except Exception as exc:
+            parity_verified = False
+            parity_error = str(exc)
+            reports[symbol] = {
+                "match": False,
+                "compared_setups": 0,
+                "mismatch_count": 0,
+                "mismatches": [],
+                "account_scope": identity.scope,
+                "error": str(exc),
+            }
+
+    reason = None
+    if unresolved:
+        reason = "STRATEGY_STUDIO_RECONCILIATION_UNRESOLVED"
+    elif not parity_verified:
+        reason = (
+            "STRATEGY_STUDIO_PARITY_UNAVAILABLE"
+            if parity_error
+            else "STRATEGY_STUDIO_PARITY_NOT_VERIFIED"
+        )
+
+    return {
+        "ready": bool(parity_verified and not unresolved),
+        "parity_verified": bool(parity_verified),
+        "parity_status": "VERIFIED" if parity_verified else (
+            "ERROR" if parity_error else "MISMATCH"
+        ),
+        "active_strategy_id": active.get("strategy_id"),
+        "configured_symbols": symbols,
+        "account_scope": identity.scope,
+        "unresolved_reconciliation": bool(unresolved),
+        "reports": reports,
+        "reason": reason,
+        "parity_window": {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "lookback_days": PARITY_LOOKBACK_DAYS,
+        },
+    }
 
 
 @router.get("/strategies")
@@ -246,10 +385,84 @@ def strategy_parity_run(payload: ParityRunRequest, request: Request):
 def strategy_live_status(request: Request):
     owner = owner_key(_actor(request))
     state = get_studio_live_state(owner)
+    readiness = evaluate_live_handoff_readiness(owner)
     return {
         "ok": True,
         **state,
-        "parity_status": "REQUIRES_VERIFICATION",
+        **readiness,
         "entry_parity_only": True,
         "post_entry_management_compared": False,
+    }
+
+
+@router.post("/live-handoff")
+def strategy_live_handoff(payload: LiveHandoffRequest, request: Request):
+    owner = owner_key(_actor(request, mutation=True))
+    if payload.confirm is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="Strategy Studio LIVE handoff confirmation is required",
+        )
+
+    requested_strategy_id = str(payload.strategy_id or "").strip() or None
+    if not payload.enabled:
+        try:
+            state = set_studio_live_state(
+                owner,
+                requested_strategy_id,
+                False,
+                True,
+            )
+        except Exception as exc:
+            raise _service_http_error(exc) from exc
+        return {
+            "ok": True,
+            "state": state,
+            "live_auto_trade_changed": False,
+            "broker_order_submitted": False,
+        }
+
+    readiness = evaluate_live_handoff_readiness(owner)
+    active_strategy_id = readiness.get("active_strategy_id")
+    if not active_strategy_id:
+        raise HTTPException(
+            status_code=409,
+            detail="STRATEGY_STUDIO_ACTIVE_STRATEGY_REQUIRED",
+        )
+    if requested_strategy_id and requested_strategy_id != active_strategy_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Requested strategy is not the active Strategy Studio strategy",
+        )
+    if readiness.get("unresolved_reconciliation"):
+        raise HTTPException(
+            status_code=409,
+            detail="STRATEGY_STUDIO_RECONCILIATION_UNRESOLVED",
+        )
+    if not readiness.get("parity_verified"):
+        raise HTTPException(
+            status_code=409,
+            detail=readiness.get("reason") or "STRATEGY_STUDIO_PARITY_NOT_VERIFIED",
+        )
+    if not readiness.get("ready"):
+        raise HTTPException(
+            status_code=409,
+            detail=readiness.get("reason") or "STRATEGY_STUDIO_LIVE_NOT_READY",
+        )
+
+    try:
+        state = set_studio_live_state(
+            owner,
+            active_strategy_id,
+            True,
+            True,
+        )
+    except Exception as exc:
+        raise _service_http_error(exc) from exc
+    return {
+        "ok": True,
+        "state": state,
+        "readiness": readiness,
+        "live_auto_trade_changed": False,
+        "broker_order_submitted": False,
     }
