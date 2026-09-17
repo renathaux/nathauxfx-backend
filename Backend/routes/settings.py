@@ -6,6 +6,7 @@ from services.v3b_strategy_settings_sync import install_v3b_strategy_settings_sy
 from routes.user_auth import router as user_auth_router
 from routes.password_reset import router as password_reset_router
 from routes.strategy_studio import router as strategy_studio_router
+from routes.strategy_simulator import router as strategy_simulator_router
 
 
 # Install before api.py imports the legacy strategy-settings functions. This
@@ -55,6 +56,7 @@ router = APIRouter()
 router.include_router(user_auth_router)
 router.include_router(password_reset_router)
 router.include_router(strategy_studio_router)
+router.include_router(strategy_simulator_router)
 
 
 def _strategy_synced_risk_settings(risk=None):
