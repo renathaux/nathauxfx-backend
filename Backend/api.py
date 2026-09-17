@@ -23,6 +23,7 @@ from ctrader_account_context import (
 )
 from ctrader_connector import (
     CTRADER_PAYLOAD_VOLUME_SCALE,
+    LIVE_PRICE_STALE_SECONDS,
     build_ctrader_authorization_url,
     clear_ctrader_saved_accounts,
     close_position,
@@ -4673,13 +4674,17 @@ def protect_live_trade_after_tp1(trade):
 
     try:
         symbol = normalize_symbol(trade.get("symbol"))
-        protected_sl, tick_size, digits = normalize_price_to_broker_increment(
-            calculate_protected_sl_price(
+        requested_sl = (
+            trade.get("protected_sl_price")
+            if trade.get("active_protection_only")
+            else calculate_protected_sl_price(
                 trade.get("entry"),
                 trade.get("tp2"),
                 trade.get("side") or trade.get("action")
-            ),
-            trade,
+            )
+        )
+        protected_sl, tick_size, digits = normalize_price_to_broker_increment(
+            requested_sl, trade,
         )
     except (TypeError, ValueError):
         return trade
@@ -4852,11 +4857,114 @@ def protect_live_trade_after_tp1(trade):
 
     return trade
 
+def protect_paused_active_trade_at_tp1(trade):
+    """Allow stop protection, but no legacy close, for a snapshot-paused position."""
+    from services import active_strategy_config_service as active_config
+    from services.live_v3b_execution_profile import is_v3b_execution_profile
+
+    identity = current_identity()
+    if identity is not None and trade.get("account_scope") != identity.scope:
+        return trade
+    if not trade.get("account_scope") or not (trade.get("position_id") or trade.get("broker_position_id")):
+        return trade
+
+    try:
+        entry = float(trade.get("entry"))
+        tp2 = float(trade.get("tp2"))
+        side = str(trade.get("side") or trade.get("action") or "").upper()
+        if not all(math.isfinite(value) for value in (entry, tp2)):
+            return trade
+        if not ((side == "BUY" and tp2 > entry) or (side == "SELL" and tp2 < entry)):
+            return trade
+        if is_v3b_execution_profile(trade):
+            trigger = float(trade.get("protection_trigger_price") or trade.get("tp1"))
+            protected = float(trade.get("protected_sl_price"))
+        else:
+            settings = active_config.get_active_values(force_refresh=True, fail_closed=True)
+            path = tp2 - entry
+            trigger = entry + path * float(settings["protection_trigger_percent"]) / 100.0
+            protected = entry + path * float(settings["protected_stop_percent"]) / 100.0
+            trade["active_protection_only"] = True
+        trigger, _, _ = normalize_price_to_broker_increment(trigger, trade)
+        protected, tick_size, _ = normalize_price_to_broker_increment(protected, trade)
+        if not all(math.isfinite(value) for value in (trigger, protected)):
+            return trade
+    except (TypeError, ValueError, KeyError, active_config.ActiveStrategyConfigError):
+        return trade
+
+    trade["tp1"] = trigger
+    trade["protected_sl_price"] = protected
+    def finite_price(value):
+        try:
+            number = float(value)
+            return number if math.isfinite(number) else None
+        except (TypeError, ValueError):
+            return None
+
+    bid = finite_price(trade.get("bid"))
+    ask = finite_price(trade.get("ask"))
+    valid_spread = (
+        bid is not None and ask is not None and bid > 0 and ask > 0
+        and bid <= ask and (ask - bid) / ((ask + bid) / 2) <= 0.005
+    )
+    quote = (bid if side == "BUY" else ask) if valid_spread else None
+    quote_timestamp = finite_price(trade.get("quote_timestamp"))
+    quote_age = time.time() - quote_timestamp if quote_timestamp is not None else None
+    if (
+        trade.get("quote_account_scope") != trade.get("account_scope")
+        or quote_age is None
+        or quote_age < 0
+        or quote_age > LIVE_PRICE_STALE_SECONDS
+    ):
+        quote = None
+    wick = finite_price(trade.get("trusted_tp1_high") if side == "BUY" else trade.get("trusted_tp1_low"))
+    broker_stop = finite_price(trade.get("sl"))
+    if live_sl_protection_confirmed(trade):
+        if broker_stop is not None and (
+            (side == "BUY" and broker_stop >= protected - tick_size)
+            or (side == "SELL" and broker_stop <= protected + tick_size)
+        ):
+            return trade
+        trade["protection_confirmed"] = False
+        trade["profit_protected"] = False
+        trade["protection_requested"] = False
+    touched = (
+        (side == "BUY" and ((quote is not None and quote >= trigger) or (wick is not None and wick >= trigger)))
+        or (side == "SELL" and ((quote is not None and quote <= trigger) or (wick is not None and wick <= trigger)))
+        or bool(trade.get("hit_tp1") or trade.get("tp1_hit"))
+    )
+    if not touched:
+        return trade
+    if broker_stop is not None and (
+        (side == "BUY" and broker_stop >= protected - tick_size)
+        or (side == "SELL" and broker_stop <= protected + tick_size)
+    ):
+        trade["hit_tp1"] = True
+        trade["tp1_hit"] = True
+        trade["protection_confirmed"] = True
+        trade["profit_protected"] = True
+        trade["sl_protection_broker_result"] = {
+            "ok": True,
+            "confirmed_by": "broker_position_sync",
+            "stop_loss": broker_stop,
+        }
+        persist_live_trade_state(trade)
+        return trade
+    if quote is None or (side == "BUY" and quote <= protected + tick_size) or (side == "SELL" and quote >= protected - tick_size):
+        trade["sl_protection_failed"] = True
+        trade["sl_protection_warning"] = "BROKER SL PROTECTION FAILED"
+        trade["sl_protection_error"] = "Current broker quote cannot accept the strategy protected stop"
+        trade["protection_confirmed"] = False
+        persist_live_trade_state(trade)
+        return trade
+    return protect_live_trade_after_tp1(trade)
+
+
 def update_live_trade_tp_protection(trade):
     if not isinstance(trade, dict):
         return trade
     if trade.get("management_paused"):
-        return trade
+        return protect_paused_active_trade_at_tp1(trade)
 
     hit_tp1_before = bool(trade.get("tp1_hit") or trade.get("hit_tp1"))
     side = str(trade.get("side") or trade.get("action") or "").upper()
@@ -8177,8 +8285,15 @@ def is_dev_request(request: Request):
         or any(referer.startswith(f"http://{local}") for local in local_hosts)
     )
 
-def get_panel_candle_extremes(symbol, panel_data=None, timeframe="5m"):
+def get_panel_candle_extremes(
+    symbol, panel_data=None, timeframe="5m", account_scope=None, opened_at=None,
+):
     data = panel_data if isinstance(panel_data, dict) else PANEL_CACHE.get("data")
+    if account_scope and (
+        not isinstance(data, dict)
+        or (data.get("_meta") or {}).get("account_scope") != account_scope
+    ):
+        return {}
     candles_root = data.get("candles") if isinstance(data, dict) else None
     symbol_candles = (
         candles_root.get(normalize_symbol(symbol))
@@ -8196,6 +8311,21 @@ def get_panel_candle_extremes(symbol, panel_data=None, timeframe="5m"):
     latest = candles[-1]
     if not isinstance(latest, dict):
         return {}
+    if opened_at is not None and timeframe == "5m":
+        try:
+            if isinstance(opened_at, datetime):
+                opened = opened_at.timestamp()
+            elif isinstance(opened_at, str) and not opened_at.replace(".", "", 1).isdigit():
+                opened = datetime.fromisoformat(opened_at.replace("Z", "+00:00")).timestamp()
+            else:
+                opened = float(opened_at)
+                if opened >= 1e11:
+                    opened /= 1000.0
+            started = float(latest.get("time"))
+            if not math.isfinite(opened) or started < math.ceil(opened / 300.0) * 300:
+                return {}
+        except (TypeError, ValueError, OSError):
+            return {}
 
     def as_float(value):
         try:
@@ -8211,6 +8341,67 @@ def get_panel_candle_extremes(symbol, panel_data=None, timeframe="5m"):
         "time": latest.get("time") or latest.get("datetime") or latest.get("Datetime"),
         "timeframe": timeframe,
     }
+
+
+def get_closed_panel_wick_since_open(symbol, panel_data, opened_at, account_scope, *, now=None):
+    """Read only closed, post-entry 5m wicks from this account's panel."""
+    if not isinstance(panel_data, dict) or not account_scope:
+        return {}
+    if (panel_data.get("_meta") or {}).get("account_scope") != account_scope:
+        return {}
+    try:
+        if isinstance(opened_at, datetime):
+            opened = opened_at.timestamp()
+        elif isinstance(opened_at, str) and not opened_at.replace(".", "", 1).isdigit():
+            opened = datetime.fromisoformat(opened_at.replace("Z", "+00:00")).timestamp()
+        else:
+            opened = float(opened_at)
+            if opened >= 1e11:
+                opened /= 1000.0
+        if not math.isfinite(opened):
+            return {}
+    except (TypeError, ValueError, OSError):
+        return {}
+    candles = ((panel_data.get("candles") or {}).get(normalize_symbol(symbol)) or {}).get("5m")
+    if not isinstance(candles, list):
+        return {}
+    first_wholly_post_open = math.ceil(opened / 300.0) * 300
+    current_time = time.time() if now is None else float(now)
+    highs = []
+    lows = []
+    for candle in candles:
+        if not isinstance(candle, dict):
+            continue
+        try:
+            started = float(candle.get("time"))
+            high = float(candle.get("high"))
+            low = float(candle.get("low"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            not all(math.isfinite(value) for value in (started, high, low))
+            or started < first_wholly_post_open
+            or started + 300 > current_time
+            or high < low
+        ):
+            continue
+        highs.append(high)
+        lows.append(low)
+    return {"high": max(highs), "low": min(lows)} if highs else {}
+
+
+def trusted_wick_extreme(*values, choose_max=True):
+    numeric = []
+    for value in values:
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price) and price > 0:
+            numeric.append(price)
+    if not numeric:
+        return None
+    return max(numeric) if choose_max else min(numeric)
 
 
 @account_state_operation
@@ -8336,6 +8527,14 @@ def sync_live_positions(panel_data=None):
                 symbol,
                 panel_data=panel_data,
                 timeframe="5m",
+                account_scope=current_identity().scope if current_identity() else None,
+                opened_at=position.get("opened_at"),
+            )
+            closed_post_open_wicks = get_closed_panel_wick_since_open(
+                symbol,
+                panel_data,
+                position.get("opened_at"),
+                current_identity().scope if current_identity() else None,
             )
             position_id = (
                 position.get("position_id")
@@ -8400,6 +8599,11 @@ def sync_live_positions(panel_data=None):
                 used_current_price = live_ask_for_position
 
             current_order = previous_active_orders.get(symbol)
+            if current_order and not (
+                current_order.get("account_scope") == (current_identity().scope if current_identity() else None)
+                and str(current_order.get("position_id") or current_order.get("broker_position_id")) == str(position_id)
+            ):
+                current_order = None
             signal_plan = get_signal_trade_plan(symbol) or {}
             broker_synced_sl = (
                 position.get("sl")
@@ -8767,6 +8971,8 @@ def sync_live_positions(panel_data=None):
                     broker_current_low,
                     panel_candle_extremes.get("high"),
                     panel_candle_extremes.get("low"),
+                    closed_post_open_wicks.get("high"),
+                    closed_post_open_wicks.get("low"),
                     current_order.get("current_high") if current_order else None,
                     current_order.get("current_low") if current_order else None,
                 ]
@@ -8909,8 +9115,19 @@ def sync_live_positions(panel_data=None):
                 "current_price": used_current_price,
                 "bid": live_bid_for_position,
                 "ask": live_ask_for_position,
+                "quote_timestamp": live_tick_for_position.get("timestamp"),
+                "quote_account_scope": live_tick_for_position.get("account_scope"),
                 "current_high": current_high,
                 "current_low": current_low,
+                "trusted_tp1_high": trusted_wick_extreme(
+                    closed_post_open_wicks.get("high"),
+                    (current_order or {}).get("trusted_tp1_high"),
+                ),
+                "trusted_tp1_low": trusted_wick_extreme(
+                    closed_post_open_wicks.get("low"),
+                    (current_order or {}).get("trusted_tp1_low"),
+                    choose_max=False,
+                ),
                 "position_current_price": current_price,
                 "floating_pl": broker_pnl,
                 "floating_pnl": broker_pnl,
@@ -8976,11 +9193,19 @@ def sync_live_positions(panel_data=None):
                     mirrored_order["management_pause_reason"] = current_order.get(
                         "management_pause_reason"
                     ) or "EXACT_V3B_SNAPSHOT_UNAVAILABLE"
+                    mirrored_order = {
+                        **current_order,
+                        **mirrored_order,
+                        "hit_tp1": bool(current_order.get("hit_tp1")),
+                        "tp1_hit": bool(current_order.get("tp1_hit")),
+                        "protection_confirmed": bool(current_order.get("protection_confirmed")),
+                        "sl_protection_broker_result": current_order.get("sl_protection_broker_result"),
+                    }
                     mirrored_order["trade_id"] = (
                         get_live_trade_identity(current_order)
                         or get_live_trade_identity(mirrored_order)
                     )
-                    rebuilt_active_orders[symbol] = mirrored_order
+                    rebuilt_active_orders[symbol] = update_live_trade_tp_protection(mirrored_order)
                     ensure_live_trade_identity(mirrored_order, symbol)
                     log_live_trade_audit("broker_position_mirrored_management_paused", mirrored_order)
                     continue
@@ -9030,10 +9255,7 @@ def sync_live_positions(panel_data=None):
                 continue
 
             if not current_order:
-                rebuilt_active_orders[symbol] = (
-                    update_live_trade_tp_protection(mirrored_order)
-                    if restored_v3b else mirrored_order
-                )
+                rebuilt_active_orders[symbol] = update_live_trade_tp_protection(mirrored_order)
                 ensure_live_trade_identity(rebuilt_active_orders[symbol], symbol)
                 log_live_trade_audit("broker_position_mirrored", rebuilt_active_orders[symbol])
                 log_trade_visual_levels(rebuilt_active_orders[symbol])

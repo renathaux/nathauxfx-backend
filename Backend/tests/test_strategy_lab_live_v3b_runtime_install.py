@@ -187,6 +187,7 @@ def test_v3b_protection_uses_exact_stored_protected_stop_not_legacy_calculation(
         "original_sl": 1.0900,
         "hit_tp1": False,
         "protection_confirmed": False,
+        "management_paused": True,
     }
     protected = api.protect_live_trade_after_tp1(trade)
     legacy_protect.assert_not_called()

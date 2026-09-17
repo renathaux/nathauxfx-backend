@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import time
 
 import pytest
 from sqlalchemy import create_engine
@@ -145,8 +146,10 @@ def test_empty_worker_without_exact_snapshot_mirrors_position_without_legacy_man
     monkeypatch.setattr(api, "get_signal_trade_plan", lambda symbol: {})
     monkeypatch.setattr(api, "save_live_backup", lambda: None)
     monkeypatch.setattr(coordination, "exclude_test_positions", lambda session, account, rows: rows)
-    monkeypatch.setattr(api, "update_live_trade_tp_protection",
-                        lambda row: pytest.fail("unmatched broker position reached legacy management"))
+    monkeypatch.setattr(api, "close_position",
+                        lambda *args, **kwargs: pytest.fail("unmatched position reached legacy closing"))
+    monkeypatch.setattr(api, "modify_position_stop_loss",
+                        lambda *args, **kwargs: pytest.fail("position without TP2 reached SL amendment"))
     monkeypatch.setattr(api, "get_open_positions", lambda: [{
         **broker_position(), "volume": 1000, "current_price": 1.101,
         "sl": 1.09, "tp": 1.119, "profit": 1,
@@ -170,3 +173,65 @@ def test_paused_broker_position_cannot_reach_legacy_tp_manager(monkeypatch):
              "management_paused": True, "current_price": 1.20,
              "entry": 1.10, "sl": 1.09, "tp1": 1.11, "tp2": 1.19}
     assert api.update_live_trade_tp_protection(trade) == trade
+
+
+def test_empty_worker_paused_position_wick_reaches_protection_only(monkeypatch, snapshots):
+    import api
+    from services import account_execution_coordination as coordination
+    from services import active_strategy_config_service as config
+    from services import forex_observability_service as observability
+
+    monkeypatch.setattr(connector, "load_ctrader_account_settings", lambda: {
+        "active_account_id": "47784297", "active_account_env": "demo",
+        "_durable_selection_authoritative": True,
+    })
+    monkeypatch.setattr(observability, "SessionLocal", snapshots)
+    monkeypatch.setattr(config, "get_active_values", lambda **kwargs: {
+        "target_rr": 1.9, "protection_trigger_percent": 70.0,
+        "protected_stop_percent": 60.0,
+    })
+    monkeypatch.setattr(api, "LIVE_ACTIVE_ORDERS", {"EURUSD": None, "XAUUSD": None})
+    monkeypatch.setattr(api, "LIVE_TRADE_HISTORY", [])
+    monkeypatch.setattr(api, "LIVE_ACCOUNT_STATE", {"connected": True, "mode": "demo", "broker": "ctrader"})
+    monkeypatch.setattr(api, "sync_ctrader_account_state", lambda: None)
+    monkeypatch.setattr(api, "get_ctrader_position_fetch_error", lambda: None)
+    monkeypatch.setattr(api, "get_live_prices", lambda: {"live_prices": {"EURUSD": {
+        "bid": 1.1120, "ask": 1.1121, "timestamp": time.time(),
+        "account_scope": "CTRADER:DEMO:47784297",
+    }}})
+    monkeypatch.setattr(api, "get_ctrader_symbol_risk_metadata", lambda *a, **kw: {})
+    monkeypatch.setattr(connector, "get_ctrader_symbol_risk_metadata", lambda *a, **kw: {})
+    monkeypatch.setattr(api, "get_signal_trade_plan", lambda symbol: {})
+    monkeypatch.setattr(api, "save_live_backup", lambda: None)
+    monkeypatch.setattr(coordination, "exclude_test_positions", lambda session, account, rows: rows)
+    broker_stop = {"value": 1.09}
+    monkeypatch.setattr(api, "get_open_positions", lambda: [{
+        **broker_position(), "volume": 1000, "current_price": 1.1120,
+        "current_high": 1.1120, "sl": broker_stop["value"],
+        "take_profit": 1.119, "profit": 1,
+    }])
+    monkeypatch.setattr(api, "close_position", lambda *a, **kw: pytest.fail("legacy TP2 close called"))
+    amendments = []
+    monkeypatch.setattr(api, "modify_position_stop_loss", lambda position, stop, **kwargs: (
+        amendments.append((position, stop)) or broker_stop.update(value=stop) or {"ok": True}
+    ))
+    monkeypatch.setattr(api, "read_back_broker_stop_loss", lambda row: (1.1114, {"ok": True}))
+
+    panel = {
+        "_meta": {"account_scope": "CTRADER:DEMO:47784297"},
+        "candles": {"EURUSD": {"5m": [
+            {"time": datetime(2026, 9, 16, 12, 5, tzinfo=timezone.utc).timestamp(),
+             "high": 1.1140, "low": 1.1100, "close": 1.1120},
+            {"time": datetime(2026, 9, 16, 12, 10, tzinfo=timezone.utc).timestamp(),
+             "high": 1.1120, "low": 1.1110, "close": 1.1120},
+        ]}},
+    }
+    api.sync_live_positions(panel)
+    mirrored = api.LIVE_ACTIVE_ORDERS["EURUSD"]
+
+    assert mirrored["management_paused"] is True
+    assert mirrored["tp1"] == pytest.approx(1.1133)
+    assert mirrored["protection_confirmed"] is True
+    assert amendments == [("42", 1.1114)]
+    api.sync_live_positions(panel)
+    assert amendments == [("42", 1.1114)]
