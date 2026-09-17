@@ -4567,6 +4567,7 @@ def fetch_ctrader_historical_candles(
                 # lossy view to disprove a saved corruption error.
                 seen_page_times = set()
                 for trendbar in trendbars:
+                    timestamp = None
                     try:
                         single = normalize_ctrader_candles([trendbar], requested_symbol)
                         if single is None or len(single) != 1:
@@ -4593,7 +4594,13 @@ def fetch_ctrader_historical_candles(
                             raise ValueError("conflicting or non-boundary page overlap")
                         strict_seen[timestamp] = tuple(prices)
                     except (TypeError, ValueError, OverflowError) as exc:
-                        raise ValueError("invalid raw broker candle in historical response") from exc
+                        raise ValueError(
+                            "invalid raw broker candle in historical response "
+                            f"page_start={cursor.isoformat()} "
+                            f"page_end={page_end.isoformat()} "
+                            f"candle_time={timestamp.isoformat() if timestamp is not None else 'unparsed'} "
+                            f"detail={exc}"
+                        ) from exc
             frame = normalize_ctrader_candles(trendbars, requested_symbol)
             if frame is not None and not frame.empty:
                 if strict_raw:
