@@ -94,8 +94,10 @@ jobs:
             tests/test_strategy_studio_live_handoff.py \
             tests/test_strategy_studio_submission.py \
             tests/test_ready_execution_handoff.py \
-            tests/test_trade_submission_service.py \
-            tests/test_simple_account_switch.py
+            tests/test_simple_account_switch.py \
+            tests/test_phase_1_2_final_audit.py \
+            tests/test_indicator_event_stream.py \
+            tests/test_indicator_stream_account_scope.py
 
       - name: Commit verified API wiring
         run: |
