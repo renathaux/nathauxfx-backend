@@ -28,12 +28,6 @@ jobs:
           pip install -r requirements.txt
           pip install pytest httpx2
 
-      - name: Print real-history parity diagnostics
-        env:
-          DATABASE_URL: "sqlite:///:memory:"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: python tests/diagnose_strategy_studio_real_parity.py
-
       - name: Run Stage 3 parity and V3B regressions
         env:
           DATABASE_URL: "sqlite:///:memory:"
