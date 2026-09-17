@@ -235,11 +235,13 @@ def test_strict_historical_reader_rejects_raw_defects_before_normalization(defec
         ctrader_connector, "send_ctrader_request",
         return_value={"payload": {"trendbar": rows}},
     ):
-        with pytest.raises(ValueError, match="raw broker candle"):
+        with pytest.raises(ValueError, match="raw broker candle") as error:
             ctrader_connector.fetch_ctrader_historical_candles(
                 "EURUSD", "5m", start, start + timedelta(minutes=10),
                 strict_raw=True,
             )
+        assert "2026-09-15T20:15:00+00:00" in str(error.value)
+        assert "duplicate" in str(error.value) if defect == "duplicate" else "invalid" in str(error.value)
 
 
 @pytest.mark.parametrize("boundary_conflict", [False, True])
