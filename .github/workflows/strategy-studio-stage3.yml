@@ -40,6 +40,7 @@ jobs:
             tests/test_strategy_studio_live_candidate.py \
             tests/test_strategy_studio_live_handoff.py \
             tests/test_strategy_studio_position_manager.py \
+            tests/test_strategy_studio_account_switch.py \
             tests/test_strategy_engine_evaluator.py \
             tests/test_strategy_engine_market_facts.py \
             tests/test_strategy_lab_v3b.py \
