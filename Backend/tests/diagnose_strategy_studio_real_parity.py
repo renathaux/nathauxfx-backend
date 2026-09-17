@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import pandas as pd
 
 from services.strategy_engine.evaluator import evaluate_strategy
 from services.strategy_engine.market_facts import build_market_facts
 from services.strategy_engine.types import EvaluationState
 from services.strategy_studio_parity import v3b_entry_parity_definition
-from tests.test_strategy_studio_real_history_parity_snapshot import EURUSD_B64, _decode
+
+_FIXTURE_PATH = Path(__file__).with_name("test_strategy_studio_real_history_parity_snapshot.py")
+_SPEC = importlib.util.spec_from_file_location("real_history_fixture", _FIXTURE_PATH)
+_FIXTURE = importlib.util.module_from_spec(_SPEC)
+assert _SPEC.loader is not None
+_SPEC.loader.exec_module(_FIXTURE)
+EURUSD_B64 = _FIXTURE.EURUSD_B64
+_decode = _FIXTURE._decode
 
 TARGETS = {
     pd.Timestamp("2026-09-17T04:30:00Z"),
