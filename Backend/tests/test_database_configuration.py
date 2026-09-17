@@ -58,6 +58,8 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "trade_submission_attempts",
             "execution_protocol_state",
             "broker_integration_test_submissions",
+            "saved_strategies",
+            "strategy_studio_selection",
         }
         self.assertEqual(set(Base.metadata.tables), expected)
         legacy_tables = expected - {
@@ -86,6 +88,8 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "indicator_event_lifecycle",
             "trade_submission_attempts",
             "execution_protocol_state",
+            "saved_strategies",
+            "strategy_studio_selection",
         }
         self.assertTrue(
             legacy_tables.issubset(set(inspect(db.engine).get_table_names()))
@@ -103,6 +107,7 @@ class DatabaseConfigurationTests(unittest.TestCase):
             BACKEND_DIR / "migrations" / "versions" / "20260811_0007_strategy_setting_audit.py",
             BACKEND_DIR / "migrations" / "versions" / "20260813_0008_strategy_v2_shadow.py",
             BACKEND_DIR / "migrations" / "versions" / "20260829_0015_forex_lifecycle_observability.py",
+            BACKEND_DIR / "migrations" / "versions" / "20260917_0023_strategy_studio.py",
             BACKEND_DIR / "scripts" / "migrate_sqlite_to_neon.py",
         ]
         for path in files:
@@ -162,6 +167,8 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "indicator_event_lifecycle",
             "trade_submission_attempts",
             "execution_protocol_state",
+            "saved_strategies",
+            "strategy_studio_selection",
         }
         self.assertTrue(source_tables.issubset(tables))
 
