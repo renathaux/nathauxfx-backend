@@ -34,4 +34,5 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           python -c 'import sys, pytest; from db import Base, engine; import models; Base.metadata.create_all(engine); sys.exit(pytest.main(sys.argv[1:]))' -q \
-            tests/test_strategy_engine_market_facts.py
+            tests/test_strategy_engine_market_facts.py \
+            tests/test_strategy_engine_evaluator.py
