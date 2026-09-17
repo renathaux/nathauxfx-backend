@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+import routes.strategy_studio as route_module
+from ctrader_account_context import AccountIdentity
 from services import strategy_studio_parity as parity
 from services.strategy_engine import market_facts
 from services.strategy_lab import v3b_m5_frozen_candidate as eur_v3b
@@ -24,6 +31,12 @@ def _patch_structure(monkeypatch, module, event):
     payload = {"events": [] if event is None else [event], "swings": []}
     monkeypatch.setattr(module, "analyze_structure", lambda *args, **kwargs: payload)
     monkeypatch.setattr(market_facts, "analyze_structure", lambda *args, **kwargs: payload)
+
+
+def _client():
+    app = FastAPI()
+    app.include_router(route_module.router)
+    return TestClient(app)
 
 
 def test_v3b_entry_parity_definition_keeps_legacy_management_out_of_studio_schema():
@@ -129,3 +142,77 @@ def test_account_scope_is_required():
     ])
     with pytest.raises(ValueError, match="ACCOUNT_SCOPE"):
         parity.compare_v3b_entry_decisions("EURUSD", frame, account_scope="")
+
+
+def test_parity_endpoint_is_authenticated_read_only_and_account_scoped(monkeypatch):
+    actor = SimpleNamespace(id="1", email="owner@example.com")
+    identity = AccountIdentity("47810571", "demo")
+    frame = _frame([
+        (1.1000, 1.1005, 1.0995, 1.1001),
+        (1.1001, 1.1006, 1.0998, 1.1002),
+    ])
+    sentinel = {
+        "match": True,
+        "compared_setups": 0,
+        "legacy": [],
+        "studio": [],
+        "mismatches": [],
+        "parity_scope": list(parity.PARITY_SCOPE),
+        "post_entry_management_compared": False,
+        "account_scope": identity.scope,
+        "legacy_only_level_policy": {"sl_buffer_points": 50, "minimum_sl_points": 100, "target_rr": 1.9},
+    }
+
+    monkeypatch.setattr(route_module, "current_user", lambda _request: actor)
+    monkeypatch.setattr(route_module, "selected_identity", lambda: identity)
+    monkeypatch.setattr(route_module, "load_simulation_5m", lambda *args, **kwargs: frame)
+    monkeypatch.setattr(route_module, "compare_v3b_entry_decisions", lambda *args, **kwargs: sentinel)
+
+    response = _client().post(
+        "/strategy-studio/parity/run",
+        json={
+            "symbol": "EURUSD",
+            "start": "2026-09-14T14:35:00Z",
+            "end": "2026-09-14T14:45:00Z",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["account_scope"] == identity.scope
+    assert body["post_entry_management_compared"] is False
+    assert body["live_handoff_enabled"] is False
+
+    source = open(route_module.__file__, encoding="utf-8").read()
+    for forbidden in (
+        "place_market_order",
+        "execute_live_order_core",
+        "claim_submission(",
+        "claim_strategy_submission(",
+        "save_auto_trade",
+        "set_auto_trade",
+    ):
+        assert forbidden not in source
+
+
+def test_live_status_reports_gate_without_enabling_it(monkeypatch):
+    actor = SimpleNamespace(id="1", email="owner@example.com")
+    monkeypatch.setattr(route_module, "current_user", lambda _request: actor)
+    monkeypatch.setattr(
+        route_module,
+        "get_studio_live_state",
+        lambda owner: {
+            "owner_id": owner,
+            "enabled": False,
+            "enabled_strategy_id": None,
+            "enabled_at": None,
+            "updated_at": None,
+        },
+    )
+    response = _client().get("/strategy-studio/live-status")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is False
+    assert body["parity_status"] == "REQUIRES_VERIFICATION"
+    assert body["entry_parity_only"] is True
+    assert body["post_entry_management_compared"] is False
