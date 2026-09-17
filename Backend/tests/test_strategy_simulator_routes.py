@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import inspect
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -51,6 +52,12 @@ def test_route_source_has_no_broker_or_live_mutation_calls():
     ]
     for token in forbidden:
         assert token not in source
+
+
+def test_api_mounts_strategy_simulator_router():
+    api_source = (Path(__file__).resolve().parents[1] / "api.py").read_text(encoding="utf-8")
+    assert "from routes.strategy_simulator import router as strategy_simulator_router" in api_source
+    assert "app.include_router(strategy_simulator_router)" in api_source
 
 
 def test_foreign_or_missing_strategy_returns_404(monkeypatch):
