@@ -35,6 +35,7 @@ jobs:
         run: |
           python -c 'import sys, pytest; from db import Base, engine; import models; Base.metadata.create_all(engine); sys.exit(pytest.main(sys.argv[1:]))' -q \
             tests/test_strategy_studio_parity.py \
+            tests/test_strategy_studio_real_history_parity_snapshot.py \
             tests/test_strategy_studio_submission.py \
             tests/test_strategy_studio_live_candidate.py \
             tests/test_strategy_engine_evaluator.py \
