@@ -5,6 +5,7 @@ from services import active_strategy_config_service as active_strategy_config
 from services.v3b_strategy_settings_sync import install_v3b_strategy_settings_sync
 from routes.user_auth import router as user_auth_router
 from routes.password_reset import router as password_reset_router
+from routes.strategy_studio import router as strategy_studio_router
 
 
 # Install before api.py imports the legacy strategy-settings functions. This
@@ -53,6 +54,7 @@ router = APIRouter()
 # here so customer signup/login/verification/session/password reset are exposed.
 router.include_router(user_auth_router)
 router.include_router(password_reset_router)
+router.include_router(strategy_studio_router)
 
 
 def _strategy_synced_risk_settings(risk=None):
@@ -86,9 +88,6 @@ def settings_risk_post(payload: dict):
         strategy_update["protected_stop_percent"] = payload["protectedSlPercentOfTp2"]
 
     try:
-        # Validate the strategy-owned values against the complete active profile
-        # before writing either store. This catches impossible protected-stop
-        # geometry (for example protected SL beyond the trigger).
         if strategy_update:
             current = active_strategy_config.get_active_values()
             active_strategy_config.validate({**current, **strategy_update}, merge_defaults=True)
