@@ -77,7 +77,7 @@ jobs:
           if grep -q "def select_auto_execution_candidate" Backend/api.py; then
             echo "Task 5 API wiring already present"
           else
-            python -c 'from pathlib import Path; p=Path("scripts/apply_task5_api_patch.py"); t=p.read_text(encoding="utf-8"); old="    if count != 1:\n"; new="    if count != 1 and not (label == \"preserve Studio setup id\" and count == 2):\n"; assert t.count(old) == 1; t=t.replace(old, new, 1); guard="        assert_current_selection(identity)\n"; assert t.count(guard) == 2; t=t.replace(guard, "", 2); p.write_text(t, encoding="utf-8")'
+            python -c 'from pathlib import Path; p=Path("scripts/apply_task5_api_patch.py"); t=p.read_text(encoding="utf-8"); old="    if count != 1:\n"; new="    if count != 1 and not (label == \"preserve Studio setup id\" and count == 2):\n"; assert t.count(old) == 1; t=t.replace(old, new, 1); start=t.index("def select_auto_execution_candidate(panel_data, symbol):"); end=t.index("'''\n    text = replace_once(text, panel_anchor", start); segment=t[start:end]; guard="        assert_current_selection(identity)\n"; assert segment.count(guard) == 2; segment=segment.replace(guard, "", 2); t=t[:start]+segment+t[end:]; p.write_text(t, encoding="utf-8")'
             python scripts/apply_task5_api_patch.py
           fi
 
