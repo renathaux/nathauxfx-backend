@@ -174,7 +174,9 @@ def account_scoped_get_authoritative_structure(
             from strategies import strict_trader
 
             with pinned_account(AccountIdentity("47810571", "demo")):
-                fresh = fetch_ctrader_historical_candles(public, "5m", start, end)
+                fresh = fetch_ctrader_historical_candles(
+                    public, "5m", start, end, strict_raw=True,
+                )
             if getattr(fresh, "attrs", {}).get("ctrader_stream_scope") != scope:
                 raise stream.IndicatorStreamUnavailable(
                     "fresh broker history account scope does not match V3B stream"

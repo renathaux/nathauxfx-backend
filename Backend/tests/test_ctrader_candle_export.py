@@ -205,6 +205,95 @@ def test_historical_connector_uses_only_trendbar_read_request():
     assert socket.close.call_count == 1
 
 
+@pytest.mark.parametrize("defect", ["duplicate", "malformed"])
+def test_strict_historical_reader_rejects_raw_defects_before_normalization(defect):
+    start = datetime(2026, 9, 15, 20, 15, tzinfo=timezone.utc)
+    timestamp = int(start.timestamp() // 60)
+    valid = {
+        "utcTimestampInMinutes": timestamp,
+        "low": 115390,
+        "deltaOpen": 10,
+        "deltaHigh": 20,
+        "deltaClose": 15,
+    }
+    rows = [valid, dict(valid)] if defect == "duplicate" else [
+        valid, {**valid, "utcTimestampInMinutes": timestamp + 5, "deltaHigh": "bad"},
+    ]
+    with patch.object(ctrader_connector, "get_ctrader_config", return_value={
+        "env": "demo", "account_id": "47810571"
+    }), patch.object(
+        ctrader_connector, "open_ctrader_json_socket", return_value=Mock()
+    ), patch.object(
+        ctrader_connector, "authorize_ctrader_socket"
+    ), patch.object(
+        ctrader_connector, "fetch_ctrader_symbol_details", return_value=[]
+    ), patch.object(
+        ctrader_connector, "resolve_ctrader_symbol", return_value={
+            "symbol_id": 41, "digits": 5
+        }
+    ), patch.object(
+        ctrader_connector, "send_ctrader_request",
+        return_value={"payload": {"trendbar": rows}},
+    ):
+        with pytest.raises(ValueError, match="raw broker candle"):
+            ctrader_connector.fetch_ctrader_historical_candles(
+                "EURUSD", "5m", start, start + timedelta(minutes=10),
+                strict_raw=True,
+            )
+
+
+@pytest.mark.parametrize("boundary_conflict", [False, True])
+def test_strict_historical_reader_allows_only_matching_page_boundary_overlap(
+    boundary_conflict,
+):
+    start = datetime(2026, 9, 12, tzinfo=timezone.utc)
+    boundary = start + timedelta(minutes=4500)
+    end = boundary + timedelta(minutes=5)
+
+    def bar(at):
+        return {
+            "utcTimestampInMinutes": int(at.timestamp() // 60),
+            "low": 115390, "deltaOpen": 10,
+            "deltaHigh": 20, "deltaClose": 15,
+        }
+
+    def page(_socket, _request_type, payload, _response_type):
+        if payload["fromTimestamp"] == int(start.timestamp() * 1000):
+            return {"payload": {"trendbar": [bar(start), bar(boundary)]}}
+        repeated = bar(boundary)
+        if boundary_conflict:
+            repeated["deltaClose"] += 1
+        return {"payload": {"trendbar": [repeated, bar(end)]}}
+
+    with patch.object(ctrader_connector, "get_ctrader_config", return_value={
+        "env": "demo", "account_id": "47810571"
+    }), patch.object(
+        ctrader_connector, "open_ctrader_json_socket", return_value=Mock()
+    ), patch.object(
+        ctrader_connector, "authorize_ctrader_socket"
+    ), patch.object(
+        ctrader_connector, "fetch_ctrader_symbol_details", return_value=[]
+    ), patch.object(
+        ctrader_connector, "resolve_ctrader_symbol", return_value={
+            "symbol_id": 41, "digits": 5
+        }
+    ), patch.object(
+        ctrader_connector, "send_ctrader_request", side_effect=page,
+    ):
+        if boundary_conflict:
+            with pytest.raises(ValueError, match="raw broker candle"):
+                ctrader_connector.fetch_ctrader_historical_candles(
+                    "EURUSD", "5m", start, end, strict_raw=True,
+                )
+        else:
+            frame = ctrader_connector.fetch_ctrader_historical_candles(
+                "EURUSD", "5m", start, end, strict_raw=True,
+            )
+            assert list(frame.index) == list(pd.to_datetime(
+                [start, boundary, end], utc=True,
+            ))
+
+
 def test_chart_history_is_two_month_bounded_closed_and_read_only():
     now = datetime.now(timezone.utc)
     closed = now - timedelta(minutes=30)

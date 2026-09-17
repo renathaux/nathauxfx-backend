@@ -658,9 +658,16 @@ def get_authoritative_structure(
                 and SAVED_COVERAGE_ERROR.fullmatch(str(state.reconciliation_reason or ""))
             ):
                 match = SAVED_COVERAGE_ERROR.fullmatch(state.reconciliation_reason)
-                fresh_frame = revalidation_fetcher(
-                    _utc(match.group("start")), now,
-                )
+                try:
+                    fresh_frame = revalidation_fetcher(
+                        _utc(match.group("start")), now,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "V3B_5M_SAVED_COVERAGE_FETCH_BLOCKED symbol=%s reason=%s",
+                        normalized_symbol, exc,
+                    )
+                    raise IndicatorStreamUnavailable(state.reconciliation_reason) from exc
                 incoming = _revalidate_saved_coverage_error(
                     state, existing, normalized_symbol, fresh_frame, now,
                 )

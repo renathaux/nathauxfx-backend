@@ -4492,7 +4492,9 @@ def fetch_ctrader_trendbars(config, symbol, period, limit):
 
 
 @market_read_operation
-def fetch_ctrader_historical_candles(symbol, timeframe, start_utc, end_utc):
+def fetch_ctrader_historical_candles(
+    symbol, timeframe, start_utc, end_utc, *, strict_raw=False,
+):
     """Fetch native cTrader trendbars for a bounded historical UTC range.
 
     This is a market-data-only helper. It intentionally does not read or write
@@ -4535,6 +4537,7 @@ def fetch_ctrader_historical_candles(symbol, timeframe, start_utc, end_utc):
         page_span = timedelta(minutes=period_minutes * page_candles)
         cursor = start
         frames = []
+        strict_seen = {} if strict_raw else None
         while cursor < end:
             page_end = min(cursor + page_span, end)
             expected_count = int(
@@ -4558,15 +4561,58 @@ def fetch_ctrader_historical_candles(symbol, timeframe, start_utc, end_utc):
             for trendbar in trendbars:
                 if isinstance(trendbar, dict):
                     trendbar["digits"] = digits
+            if strict_raw:
+                # The ordinary chart reader intentionally drops malformed rows
+                # and collapses page overlaps. Reconciliation cannot use that
+                # lossy view to disprove a saved corruption error.
+                seen_page_times = set()
+                for trendbar in trendbars:
+                    try:
+                        single = normalize_ctrader_candles([trendbar], requested_symbol)
+                        if single is None or len(single) != 1:
+                            raise ValueError("missing candle fields")
+                        timestamp = pd.Timestamp(single.index[0])
+                        prices = [float(single.iloc[0][field]) for field in (
+                            "Open", "High", "Low", "Close"
+                        )]
+                        if (
+                            pd.isna(timestamp) or timestamp in seen_page_times
+                            or timestamp < cursor or timestamp > page_end
+                            or timestamp.minute % period_minutes
+                            or timestamp.second or timestamp.microsecond
+                            or not all(math.isfinite(price) for price in prices)
+                            or prices[2] > min(prices[0], prices[3])
+                            or prices[1] < max(prices[0], prices[3])
+                            or prices[2] > prices[1]
+                        ):
+                            raise ValueError("duplicate, off-grid, or invalid OHLC")
+                        seen_page_times.add(timestamp)
+                        if timestamp in strict_seen and (
+                            timestamp != cursor or strict_seen[timestamp] != tuple(prices)
+                        ):
+                            raise ValueError("conflicting or non-boundary page overlap")
+                        strict_seen[timestamp] = tuple(prices)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise ValueError("invalid raw broker candle in historical response") from exc
             frame = normalize_ctrader_candles(trendbars, requested_symbol)
             if frame is not None and not frame.empty:
+                if strict_raw:
+                    # Adjacent inclusive pages can repeat their shared edge.
+                    # Keep each boundary candle only from its later page.
+                    last_page = page_end == end
+                    frame = frame.loc[
+                        (frame.index >= cursor)
+                        & ((frame.index <= page_end) if last_page else (frame.index < page_end))
+                    ]
                 frames.append(frame)
             cursor = page_end
 
         if not frames:
             return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
         combined = pd.concat(frames)
-        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+        if not strict_raw:
+            combined = combined[~combined.index.duplicated(keep="last")]
+        combined = combined.sort_index()
         return combined[(combined.index >= start) & (combined.index <= end)]
     finally:
         try:

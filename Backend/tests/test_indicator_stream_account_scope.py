@@ -836,7 +836,8 @@ def test_b_account_resolved_saved_missing_candle_revalidates_and_resumes(monkeyp
         fresh.attrs["ctrader_stream_scope"] = scope
         fetches = []
 
-        def fetch_closed(symbol, timeframe, start, end):
+        def fetch_closed(symbol, timeframe, start, end, *, strict_raw=False):
+            assert strict_raw is True
             fetches.append((symbol, timeframe, start, end))
             return fresh.copy(deep=True)
 
@@ -924,7 +925,7 @@ def test_b_account_accepted_xauusd_session_gap_retires_saved_error(monkeypatch):
         fresh.attrs["ctrader_stream_scope"] = scope
         monkeypatch.setattr(
             "ctrader_connector.fetch_ctrader_historical_candles",
-            lambda *_args: fresh.copy(deep=True),
+            lambda *_args, **_kwargs: fresh.copy(deep=True),
         )
         result = stream.get_authoritative_structure(
             fresh, "XAUUSD", "5m", 0.01,
@@ -970,7 +971,7 @@ def test_b_account_current_defect_keeps_saved_error_fail_closed(monkeypatch, def
         fresh.attrs["ctrader_stream_scope"] = scope
         monkeypatch.setattr(
             "ctrader_connector.fetch_ctrader_historical_candles",
-            lambda *_args: fresh.copy(deep=True),
+            lambda *_args, **_kwargs: fresh.copy(deep=True),
         )
         with pytest.raises(stream.IndicatorStreamUnavailable):
             stream.get_authoritative_structure(
@@ -1025,7 +1026,7 @@ def test_b_account_revalidation_leaves_a_and_live_auto_untouched(monkeypatch):
         fresh.attrs["ctrader_stream_scope"] = scope_b
         monkeypatch.setattr(
             "ctrader_connector.fetch_ctrader_historical_candles",
-            lambda *_args: fresh.copy(deep=True),
+            lambda *_args, **_kwargs: fresh.copy(deep=True),
         )
         result = stream.get_authoritative_structure(
             fresh, "EURUSD", "5m", 0.00001,
@@ -1109,9 +1110,9 @@ def test_b_account_wrong_scope_broker_frame_cannot_retire_saved_error(monkeypatc
         wrong_account.attrs["ctrader_stream_scope"] = "CTRADER:DEMO:47784297"
         monkeypatch.setattr(
             "ctrader_connector.fetch_ctrader_historical_candles",
-            lambda *_args: wrong_account.copy(deep=True),
+            lambda *_args, **_kwargs: wrong_account.copy(deep=True),
         )
-        with pytest.raises(stream.IndicatorStreamUnavailable, match="account scope"):
+        with pytest.raises(stream.IndicatorStreamUnavailable, match="missing 2026-09-15T20:30"):
             stream.get_authoritative_structure(
                 closed, "EURUSD", "5m", 0.00001,
                 analyzer=_analysis, session_factory=Session, stream_scope=scope,
@@ -1145,6 +1146,40 @@ def test_b_account_ready_stream_never_refetches_revalidation_history(monkeypatch
             analyzer=_analysis, session_factory=Session, stream_scope=scope,
         )
         assert again["stream_status"] == "READY"
+    finally:
+        uninstall_account_scoped_indicator_stream_for_tests()
+        engine.dispose()
+
+
+def test_b_account_raw_broker_validation_failure_preserves_saved_block(monkeypatch):
+    Session, engine = _session_factory()
+    install_account_scoped_indicator_stream()
+    try:
+        closed = _frame()
+        closed.index = pd.date_range("2026-09-15T20:10:00Z", periods=8, freq="5min")
+        reason = _saved_coverage_reason(
+            "2026-09-15T20:15:00+00:00",
+            "2026-09-15T20:45:00+00:00",
+            "2026-09-15T20:30:00+00:00",
+        )
+        scope, storage = _saved_b_error_case(Session, "EURUSD", closed, reason)
+        monkeypatch.setattr(
+            "ctrader_connector.fetch_ctrader_historical_candles",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                ValueError("invalid raw broker candle in historical response")
+            ),
+        )
+        with pytest.raises(stream.IndicatorStreamUnavailable, match="missing 2026-09-15T20:30"):
+            stream.get_authoritative_structure(
+                closed, "EURUSD", "5m", 0.00001,
+                analyzer=_analysis, session_factory=Session, stream_scope=scope,
+            )
+        with Session() as db:
+            state = db.query(IndicatorStreamState).filter_by(
+                symbol=storage, timeframe="5m",
+            ).one()
+            assert state.status == "RECONCILIATION_REQUIRED"
+            assert state.reconciliation_reason == reason
     finally:
         uninstall_account_scoped_indicator_stream_for_tests()
         engine.dispose()
