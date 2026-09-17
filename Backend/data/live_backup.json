@@ -1,13 +1,14 @@
 {
+  "account_close_times": {},
   "live_active_orders": {},
   "live_trade_history": [],
   "live_last_execution_time": {
-    "EURUSD": 0.0,
-    "XAUUSD": 0.0
+    "EURUSD": 0,
+    "XAUUSD": 0
   },
   "live_last_position_closed_at": {
     "EURUSD": 1784170820.921549,
     "XAUUSD": 0.0
   },
-  "last_live_reset": 1785704400.0
+  "last_live_reset": 1789333200.0
 }
