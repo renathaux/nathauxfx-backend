@@ -1200,12 +1200,6 @@ def update_live_tick(symbol, bid, ask, server_timestamp=None, *, account_scope=N
             "account_scope": scope,
         }
 
-    print(
-        f"CTRADER LIVE TICK: {normalized_symbol} "
-        f"bid={bid_value} ask={ask_value}"
-    )
-
-
 def live_tick_is_stale(tick, now, max_age_seconds):
     """Check both local receipt and cTrader's spot-event time when supplied."""
     try:
@@ -2118,13 +2112,20 @@ def ctrader_live_price_stream_loop():
             LIVE_PRICE_LAST_ERROR = None
             sock.settimeout(CTRADER_STREAM_READ_TIMEOUT_SECONDS)
             last_heartbeat_sent = time.monotonic()
+            last_selection_check = 0.0
 
             while True:
-                identity = selected_identity()
-                if identity is None or (identity.account_id, identity.environment) != (str(account_id), config["env"]):
-                    break
+                # Continue noticing account switches even if no usable spot
+                # arrives, without issuing a durable read for every replayed
+                # event in a delayed socket backlog.
+                monotonic_now = time.monotonic()
+                if monotonic_now - last_selection_check >= 1.0:
+                    identity = selected_identity()
+                    if identity is None or (identity.account_id, identity.environment) != (str(account_id), config["env"]):
+                        break
+                    last_selection_check = monotonic_now
                 if (
-                    time.monotonic() - last_heartbeat_sent
+                    monotonic_now - last_heartbeat_sent
                     >= CTRADER_HEARTBEAT_INTERVAL_SECONDS
                 ):
                     send_ctrader_heartbeat(sock)
@@ -2154,13 +2155,32 @@ def ctrader_live_price_stream_loop():
                 if not symbol:
                     continue
 
-                update_live_tick(
-                    symbol,
-                    payload.get("bid"),
-                    payload.get("ask"),
-                    payload.get("timestamp"),
-                    account_scope=f"CTRADER:{config['env'].upper()}:{account_id}",
-                )
+                # A delayed spot can never be used by the forming-candle path.
+                # Discard it before the durable account-selection lookup, so a
+                # broker replay cannot build an ever-growing socket backlog.
+                received_at = time.time()
+                if live_tick_is_stale(
+                    {"timestamp": received_at, "server_timestamp": payload.get("timestamp")},
+                    received_at,
+                    LIVE_TICK_CANDLE_STALE_SECONDS,
+                ):
+                    continue
+
+                with account_state_lock:
+                    identity = selected_identity()
+                    if identity is None or (identity.account_id, identity.environment) != (str(account_id), config["env"]):
+                        break
+
+                    # Reuse the identity just verified above. The selection
+                    # lock prevents a local switch between check and publish.
+                    with pinned_account(identity):
+                        update_live_tick(
+                            symbol,
+                            payload.get("bid"),
+                            payload.get("ask"),
+                            payload.get("timestamp"),
+                            account_scope=identity.scope,
+                        )
 
         except Exception as e:
             LIVE_PRICE_LAST_ERROR = str(e)

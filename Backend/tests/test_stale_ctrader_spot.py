@@ -1,6 +1,8 @@
 """A delayed cTrader spot must not masquerade as a current chart candle."""
 
 import copy
+import json
+import socket as socket_module
 import time
 
 import pandas as pd
@@ -8,6 +10,7 @@ import pandas as pd
 import api
 import ctrader_connector as connector
 from test_simple_account_switch import selected
+from ctrader_account_context import AccountIdentity
 
 
 def _tick(received_at, broker_at):
@@ -63,3 +66,95 @@ def test_current_broker_spot_still_forms_current_candle(selected, monkeypatch):
         "Close": [1.14640], "Volume": [1],
     }, index=pd.to_datetime([closed_bucket], unit="s", utc=True))
     assert len(connector.append_current_forming_candle(frame, "EURUSD", "5m")) == 2
+
+
+def test_stream_discards_delayed_spots_before_account_db_lookup(monkeypatch):
+    """An old spot backlog must not spend a durable account read per event."""
+    account = AccountIdentity("47784297", "demo")
+    socket = type("FakeSocket", (), {"settimeout": lambda self, _: None,
+                                      "close": lambda self: None})()
+    now_ms = int(time.time() * 1000)
+    events = iter([
+        {"payloadType": connector.PAYLOAD_SPOT_EVENT,
+         "payload": {"symbolId": 1, "bid": 114628, "ask": 114630,
+                     "timestamp": now_ms - 10 * 60 * 1000}},
+        {"payloadType": connector.PAYLOAD_SPOT_EVENT,
+         "payload": {"symbolId": 1, "bid": 114634, "ask": 114636,
+                     "timestamp": now_ms}},
+    ])
+    selections = []
+    accepted = []
+    real_update_live_tick = connector.update_live_tick
+
+    def recv(_socket):
+        try:
+            return json.dumps(next(events))
+        except StopIteration:
+            raise KeyboardInterrupt
+
+    def select():
+        selections.append(account)
+        return account
+
+    monkeypatch.setattr(connector, "get_ctrader_config", lambda: {"account_id": "47784297", "env": "demo"})
+    monkeypatch.setattr(connector, "open_ctrader_json_socket", lambda *_: socket)
+    monkeypatch.setattr(connector, "authorize_ctrader_socket", lambda *_: None)
+    monkeypatch.setattr(connector, "fetch_ctrader_symbol_details", lambda *_: [{"symbolId": 1, "symbolName": "EURUSD"}])
+    monkeypatch.setattr(connector, "resolve_ctrader_symbol", lambda _details, symbol: {"symbol_id": 1} if symbol == "EURUSD" else None)
+    monkeypatch.setattr(connector, "send_ctrader_request", lambda *_: {})
+    monkeypatch.setattr(connector, "websocket_recv_text", recv)
+    monkeypatch.setattr(connector, "selected_identity", select)
+    monkeypatch.setattr(connector, "LIVE_TICKS", {"EURUSD": {}})
+
+    def record_tick(symbol, bid, ask, timestamp, **kw):
+        accepted.append((symbol, timestamp, kw["account_scope"]))
+        return real_update_live_tick(symbol, bid, ask, timestamp, **kw)
+
+    monkeypatch.setattr(connector, "update_live_tick", record_tick)
+
+    try:
+        connector.ctrader_live_price_stream_loop()
+    except KeyboardInterrupt:
+        pass
+
+    assert accepted == [("EURUSD", now_ms, "CTRADER:DEMO:47784297")]
+    assert connector.LIVE_TICKS["EURUSD"]["bid"] == 1.14634
+    # One periodic account check and one fresh-event authorization; the old
+    # broker event must not cause an extra durable lookup.
+    assert len(selections) == 2
+
+
+def test_stream_notices_account_switch_without_a_fresh_spot(monkeypatch):
+    """Periodic selection checks still stop an old account's idle stream."""
+    account_a = AccountIdentity("47784297", "demo")
+    account_b = AccountIdentity("47810571", "demo")
+    closed = []
+    socket = type("FakeSocket", (), {"settimeout": lambda self, _: None,
+                                      "close": lambda self: closed.append(True)})()
+    opens = []
+    selections = iter([account_a, account_b])
+    clock = iter([1.0, 2.0, 4.0])
+
+    def open_socket(*_args):
+        opens.append(True)
+        if len(opens) > 1:
+            raise KeyboardInterrupt
+        return socket
+
+    monkeypatch.setattr(connector, "get_ctrader_config", lambda: {"account_id": "47784297", "env": "demo"})
+    monkeypatch.setattr(connector, "open_ctrader_json_socket", open_socket)
+    monkeypatch.setattr(connector, "authorize_ctrader_socket", lambda *_: None)
+    monkeypatch.setattr(connector, "fetch_ctrader_symbol_details", lambda *_: [])
+    monkeypatch.setattr(connector, "resolve_ctrader_symbol", lambda _details, symbol: {"symbol_id": 1} if symbol == "EURUSD" else None)
+    monkeypatch.setattr(connector, "send_ctrader_request", lambda *_: {})
+    monkeypatch.setattr(connector, "websocket_recv_text", lambda _: (_ for _ in ()).throw(socket_module.timeout()))
+    monkeypatch.setattr(connector, "selected_identity", lambda: next(selections))
+    monkeypatch.setattr(connector.time, "monotonic", lambda: next(clock))
+
+    try:
+        connector.ctrader_live_price_stream_loop()
+    except KeyboardInterrupt:
+        pass
+
+    assert len(opens) == 2
+    assert closed == [True]
