@@ -220,6 +220,7 @@ def test_ready_candidate_persists_deterministic_account_scoped_eligible_setup(tm
     assert first["entry"] == 1.1010
     assert first["sl"] == 1.0990
     assert first["tp2"] == 1.1048
+    assert first["fundamental_policy"] == "BLOCK_OPPOSITE"
     assert first["evaluator_steps"]["entry"]["state"] == "PASSED"
 
     with factory() as session:
