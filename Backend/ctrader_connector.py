@@ -2113,16 +2113,18 @@ def ctrader_live_price_stream_loop():
             sock.settimeout(CTRADER_STREAM_READ_TIMEOUT_SECONDS)
             last_heartbeat_sent = time.monotonic()
             last_selection_check = 0.0
+            stream_identity = None
 
             while True:
                 # Continue noticing account switches even if no usable spot
                 # arrives, without issuing a durable read for every replayed
                 # event in a delayed socket backlog.
                 monotonic_now = time.monotonic()
-                if monotonic_now - last_selection_check >= 1.0:
-                    identity = selected_identity()
-                    if identity is None or (identity.account_id, identity.environment) != (str(account_id), config["env"]):
-                        break
+                if stream_identity is None or monotonic_now - last_selection_check >= 1.0:
+                    with account_state_lock:
+                        stream_identity = selected_identity()
+                        if stream_identity is None or (stream_identity.account_id, stream_identity.environment) != (str(account_id), config["env"]):
+                            break
                     last_selection_check = monotonic_now
                 if (
                     monotonic_now - last_heartbeat_sent
@@ -2155,31 +2157,26 @@ def ctrader_live_price_stream_loop():
                 if not symbol:
                     continue
 
-                # A delayed spot can never be used by the forming-candle path.
-                # Discard it before the durable account-selection lookup, so a
-                # broker replay cannot build an ever-growing socket backlog.
+                # A spot too old for the public live-price path must not hold
+                # up the socket reader or form a misleading current candle.
                 received_at = time.time()
                 if live_tick_is_stale(
                     {"timestamp": received_at, "server_timestamp": payload.get("timestamp")},
                     received_at,
-                    LIVE_TICK_CANDLE_STALE_SECONDS,
+                    LIVE_PRICE_STALE_SECONDS,
                 ):
                     continue
 
                 with account_state_lock:
-                    identity = selected_identity()
-                    if identity is None or (identity.account_id, identity.environment) != (str(account_id), config["env"]):
-                        break
-
-                    # Reuse the identity just verified above. The selection
-                    # lock prevents a local switch between check and publish.
-                    with pinned_account(identity):
+                    # The durable selection is checked once per second above;
+                    # consumers independently reject a different account scope.
+                    with pinned_account(stream_identity):
                         update_live_tick(
                             symbol,
                             payload.get("bid"),
                             payload.get("ask"),
                             payload.get("timestamp"),
-                            account_scope=identity.scope,
+                            account_scope=stream_identity.scope,
                         )
 
         except Exception as e:
