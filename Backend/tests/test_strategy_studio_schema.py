@@ -24,6 +24,7 @@ def valid_definition():
         "tp1": {"enabled": True, "target_r": 0.75, "close_percent": 80, "protection_r": 0.2},
         "tp2": {"method": "FIXED_R", "value": 2.0},
         "risk": {"method": "PERCENT_BALANCE", "value": 1.0},
+        "fundamentals": {"mode": "BLOCK_OPPOSITE"},
     }
 
 
@@ -93,5 +94,20 @@ def test_summary_is_deterministic_and_readable():
         "5m BOS/CHOCH -> close beyond level + body >= 50% -> "
         "next candle same direction + second close beyond level -> confirmation close -> "
         "5m swing SL + 5 pip buffer -> TP1 0.75R / close 80% / protect +0.2R -> "
-        "TP2 2R -> risk 1% balance"
+        "TP2 2R -> risk 1% balance -> LIVE fundamentals block opposite bias"
     )
+
+
+def test_legacy_definition_without_fundamentals_defaults_to_block_opposite():
+    payload = valid_definition()
+    payload.pop("fundamentals")
+    result = normalize_definition(payload)
+    assert result["fundamentals"] == {"mode": "BLOCK_OPPOSITE"}
+
+
+def test_require_alignment_is_valid_and_appears_in_summary():
+    payload = valid_definition()
+    payload["fundamentals"] = {"mode": "REQUIRE_ALIGNMENT"}
+    result = normalize_definition(payload)
+    assert result["fundamentals"]["mode"] == "REQUIRE_ALIGNMENT"
+    assert "LIVE fundamentals require alignment" in strategy_summary(result)
