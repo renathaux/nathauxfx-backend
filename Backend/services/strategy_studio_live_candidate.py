@@ -355,6 +355,9 @@ def build_studio_candidate(owner_id, account_identity, symbol, market_bundle,
         "tp2": result.tp2,
         "risk_budget": result.risk_budget,
         "tp1_definition": copy.deepcopy(definition.get("tp1") or {}),
+        "fundamental_policy": str(
+            ((definition.get("fundamentals") or {}).get("mode") or "BLOCK_OPPOSITE")
+        ).upper(),
         "evaluator_steps": result.steps,
         "next_state": result.next_state,
     }

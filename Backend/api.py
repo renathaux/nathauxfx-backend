@@ -7203,6 +7203,7 @@ def studio_candidate_execution_plan(candidate, *, account_balance, owner_id):
         "requested_risk_percent": requested_risk_percent,
         "studio_tp1_enabled": tp1_enabled,
         "tp1_definition": tp1_definition,
+        "fundamental_policy": candidate.get("fundamental_policy") or "BLOCK_OPPOSITE",
         "studio_structure_event_time": candidate.get("structure_event_time"),
         "studio_entry_trigger_time": candidate.get("entry_trigger_time"),
         "studio_broken_level": candidate.get("broken_level"),
@@ -8099,6 +8100,7 @@ def run_ctrader_auto_trade_checks(panel_data):
                 "studio_entry_trigger_time": plan.get("studio_entry_trigger_time"),
                 "studio_broken_level": plan.get("studio_broken_level"),
                 "tp1_definition": copy.deepcopy(plan.get("tp1_definition") or {}),
+                "fundamental_policy": plan.get("fundamental_policy"),
                 "news_event_id": plan.get("news_event_id"),
                 "news_event": copy.deepcopy(plan.get("news_event")),
                 "news_confirmation": copy.deepcopy(plan.get("news_confirmation")),
@@ -8336,6 +8338,7 @@ def prepare_ctrader_trade(payload, volume=0.01):
         "studio_account_scope", "studio_risk_method", "studio_risk_value",
         "requested_risk_percent", "studio_tp1_enabled", "studio_structure_event_time",
         "studio_entry_trigger_time", "studio_broken_level", "tp1_definition",
+        "fundamental_policy",
     ]
     for key in metadata_keys:
         payload_value = payload.get(key)
@@ -11503,6 +11506,61 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
                 details=news_runtime,
             )
 
+        # Fundamentals are a shared broker-boundary policy for every normal
+        # strategy-generated LIVE order. Strategy engines cannot silently
+        # bypass it; Strategy Studio may choose how strict the policy is.
+        if strategy_generated_order and not is_news_order:
+            from services.fundamental_execution_guard import (
+                DEFAULT_FUNDAMENTAL_POLICY,
+                validate_fundamental_entry,
+            )
+
+            fundamental_policy = str(
+                trade_payload.get("fundamental_policy")
+                or DEFAULT_FUNDAMENTAL_POLICY
+            ).upper()
+            fundamental_gate = validate_fundamental_entry(
+                symbol,
+                side,
+                policy=fundamental_policy,
+            )
+            print("LIVE_FUNDAMENTAL_FINAL_GATE =", {
+                **(fundamental_gate.get("details") or {}),
+                "source": source,
+                "strategy_generated_order": True,
+                "ok": bool(fundamental_gate.get("ok")),
+                "reason": fundamental_gate.get("reason"),
+            })
+            if not fundamental_gate.get("ok"):
+                reason = (
+                    fundamental_gate.get("reason")
+                    or "WAIT_FUNDAMENTAL_FINAL_GATE"
+                )
+                if source == "auto":
+                    set_auto_trade_status(
+                        symbol=symbol,
+                        signal=trade_payload.get("signal"),
+                        action=side,
+                        status="BLOCKED",
+                        reason=reason,
+                        details=fundamental_gate.get("details"),
+                    )
+                    log_auto_trade_blocked_reason(
+                        symbol=symbol,
+                        signal=trade_payload.get("signal"),
+                        stage="fundamental_final_gate",
+                        reason=reason,
+                        details=fundamental_gate.get("details"),
+                    )
+                return reject_live_execution_block(
+                    symbol,
+                    side,
+                    trade_payload,
+                    reason,
+                    reason,
+                    details=fundamental_gate.get("details"),
+                )
+
         if source == "auto" and not is_news_order and not studio_execution:
             final_gate = validate_auto_entry_state_locked(
                 symbol,
@@ -11860,6 +11918,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
                 plan.get("consolidation") if isinstance(plan, dict) else None
             ),
             "news_decision": locals().get("locked_news_gate") or locals().get("news_runtime"),
+            "fundamental_gate": locals().get("fundamental_gate"),
             "market_data_freshness_result": locals().get("market_health"),
             "cooldown_result": (
                 {"active": locals().get("cooldown_active")}

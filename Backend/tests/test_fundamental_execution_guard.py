@@ -1,4 +1,5 @@
 from services.fundamental_execution_guard import (
+    ALIGNMENT_REQUIRED_REASON,
     OPPOSING_BIAS_REASON,
     validate_fundamental_entry,
 )
@@ -75,3 +76,41 @@ def test_xauusd_uses_same_direction_filter():
 
     assert result["ok"] is False
     assert result["reason"] == OPPOSING_BIAS_REASON
+
+
+def test_require_alignment_blocks_neutral():
+    result = validate_fundamental_entry(
+        "EURUSD",
+        "BUY",
+        insight=_insight(direction="NEUTRAL", score=5.24),
+        policy="REQUIRE_ALIGNMENT",
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] == ALIGNMENT_REQUIRED_REASON
+    assert result["details"]["fundamental_gate_state"] == "BLOCK_ALIGNMENT_NEUTRAL"
+
+
+def test_require_alignment_blocks_insufficient_data():
+    result = validate_fundamental_entry(
+        "XAUUSD",
+        "SELL",
+        insight=_insight(direction="SELL", status="INSUFFICIENT_DATA", score=-31.0),
+        policy="REQUIRE_ALIGNMENT",
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] == ALIGNMENT_REQUIRED_REASON
+    assert result["details"]["fundamental_gate_state"] == "BLOCK_ALIGNMENT_NOT_ACTIVE"
+
+
+def test_require_alignment_allows_matching_active_bias():
+    result = validate_fundamental_entry(
+        "XAUUSD",
+        "SELL",
+        insight=_insight(direction="SELL", status="ACTIVE", score=-31.0),
+        policy="REQUIRE_ALIGNMENT",
+    )
+
+    assert result["ok"] is True
+    assert result["details"]["fundamental_gate_state"] == "PASS_ALIGNED"

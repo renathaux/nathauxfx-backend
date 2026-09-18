@@ -51,6 +51,7 @@ def _studio_candidate(*, risk_method="PERCENT_BALANCE", risk_value=0.5):
             "close_percent": 50.0,
             "protection_r": 0.0,
         },
+        "fundamental_policy": "REQUIRE_ALIGNMENT",
         "evaluator_steps": {},
         "next_state": None,
     }
@@ -148,6 +149,7 @@ def test_fixed_dollar_risk_conversion_is_exact_and_not_silently_clamped():
     assert plan["studio_risk_method"] == "FIXED_DOLLARS"
     assert plan["studio_risk_value"] == pytest.approx(200.0)
     assert plan["requested_risk_percent"] == pytest.approx(2.0)
+    assert plan["fundamental_policy"] == "REQUIRE_ALIGNMENT"
 
 
 def test_percent_balance_risk_is_passed_exactly_to_live_sizer(monkeypatch):
@@ -243,4 +245,6 @@ def test_task5_core_wiring_exists_before_broker_request():
 
     source = inspect.getsource(api._execute_live_order_core_impl)
     assert "claim_execution_submission" in source
+    assert "LIVE_FUNDAMENTAL_FINAL_GATE" in source
+    assert source.index("LIVE_FUNDAMENTAL_FINAL_GATE") < source.index("claim_execution_submission")
     assert source.index("claim_execution_submission") < source.index("place_market_order_with_inflight_cleanup")

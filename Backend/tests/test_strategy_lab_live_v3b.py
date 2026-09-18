@@ -158,6 +158,7 @@ def test_enabled_eurusd_candidate_is_live_shaped_but_not_submitted():
     assert payload["side"] == "BUY"
     assert payload["source_indicator_event_id"] == "smc1_eur_live_v3b"
     assert payload["setup_identity"]["setup_timeframe"] == "5m"
+    assert payload["fundamental_policy"] == "BLOCK_OPPOSITE"
 
 
 def test_active_management_settings_reach_candidate_even_if_live_service_was_imported_early(monkeypatch):
