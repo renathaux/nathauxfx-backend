@@ -3,6 +3,7 @@ import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 from fastapi import HTTPException
 
@@ -129,3 +130,73 @@ def test_nonpositive_or_missing_balance_is_rejected(monkeypatch):
         route.strategy_simulation_run(payload(), SimpleNamespace())
     assert exc.value.status_code == 409
     assert "balance" in str(exc.value.detail).lower()
+
+
+def manual_payload(**overrides):
+    base = dict(
+        symbol="EURUSD",
+        timeframe="5m",
+        start="2026-09-01T00:00:00Z",
+        end="2026-09-01T01:00:00Z",
+    )
+    base.update(overrides)
+    return route.ManualHistoryRequest(**base)
+
+
+def test_manual_history_requires_no_saved_strategy_and_returns_closed_candles(monkeypatch):
+    calls = {}
+    identity = SimpleNamespace(scope="CTRADER:DEMO:47810571")
+
+    @contextmanager
+    def fake_pinned():
+        yield identity
+
+    index = pd.date_range("2026-09-01T00:00:00Z", periods=3, freq="5min")
+    frame = pd.DataFrame({
+        "Open": [1.1, 1.2, 1.3],
+        "High": [1.2, 1.3, 1.4],
+        "Low": [1.0, 1.1, 1.2],
+        "Close": [1.15, 1.25, 1.35],
+        "Volume": [0.0, 0.0, 0.0],
+    }, index=index)
+
+    monkeypatch.setattr(route, "_actor", lambda request: {"email": "x@example.com"})
+    monkeypatch.setattr(route, "pinned_account", fake_pinned)
+
+    def fake_load(symbol, start, end, *, stream_scope, session_factory=None):
+        calls["symbol"] = symbol
+        calls["scope"] = stream_scope
+        return {"5m": frame, "15m": frame.iloc[:0], "1h": frame.iloc[:0], "4h": frame.iloc[:0]}
+
+    monkeypatch.setattr(route, "load_market_bundle", fake_load)
+    monkeypatch.setattr(
+        route,
+        "get_strategy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("manual replay must not load a strategy")),
+    )
+
+    result = route.manual_replay_history(manual_payload(), SimpleNamespace())
+    assert result["ok"] is True
+    assert result["mode"] == "MANUAL_REPLAY"
+    assert result["strategy_id"] is None
+    assert result["strategy_required"] is False
+    assert result["broker_orders_enabled"] is False
+    assert result["account_scope"] == "CTRADER:DEMO:47810571"
+    assert calls["symbol"] == "EURUSD"
+    assert calls["scope"] == "CTRADER:DEMO:47810571"
+    assert len(result["candles"]) == 3
+    assert result["candles"][0]["close"] == pytest.approx(1.15)
+
+
+def test_manual_history_rejects_ranges_over_31_days(monkeypatch):
+    monkeypatch.setattr(route, "_actor", lambda request: {"email": "x@example.com"})
+    with pytest.raises(HTTPException) as exc:
+        route.manual_replay_history(
+            manual_payload(
+                start="2026-07-01T00:00:00Z",
+                end="2026-09-01T00:00:00Z",
+            ),
+            SimpleNamespace(),
+        )
+    assert exc.value.status_code == 400
+    assert "31" in str(exc.value.detail)
