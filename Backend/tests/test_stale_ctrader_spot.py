@@ -68,8 +68,8 @@ def test_current_broker_spot_still_forms_current_candle(selected, monkeypatch):
     assert len(connector.append_current_forming_candle(frame, "EURUSD", "5m")) == 2
 
 
-def test_stream_discards_delayed_spots_before_account_db_lookup(monkeypatch):
-    """An old spot backlog must not spend a durable account read per event."""
+def test_stream_discards_spots_older_than_live_price_limit_before_account_db_lookup(monkeypatch):
+    """A quote unusable by /chart/live-ticks must not slow socket drainage."""
     account = AccountIdentity("47784297", "demo")
     socket = type("FakeSocket", (), {"settimeout": lambda self, _: None,
                                       "close": lambda self: None})()
@@ -77,7 +77,7 @@ def test_stream_discards_delayed_spots_before_account_db_lookup(monkeypatch):
     events = iter([
         {"payloadType": connector.PAYLOAD_SPOT_EVENT,
          "payload": {"symbolId": 1, "bid": 114628, "ask": 114630,
-                     "timestamp": now_ms - 10 * 60 * 1000}},
+                     "timestamp": now_ms - 30 * 1000}},
         {"payloadType": connector.PAYLOAD_SPOT_EVENT,
          "payload": {"symbolId": 1, "bid": 114634, "ask": 114636,
                      "timestamp": now_ms}},
@@ -119,9 +119,9 @@ def test_stream_discards_delayed_spots_before_account_db_lookup(monkeypatch):
 
     assert accepted == [("EURUSD", now_ms, "CTRADER:DEMO:47784297")]
     assert connector.LIVE_TICKS["EURUSD"]["bid"] == 1.14634
-    # One periodic account check and one fresh-event authorization; the old
-    # broker event must not cause an extra durable lookup.
-    assert len(selections) == 2
+    # The burst uses the periodic account check; neither the old quote nor
+    # the new quote causes another durable lookup in the same second.
+    assert len(selections) == 1
 
 
 def test_stream_notices_account_switch_without_a_fresh_spot(monkeypatch):
@@ -158,3 +158,47 @@ def test_stream_notices_account_switch_without_a_fresh_spot(monkeypatch):
 
     assert len(opens) == 2
     assert closed == [True]
+
+
+def test_fresh_spot_burst_does_not_query_durable_selection_per_tick(monkeypatch):
+    """A burst of usable spots must not recreate the account-DB bottleneck."""
+    account = AccountIdentity("47784297", "demo")
+    socket = type("FakeSocket", (), {"settimeout": lambda self, _: None,
+                                      "close": lambda self: None})()
+    now_ms = int(time.time() * 1000)
+    events = iter([
+        {"payloadType": connector.PAYLOAD_SPOT_EVENT,
+         "payload": {"symbolId": 1, "bid": 114634 + i, "ask": 114636 + i,
+                     "timestamp": now_ms + i}}
+        for i in range(20)
+    ])
+    selections = []
+
+    def recv(_socket):
+        try:
+            return json.dumps(next(events))
+        except StopIteration:
+            raise KeyboardInterrupt
+
+    def select():
+        selections.append(account)
+        return account
+
+    monkeypatch.setattr(connector, "get_ctrader_config", lambda: {"account_id": "47784297", "env": "demo"})
+    monkeypatch.setattr(connector, "open_ctrader_json_socket", lambda *_: socket)
+    monkeypatch.setattr(connector, "authorize_ctrader_socket", lambda *_: None)
+    monkeypatch.setattr(connector, "fetch_ctrader_symbol_details", lambda *_: [])
+    monkeypatch.setattr(connector, "resolve_ctrader_symbol", lambda _details, symbol: {"symbol_id": 1} if symbol == "EURUSD" else None)
+    monkeypatch.setattr(connector, "send_ctrader_request", lambda *_: {})
+    monkeypatch.setattr(connector, "websocket_recv_text", recv)
+    monkeypatch.setattr(connector, "selected_identity", select)
+    monkeypatch.setattr(connector, "LIVE_TICKS", {"EURUSD": {}})
+
+    try:
+        connector.ctrader_live_price_stream_loop()
+    except KeyboardInterrupt:
+        pass
+
+    assert connector.LIVE_TICKS["EURUSD"]["bid"] == 1.14653
+    assert connector.LIVE_TICKS["EURUSD"]["account_scope"] == "CTRADER:DEMO:47784297"
+    assert len(selections) == 1
