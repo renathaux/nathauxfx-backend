@@ -11918,6 +11918,7 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
                 plan.get("consolidation") if isinstance(plan, dict) else None
             ),
             "news_decision": locals().get("locked_news_gate") or locals().get("news_runtime"),
+            "fundamental_gate": locals().get("fundamental_gate"),
             "market_data_freshness_result": locals().get("market_health"),
             "cooldown_result": (
                 {"active": locals().get("cooldown_active")}
