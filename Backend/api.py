@@ -8100,6 +8100,7 @@ def run_ctrader_auto_trade_checks(panel_data):
                 "studio_entry_trigger_time": plan.get("studio_entry_trigger_time"),
                 "studio_broken_level": plan.get("studio_broken_level"),
                 "tp1_definition": copy.deepcopy(plan.get("tp1_definition") or {}),
+                "fundamental_policy": plan.get("fundamental_policy"),
                 "news_event_id": plan.get("news_event_id"),
                 "news_event": copy.deepcopy(plan.get("news_event")),
                 "news_confirmation": copy.deepcopy(plan.get("news_confirmation")),
