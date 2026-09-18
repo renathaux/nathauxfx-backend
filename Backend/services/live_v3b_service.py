@@ -9,7 +9,8 @@ Promotion safety:
 - only durable/tradable 5m BOS events can qualify;
 - the setup must carry the durable 5m event identity and deterministic 5m
   confirmation identity expected by the execution-safety layer;
-- no EMA, 15m, consolidation, session, wick, or fundamental filter is added;
+- no EMA, 15m, consolidation, session, or wick filter is added to V3B qualification;
+- the shared broker-boundary fundamental filter is applied later to every normal LIVE strategy;
 - no order submission, position mutation, lifecycle mutation, or mode toggle is
   performed by this module.
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 import copy
 import os
 
+from services.fundamental_execution_guard import DEFAULT_FUNDAMENTAL_POLICY
 from services import paper_v3b_bridge
 from services.paper_v3b_bridge import PAPER_V3B_MODEL
 
@@ -235,6 +237,7 @@ def build_live_v3b_execution_payload(candidate):
         "strategy_setup_type": candidate.get("strategy_setup_type"),
         "strategy_setup_complete": True,
         "live_strategy_model": LIVE_V3B_MODEL,
+        "fundamental_policy": DEFAULT_FUNDAMENTAL_POLICY,
         "mode": "LIVE",
     }
 
