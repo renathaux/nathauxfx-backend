@@ -1205,6 +1205,31 @@ def update_live_tick(symbol, bid, ask, server_timestamp=None, *, account_scope=N
         f"bid={bid_value} ask={ask_value}"
     )
 
+
+def live_tick_is_stale(tick, now, max_age_seconds):
+    """Check both local receipt and cTrader's spot-event time when supplied."""
+    try:
+        received_at = float(tick.get("timestamp"))
+        if not math.isfinite(received_at):
+            return True
+        received_age = now - received_at
+        if received_age < -max_age_seconds or received_age > max_age_seconds:
+            return True
+
+        broker_timestamp = tick.get("server_timestamp")
+        if broker_timestamp is not None:
+            broker_at = float(broker_timestamp)
+            if not math.isfinite(broker_at):
+                return True
+            if broker_at > 1e11:  # cTrader spot timestamps are milliseconds.
+                broker_at /= 1000
+            broker_age = now - broker_at
+            if broker_age < -max_age_seconds or broker_age > max_age_seconds:
+                return True
+    except (TypeError, ValueError, AttributeError):
+        return True
+    return False
+
 @account_operation
 def get_ctrader_live_price_status():
     now = time.time()
@@ -1225,13 +1250,16 @@ def get_ctrader_live_price_status():
     stale_symbols = [
         symbol
         for symbol, values in prices.items()
-        if not values.get("timestamp")
-        or now - float(values.get("timestamp")) > LIVE_PRICE_STALE_SECONDS
+        if live_tick_is_stale(values, now, LIVE_PRICE_STALE_SECONDS)
     ]
+    fresh_prices = {
+        symbol: values for symbol, values in prices.items()
+        if symbol not in stale_symbols
+    }
     last_update = max(timestamps) if timestamps else None
 
     return {
-        "live_prices": prices,
+        "live_prices": fresh_prices,
         "live_price_health": "STALE" if stale_symbols or not prices else "OK",
         "live_price_stale_symbols": stale_symbols,
         "live_price_last_update": last_update,
@@ -1289,7 +1317,7 @@ def get_live_tick_snapshot(symbol):
         except (TypeError, ValueError):
             tick_age = None
 
-    is_stale = tick_age is None or tick_age > LIVE_TICK_CANDLE_STALE_SECONDS
+    is_stale = live_tick_is_stale(tick, now, LIVE_TICK_CANDLE_STALE_SECONDS)
 
     print("CTRADER_LIVE_TICK_STATUS =", {
         "symbol": normalized_symbol,

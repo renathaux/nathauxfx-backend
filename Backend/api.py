@@ -1841,6 +1841,7 @@ def overlay_live_forming_candles(panel_data, live_price_status, now=None):
         else {}
     )
     prices = live_price_status.get("live_prices") or {}
+    stale_symbols = set(live_price_status.get("live_price_stale_symbols") or ())
     now_timestamp = float(now if now is not None else time.time())
     timeframe_seconds = {
         "5m": 5 * 60,
@@ -1849,6 +1850,8 @@ def overlay_live_forming_candles(panel_data, live_price_status, now=None):
     }
 
     for symbol in ["EURUSD", "XAUUSD"]:
+        if symbol in stale_symbols:
+            continue
         tick = prices.get(symbol) or {}
         tick_timestamp = tick.get("timestamp")
 
