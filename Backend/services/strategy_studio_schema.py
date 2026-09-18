@@ -20,6 +20,7 @@ ENTRY_METHODS = {"BOS_CHOCH_CLOSE", "CONFIRMATION_CLOSE", "RETEST"}
 STOP_METHODS = {"LAST_SWING", "FIXED_DISTANCE"}
 TP2_METHODS = {"FIXED_R", "FIXED_DISTANCE", "OPPOSITE_SWING"}
 RISK_METHODS = {"PERCENT_BALANCE", "FIXED_DOLLARS"}
+FUNDAMENTAL_MODES = {"BLOCK_OPPOSITE", "REQUIRE_ALIGNMENT"}
 TIMEFRAME_RANK = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}
 
 
@@ -71,6 +72,10 @@ class RiskDefinition(_StrictModel):
     value: float
 
 
+class FundamentalDefinition(_StrictModel):
+    mode: Literal["BLOCK_OPPOSITE", "REQUIRE_ALIGNMENT"] = "BLOCK_OPPOSITE"
+
+
 class StrategyDefinition(_StrictModel):
     schema_version: Literal[1]
     symbols: list[Literal["EURUSD", "XAUUSD"]]
@@ -83,6 +88,7 @@ class StrategyDefinition(_StrictModel):
     tp1: TP1Definition
     tp2: TP2Definition
     risk: RiskDefinition
+    fundamentals: FundamentalDefinition = Field(default_factory=FundamentalDefinition)
 
     @model_validator(mode="after")
     def validate_cross_fields(self):
@@ -249,6 +255,9 @@ def _parse_without_cross_validation(payload: dict) -> StrategyDefinition:
         "tp1": TP1Definition.model_validate(payload["tp1"]),
         "tp2": TP2Definition.model_validate(payload["tp2"]),
         "risk": RiskDefinition.model_validate(payload["risk"]),
+        "fundamentals": FundamentalDefinition.model_validate(
+            payload.get("fundamentals") or {"mode": "BLOCK_OPPOSITE"}
+        ),
     }
     # model_construct bypasses validators but keeps typed nested objects.
     return StrategyDefinition.model_construct(**data)
@@ -351,5 +360,11 @@ def strategy_summary(definition: dict) -> str:
         parts.append(f"risk {_fmt(risk['value'])}% balance")
     else:
         parts.append(f"risk ${_fmt(risk['value'])}")
+
+    fundamental_mode = value["fundamentals"]["mode"]
+    if fundamental_mode == "REQUIRE_ALIGNMENT":
+        parts.append("LIVE fundamentals require alignment")
+    else:
+        parts.append("LIVE fundamentals block opposite bias")
 
     return " -> ".join(parts)
