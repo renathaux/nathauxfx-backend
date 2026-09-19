@@ -2442,6 +2442,7 @@ def set_market_data_source_endpoint(payload: dict):
 
 @app.get("/panel-data")
 def panel_data(force: int = 0):
+    weekend_idle = forex_weekend_closed()
     age = time.time() - PANEL_CACHE["last_update"]
 
     cached_data = PANEL_CACHE.get("data")
@@ -2449,7 +2450,12 @@ def panel_data(force: int = 0):
     if not isinstance(cached_data, dict):
         cached_data = default_panel()
 
-    force_requested = str(force).lower() in ["1", "true", "yes"]
+    # During the forex weekend the panel is display-only. Ignore stale clients
+    # asking for force=1 so they cannot wake the market/DB refresh pipeline.
+    force_requested = (
+        not weekend_idle
+        and str(force).lower() in ["1", "true", "yes"]
+    )
     cache_stale = age >= CACHE_SECONDS
     startup_cache = _is_startup_panel_payload(cached_data)
     cache_validity = _panel_cache_validity(cached_data)
@@ -2463,7 +2469,9 @@ def panel_data(force: int = 0):
     refresh_stuck = running_seconds >= PANEL_REFRESH_STUCK_SECONDS
     direct_reason = None
 
-    if force_requested:
+    if weekend_idle:
+        direct_reason = None
+    elif force_requested:
         direct_reason = "panel_force"
     elif not cache_valid:
         direct_reason = "api_cache_invalid"
@@ -2573,18 +2581,35 @@ def panel_data(force: int = 0):
     live_recent_history = LIVE_PANEL_META_CACHE.get("live_recent_history") or []
 
     if not live_pl_sync.get("pl_calculation_version"):
-        live_pl_sync = calculate_live_pl_sync()
-        live_recent_history = get_live_recent_history_for_panel()
-        LIVE_PANEL_META_CACHE.update({
-            "live_pl_sync": live_pl_sync or {},
-            "live_recent_history": live_recent_history or [],
-            "live_trade_stats": calculate_live_trade_stats() or {},
-            "last_update": time.time(),
-        })
+        if weekend_idle:
+            # Do not reach the broker/history refresh path merely to render a
+            # closed-market dashboard. Preserve any in-memory values and use a
+            # deterministic empty display fallback when the process is cold.
+            live_pl_sync = {
+                **live_pl_sync,
+                "pl_calculation_version": "weekend-cache-only",
+                "daily_realized_pl": live_pl_sync.get("daily_realized_pl", 0),
+                "daily_total_pl": live_pl_sync.get("daily_total_pl", 0),
+                "weekly_realized_pl": live_pl_sync.get("weekly_realized_pl", 0),
+                "monthly_realized_pl": live_pl_sync.get("monthly_realized_pl", 0),
+                "floating_live_pl": live_pl_sync.get("floating_live_pl", 0),
+                "weekly_total_pl": live_pl_sync.get("weekly_total_pl", 0),
+            }
+        else:
+            live_pl_sync = calculate_live_pl_sync()
+            live_recent_history = get_live_recent_history_for_panel()
+            LIVE_PANEL_META_CACHE.update({
+                "live_pl_sync": live_pl_sync or {},
+                "live_recent_history": live_recent_history or [],
+                "live_trade_stats": calculate_live_trade_stats() or {},
+                "last_update": time.time(),
+            })
 
     print("LIVE_PL_SYNC:", live_pl_sync)
 
-    authoritative_auto_trade_state = auto_trade_state_response(refresh=True)
+    authoritative_auto_trade_state = auto_trade_state_response(
+        refresh=not weekend_idle
+    )
 
     print("PAPER_STATE_REFRESH:", {
         "paper_auto_enabled": AUTO_TRADE_ENABLED["enabled"],
@@ -2617,7 +2642,9 @@ def panel_data(force: int = 0):
 
     data["_meta"] = {
         "source": (
-            "direct_fresh"
+            "weekend_cache_only"
+            if weekend_idle
+            else "direct_fresh"
             if direct_reason and age == 0 and cache_valid
             else "direct_fresh_no_data"
             if direct_reason and age == 0 and not cache_valid
@@ -2654,6 +2681,7 @@ def panel_data(force: int = 0):
             for symbol in ["EURUSD", "XAUUSD"]
         },
         "refresh_seconds": CACHE_SECONDS,
+        "weekend_idle": weekend_idle,
         "error": PANEL_REFRESH_STATE.get("last_error"),
         "cache_valid": cache_valid,
         "cache_validation_error": cache_validity.get("reason"),
