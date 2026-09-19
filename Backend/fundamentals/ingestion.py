@@ -17,6 +17,7 @@ from fundamentals.repositories.economic_events import (
 from fundamentals.repositories.observations import provider_health
 from fundamentals.locks import LIVE_INGESTION_LOCK_KEY, advisory_lock
 from models import EconomicProviderFetch
+from services.market_hours import forex_weekend_closed
 
 
 _INGEST_LOCK = threading.Lock()
@@ -93,13 +94,21 @@ def collect_official_provider_data(*, now=None, timeout=20, session_factory=None
 
 def collect_provider_data(*, now=None, timeout=8):
     """Collect trusted providers without changing the legacy News Mode path."""
+    current = now or datetime.now(timezone.utc)
+    if forex_weekend_closed(current):
+        return {
+            "status": "MARKET_CLOSED_WEEKEND",
+            "event_count": 0,
+            "successful_providers": [],
+            "failed_providers": [],
+        }
+
     from services.news_service import (
         fetch_finnhub_calendar_events,
         fetch_fmp_calendar_events,
         fetch_jblanked_calendar_events,
     )
 
-    current = now or datetime.now(timezone.utc)
     providers = (
         ("jblanked_mql5", lambda: (
             (events := fetch_jblanked_calendar_events(force=True, timeout=timeout)),
@@ -155,6 +164,8 @@ def run_fundamental_ingestion_if_due(
     Failures are isolated from the trading loop and recorded by news_service.
     """
     current = now or datetime.now(timezone.utc)
+    if forex_weekend_closed(current):
+        return {"status": "MARKET_CLOSED_WEEKEND", "event_count": 0}
     read_health = health_reader or provider_health
     try:
         health = read_health(now=current)
