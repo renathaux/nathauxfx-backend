@@ -72,6 +72,7 @@ from routes.diagnostics import router as diagnostics_router
 from routes.shadow import router as shadow_router
 from routes.strategy_lab import router as strategy_lab_router
 from routes.admin_access import router as admin_access_router
+from services.market_hours import forex_weekend_closed
 from services.news_service import (
     fetch_calendar_events,
     get_calendar_data_age_seconds,
@@ -2081,6 +2082,18 @@ def background_fetch():
         ENGINE_RUNTIME_STATE["last_loop_started"] = time.time()
         ENGINE_RUNTIME_STATE["loop_iterations"] += 1
         try:
+            if forex_weekend_closed():
+                # Do not wake Neon/cTrader every CACHE_SECONDS while forex is
+                # closed. Keep the process alive so it resumes automatically
+                # after Sunday 17:00 New York time.
+                ENGINE_RUNTIME_STATE["weekend_idle"] = True
+                ENGINE_RUNTIME_STATE["last_loop_completed"] = time.time()
+                ENGINE_RUNTIME_STATE["last_loop_error"] = None
+                print("WEEKEND_IDLE_BACKGROUND = market closed; polling paused")
+                time.sleep(max(float(CACHE_SECONDS or 0), 15 * 60))
+                continue
+
+            ENGINE_RUNTIME_STATE["weekend_idle"] = False
             print("🔄 BACKGROUND FETCH (once for all users)")
             # Server-owned recovery: a browser request is never required to
             # start or restart the cTrader price stream.
