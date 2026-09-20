@@ -379,3 +379,59 @@ def test_chart_history_rejects_invalid_context_without_broker_fetch():
         )
     assert exc.value.status_code == 422
     fetcher.assert_not_called()
+
+
+def test_chart_history_accepts_historical_end_without_expanding_range():
+    requested_end = datetime(2024, 3, 15, 12, 0, tzinfo=timezone.utc)
+    frame = pd.DataFrame({
+        "Open": [1.1], "High": [1.2], "Low": [1.0], "Close": [1.15],
+    }, index=pd.to_datetime([
+        requested_end - timedelta(minutes=10)
+    ], utc=True))
+
+    with patch.object(
+        ctrader, "fetch_ctrader_historical_candles", return_value=frame
+    ) as fetcher:
+        result = ctrader.chart_candle_history(
+            _request(),
+            symbol="EURUSD",
+            timeframe="5m",
+            days=62,
+            end=requested_end,
+        )
+
+    start_arg, end_arg = fetcher.call_args.args[2:]
+    assert end_arg == requested_end
+    assert end_arg - start_arg == timedelta(days=62)
+    assert result["end_utc"] == "2024-03-15T12:00:00Z"
+    assert result["start_utc"] == "2024-01-13T12:00:00Z"
+    assert result["read_only"] is True
+    assert result["closed_only"] is True
+
+
+def test_chart_history_future_end_is_capped_to_now(monkeypatch):
+    now = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    frame = pd.DataFrame({
+        "Open": [1.1], "High": [1.2], "Low": [1.0], "Close": [1.15],
+    }, index=pd.to_datetime([
+        now - timedelta(minutes=10)
+    ], utc=True))
+
+    with patch.object(ctrader, "datetime", FixedDateTime), patch.object(
+        ctrader, "fetch_ctrader_historical_candles", return_value=frame
+    ) as fetcher:
+        result = ctrader.chart_candle_history(
+            _request(),
+            symbol="EURUSD",
+            timeframe="5m",
+            days=1,
+            end=now + timedelta(days=10),
+        )
+
+    assert fetcher.call_args.args[3] == now
+    assert result["end_utc"] == "2026-09-20T12:00:00Z"
