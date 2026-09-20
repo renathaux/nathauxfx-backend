@@ -435,3 +435,18 @@ def test_chart_history_future_end_is_capped_to_now(monkeypatch):
 
     assert fetcher.call_args.args[3] == now
     assert result["end_utc"] == "2026-09-20T12:00:00Z"
+
+
+def test_chart_history_ctrader_api_error_becomes_retryable_503():
+    broker_error = ctrader_connector.CTraderApiError(
+        "cTrader error response",
+        {"payload": {"errorCode": "REQUEST_FREQUENCY_EXCEEDED"}},
+    )
+    with patch.object(
+        ctrader, "fetch_ctrader_historical_candles", side_effect=broker_error
+    ), pytest.raises(HTTPException) as exc:
+        ctrader.chart_candle_history(
+            _request(), symbol="EURUSD", timeframe="5m", days=14
+        )
+    assert exc.value.status_code == 503
+    assert "REQUEST_FREQUENCY_EXCEEDED" in str(exc.value.detail)
