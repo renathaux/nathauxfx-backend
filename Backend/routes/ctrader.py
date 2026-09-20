@@ -564,9 +564,15 @@ def chart_candle_history(
     requested_end = _normalize_utc(end) if end is not None else now_utc
     end_utc = min(requested_end, now_utc)
     start_utc = end_utc - min(timedelta(days=days), _MAX_CHART_HISTORY_RANGE)
-    frame = fetch_ctrader_historical_candles(
-        normalized_symbol, normalized_timeframe, start_utc, end_utc
-    )
+    try:
+        frame = fetch_ctrader_historical_candles(
+            normalized_symbol, normalized_timeframe, start_utc, end_utc
+        )
+    except _ctrader_connector.CTraderApiError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=_ctrader_connector.describe_ctrader_error(exc),
+        ) from exc
     if frame is None or frame.empty:
         raise HTTPException(status_code=503, detail="cTrader returned no historical candles")
 
