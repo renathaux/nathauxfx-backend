@@ -543,6 +543,7 @@ def chart_candle_history(
     symbol: str = Query(...),
     timeframe: str = Query(...),
     days: int = Query(default=62, ge=1, le=62),
+    end: datetime | None = Query(default=None),
 ):
     """Return bounded, closed native candles for the visual chart only.
 
@@ -559,7 +560,9 @@ def chart_candle_history(
     if normalized_timeframe == "1m":
         _enable_read_only_m1_history()
 
-    end_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    requested_end = _normalize_utc(end) if end is not None else now_utc
+    end_utc = min(requested_end, now_utc)
     start_utc = end_utc - min(timedelta(days=days), _MAX_CHART_HISTORY_RANGE)
     frame = fetch_ctrader_historical_candles(
         normalized_symbol, normalized_timeframe, start_utc, end_utc
@@ -577,6 +580,8 @@ def chart_candle_history(
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
         "days": days,
+        "start_utc": start_utc.isoformat().replace("+00:00", "Z"),
+        "end_utc": end_utc.isoformat().replace("+00:00", "Z"),
         "closed_only": True,
         "read_only": True,
         "observation_only": normalized_timeframe == "1m",
