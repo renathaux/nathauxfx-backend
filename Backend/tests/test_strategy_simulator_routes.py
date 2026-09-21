@@ -132,10 +132,13 @@ def test_route_uses_static_candles_and_positive_balance(monkeypatch):
     def fake_run(
         strategy_definition, bundle, symbol, balance,
         *, risk_override=None, include_replay=False,
+        evaluation_start=None, evaluation_end=None,
     ):
         calls["definition"] = strategy_definition
         calls["balance"] = balance
         calls["replay"] = include_replay
+        calls["evaluation_start"] = evaluation_start
+        calls["evaluation_end"] = evaluation_end
         return {
             "metrics": {"starting_balance": balance},
             "trades": [],
@@ -155,6 +158,8 @@ def test_route_uses_static_candles_and_positive_balance(monkeypatch):
     assert len(calls["rows"]) == 2
     assert calls["balance"] == pytest.approx(9895.11)
     assert calls["replay"] is True
+    assert calls["evaluation_start"] == payload().start
+    assert calls["evaluation_end"] == payload().end
 
 
 def test_missing_static_history_is_rejected_before_simulation(monkeypatch):
