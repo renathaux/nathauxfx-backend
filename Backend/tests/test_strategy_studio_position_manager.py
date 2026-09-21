@@ -24,7 +24,8 @@ def db_session_factory():
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 
-def definition(*, tp1_enabled=True, close_percent=50.0, protection_r=0.5, target_r=1.0):
+def definition(*, tp1_enabled=True, close_percent=50.0, protection_r=0.5, target_r=1.0,
+               target_basis="SL_DISTANCE", protection_mode="FIXED", protection_steps=None):
     return {
         "schema_version": 1,
         "symbols": ["EURUSD"],
@@ -42,8 +43,11 @@ def definition(*, tp1_enabled=True, close_percent=50.0, protection_r=0.5, target
         "tp1": {
             "enabled": tp1_enabled,
             "target_r": target_r if tp1_enabled else None,
+            "target_basis": target_basis if tp1_enabled else "SL_DISTANCE",
             "close_percent": close_percent if tp1_enabled else None,
-            "protection_r": protection_r if tp1_enabled else None,
+            "protection_r": protection_r if (tp1_enabled and protection_mode == "FIXED") else None,
+            "protection_mode": protection_mode if tp1_enabled else "FIXED",
+            "protection_steps": list(protection_steps or []) if tp1_enabled else [],
         },
         "tp2": {"method": "FIXED_R", "value": 2.0},
         "risk": {"method": "PERCENT_BALANCE", "value": 1.0},
@@ -52,7 +56,8 @@ def definition(*, tp1_enabled=True, close_percent=50.0, protection_r=0.5, target
 
 def seed_lifecycle(factory, *, account_id="acct-a", account_scope="CTRADER:DEMO:acct-a",
                    strategy_id="strat-live", direction="BUY", tp1_enabled=True,
-                   suspended=False, tp1_done=False, broker_position_id="pos-1"):
+                   suspended=False, tp1_done=False, broker_position_id="pos-1",
+                   strategy_definition=None):
     now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
     with factory() as session:
         session.add(StrategySetupLifecycle(
@@ -64,7 +69,7 @@ def seed_lifecycle(factory, *, account_id="acct-a", account_scope="CTRADER:DEMO:
             symbol="EURUSD",
             direction=direction,
             status="CONSUMED",
-            definition_snapshot=definition(tp1_enabled=tp1_enabled),
+            definition_snapshot=(strategy_definition or definition(tp1_enabled=tp1_enabled)),
             initial_volume_units=10000,
             broker_position_id=broker_position_id,
             tp1_completed_at=(now if tp1_done else None),
@@ -202,6 +207,101 @@ def test_continuous_tp1_hit_closes_partial_then_applies_configured_protection(db
         row = session.get(StrategySetupLifecycle, "setup-1")
         assert row.tp1_completed_at is not None
         assert row.protection_applied_at is not None
+
+
+def test_tp2_based_tp1_waits_for_percentage_of_tp2_path(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+
+    strategy = definition(
+        close_percent=40.0,
+        target_r=0.70,
+        target_basis="TP2_DISTANCE",
+        protection_r=0.50,
+    )
+    seed_lifecycle(db_session_factory, strategy_definition=strategy)
+    closed = []
+    protected = []
+    monkeypatch.setattr(
+        manager, "close_position",
+        lambda position_id, volume=None: closed.append((position_id, volume)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        manager, "modify_position_stop_loss",
+        lambda *a, **k: protected.append((a, k)) or {"ok": True},
+    )
+
+    before = manager.manage_selected_account_positions(
+        "owner-1", AccountIdentity("acct-a", "demo"),
+        [open_position(price=1.1060, entry=1.1000, sl=1.0950, tp2=1.1100)],
+        prices(bid=1.1060), session_factory=db_session_factory,
+    )
+    assert before["actions"] == []
+    assert closed == []
+
+    hit = manager.manage_selected_account_positions(
+        "owner-1", AccountIdentity("acct-a", "demo"),
+        [open_position(price=1.1070, entry=1.1000, sl=1.0950, tp2=1.1100)],
+        prices(bid=1.1070), session_factory=db_session_factory,
+    )
+    assert closed == [("pos-1", 4000)]
+    assert protected[0][0][1] == pytest.approx(1.1050)
+    assert hit["actions"][0]["protected_sl"] == pytest.approx(1.1050)
+
+
+def test_step_protection_advances_70_50_80_60_90_70(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+
+    steps = [
+        {"trigger_percent": 70, "secure_percent": 50},
+        {"trigger_percent": 80, "secure_percent": 60},
+        {"trigger_percent": 90, "secure_percent": 70},
+    ]
+    strategy = definition(
+        close_percent=40.0,
+        target_r=0.70,
+        target_basis="TP2_DISTANCE",
+        protection_mode="TP2_STEPS",
+        protection_steps=steps,
+    )
+    seed_lifecycle(db_session_factory, strategy_definition=strategy)
+    closed = []
+    protected = []
+    monkeypatch.setattr(
+        manager, "close_position",
+        lambda position_id, volume=None: closed.append((position_id, volume)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        manager, "modify_position_stop_loss",
+        lambda position_id, stop_loss, take_profit_price=None:
+            protected.append((position_id, stop_loss, take_profit_price)) or {"ok": True},
+    )
+
+    first = manager.manage_selected_account_positions(
+        "owner-1", AccountIdentity("acct-a", "demo"),
+        [open_position(price=1.1070, entry=1.1000, sl=1.0950, tp2=1.1100)],
+        prices(bid=1.1070), session_factory=db_session_factory,
+    )
+    assert closed == [("pos-1", 4000)]
+    assert protected[-1][1] == pytest.approx(1.1050)
+    assert first["actions"][0]["trigger_percent"] == 70
+    assert first["actions"][0]["secure_percent"] == 50
+
+    second = manager.manage_selected_account_positions(
+        "owner-1", AccountIdentity("acct-a", "demo"),
+        [open_position(price=1.1080, entry=1.1000, sl=1.1050, tp2=1.1100)],
+        prices(bid=1.1080), session_factory=db_session_factory,
+    )
+    assert second["actions"][0]["action"] == "TP2_STEP_PROTECTION"
+    assert second["actions"][0]["secure_percent"] == 60
+    assert protected[-1][1] == pytest.approx(1.1060)
+
+    third = manager.manage_selected_account_positions(
+        "owner-1", AccountIdentity("acct-a", "demo"),
+        [open_position(price=1.1090, entry=1.1000, sl=1.1060, tp2=1.1100)],
+        prices(bid=1.1090), session_factory=db_session_factory,
+    )
+    assert third["actions"][0]["secure_percent"] == 70
+    assert protected[-1][1] == pytest.approx(1.1070)
 
 
 def test_tp1_completed_prevents_duplicate_partial_close(db_session_factory, monkeypatch):
