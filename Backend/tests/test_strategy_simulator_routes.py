@@ -219,7 +219,8 @@ def test_route_forwards_simulator_continuation(monkeypatch):
     monkeypatch.setattr(route, "_actor", lambda request: {"email": "x@example.com"})
     monkeypatch.setattr(route, "pinned_account", fake_pinned)
     monkeypatch.setattr(
-        route, "get_ctrader_account_snapshot", lambda: {"balance": 1000.0}
+        route, "get_ctrader_account_snapshot",
+        lambda: pytest.fail("continuation chunks must reuse virtual balance"),
     )
     monkeypatch.setattr(
         route, "build_static_market_bundle",
