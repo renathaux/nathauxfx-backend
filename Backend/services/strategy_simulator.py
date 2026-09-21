@@ -5,7 +5,7 @@ activation state is imported or modified here.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 
 import pandas as pd
@@ -34,6 +34,9 @@ class VirtualTrade:
     risk_dollars: float
     tp1_close_fraction: float = 0.0
     protection_r: float = 0.0
+    protection_basis: str = "SL_DISTANCE"
+    protection_mode: str = "FIXED"
+    protection_steps: list[dict] = field(default_factory=list)
     tp1_hit: bool = False
     remaining_fraction: float = 1.0
     protected_sl: float | None = None
@@ -73,6 +76,48 @@ def _touch_profit(trade: VirtualTrade, high: float, low: float, level: float | N
 
 def _touch_stop(trade: VirtualTrade, high: float, low: float, level: float) -> bool:
     return low <= level if trade.side == "BUY" else high >= level
+
+
+def _fixed_protection_level(trade: VirtualTrade) -> float:
+    fraction = float(trade.protection_r)
+    if trade.protection_basis == "TP2_DISTANCE":
+        return float(trade.entry) + (float(trade.tp2) - float(trade.entry)) * fraction
+    return float(trade.entry) + trade.sign * trade.risk_distance * fraction
+
+
+def _step_protection_level(trade: VirtualTrade, close: float) -> float | None:
+    if trade.protection_mode != "TP2_STEPS" or not trade.protection_steps:
+        return None
+    path = float(trade.tp2) - float(trade.entry)
+    if path == 0:
+        return None
+    progress = (float(close) - float(trade.entry)) / path * 100.0
+    if progress < 0:
+        return None
+    reached = [
+        item for item in trade.protection_steps
+        if progress >= float(item.get("trigger_percent", 0.0))
+    ]
+    if not reached:
+        return None
+    step = max(reached, key=lambda item: float(item.get("trigger_percent", 0.0)))
+    secure_fraction = float(step.get("secure_percent", 0.0)) / 100.0
+    return float(trade.entry) + path * secure_fraction
+
+
+def _better_stop(trade: VirtualTrade, candidate: float | None) -> bool:
+    if candidate is None:
+        return False
+    current = trade.protected_sl
+    if current is None:
+        current = trade.sl
+    return candidate > current if trade.side == "BUY" else candidate < current
+
+
+def _update_step_protection_on_close(trade: VirtualTrade, close: float) -> None:
+    candidate = _step_protection_level(trade, close)
+    if _better_stop(trade, candidate):
+        trade.protected_sl = float(candidate)
 
 
 def _closed_result(trade: VirtualTrade, candle, outcome: str, total_r: float,
@@ -150,9 +195,9 @@ def resolve_virtual_trade(trade: VirtualTrade, candle) -> dict | None:
             trade.tp1_hit = True
             trade.realized_r += fraction * trade.r_at(float(trade.tp1))
             trade.remaining_fraction = 1.0 - fraction
-            trade.protected_sl = (
-                float(trade.entry) + trade.sign * trade.risk_distance * float(trade.protection_r)
-            )
+
+            if trade.protection_mode == "FIXED":
+                trade.protected_sl = _fixed_protection_level(trade)
 
             # Reaching TP2 from entry necessarily crosses TP1 on the profit side.
             # With no original SL touch, no unknowable reversal is required.
@@ -161,6 +206,11 @@ def resolve_virtual_trade(trade: VirtualTrade, candle) -> dict | None:
                 return _closed_result(trade, candle, "TP2", total_r, exit_price=trade.tp2)
             if trade.remaining_fraction <= 0:
                 return _closed_result(trade, candle, "TP1_FULL", trade.realized_r, exit_price=trade.tp1)
+
+            # Step protection uses closed-candle progress for deterministic
+            # backtests. A newly selected stop becomes active on the next candle.
+            if trade.protection_mode == "TP2_STEPS":
+                _update_step_protection_on_close(trade, _value(candle, "close"))
             return None
         return None
 
@@ -174,6 +224,8 @@ def resolve_virtual_trade(trade: VirtualTrade, candle) -> dict | None:
     if tp2_hit:
         total_r = trade.realized_r + trade.remaining_fraction * trade.r_at(trade.tp2)
         return _closed_result(trade, candle, "TP2", total_r, exit_price=trade.tp2)
+    if trade.protection_mode == "TP2_STEPS":
+        _update_step_protection_on_close(trade, _value(candle, "close"))
     return None
 
 
@@ -349,7 +401,10 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
                 side=evaluation.signal,
                 risk_dollars=float(evaluation.risk_budget["dollars"]),
                 tp1_close_fraction=float(tp1["close_percent"] or 0.0) / 100.0 if tp1["enabled"] else 0.0,
-                protection_r=float(tp1["protection_r"] or 0.0) if tp1["enabled"] else 0.0,
+                protection_r=float(tp1.get("protection_r") or 0.0) if tp1["enabled"] else 0.0,
+                protection_basis=str(tp1.get("target_basis") or "SL_DISTANCE"),
+                protection_mode=str(tp1.get("protection_mode") or "FIXED"),
+                protection_steps=list(tp1.get("protection_steps") or []),
             )
         if include_replay:
             replay.append(_replay_frame(timestamp, candle, evaluation, active, None))
