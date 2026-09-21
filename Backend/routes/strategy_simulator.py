@@ -46,6 +46,8 @@ class SimulationRequest(BaseModel):
     mode: Literal["FAST", "REPLAY"] = "FAST"
     risk_override: RiskOverride | None = None
     candles_5m: list[SimulationCandle]
+    continuation: dict | None = None
+    finalize: bool = True
 
 
 class ManualHistoryRequest(BaseModel):
@@ -79,6 +81,16 @@ def _snapshot_balance(snapshot) -> float | None:
         if value > 0:
             return value
     return None
+
+
+def _continuation_balance(payload: dict | None) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        value = float(payload.get("balance"))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def _risk_override(payload: RiskOverride | None) -> dict | None:
@@ -134,16 +146,18 @@ def strategy_simulation_run(payload: SimulationRequest, request: Request):
     try:
         with pinned_account() as identity:
             scope = identity.scope
-            snapshot = get_ctrader_account_snapshot()
-            balance = _snapshot_balance(snapshot)
+            balance = _continuation_balance(payload.continuation)
             if balance is None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "Selected cTrader account balance is unavailable "
-                        "or nonpositive"
-                    ),
-                )
+                snapshot = get_ctrader_account_snapshot()
+                balance = _snapshot_balance(snapshot)
+                if balance is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Selected cTrader account balance is unavailable "
+                            "or nonpositive"
+                        ),
+                    )
 
             bundle = build_static_market_bundle(
                 payload.candles_5m,
@@ -159,6 +173,8 @@ def strategy_simulation_run(payload: SimulationRequest, request: Request):
                 include_replay=payload.mode == "REPLAY",
                 evaluation_start=payload.start,
                 evaluation_end=payload.end,
+                continuation=payload.continuation,
+                finalize_open_trade=payload.finalize,
             )
     except HTTPException:
         raise

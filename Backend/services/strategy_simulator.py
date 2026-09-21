@@ -120,6 +120,59 @@ def _update_step_protection_on_close(trade: VirtualTrade, close: float) -> None:
         trade.protected_sl = float(candidate)
 
 
+def _virtual_trade_payload(trade: VirtualTrade | None) -> dict | None:
+    if trade is None:
+        return None
+    return {
+        "trade_id": trade.trade_id,
+        "entry_time": pd.Timestamp(trade.entry_time).isoformat(),
+        "entry": float(trade.entry),
+        "sl": float(trade.sl),
+        "tp1": float(trade.tp1) if trade.tp1 is not None else None,
+        "tp2": float(trade.tp2),
+        "side": trade.side,
+        "risk_dollars": float(trade.risk_dollars),
+        "tp1_close_fraction": float(trade.tp1_close_fraction),
+        "protection_r": float(trade.protection_r),
+        "protection_basis": trade.protection_basis,
+        "protection_mode": trade.protection_mode,
+        "protection_steps": list(trade.protection_steps or []),
+        "tp1_hit": bool(trade.tp1_hit),
+        "remaining_fraction": float(trade.remaining_fraction),
+        "protected_sl": (
+            float(trade.protected_sl) if trade.protected_sl is not None else None
+        ),
+        "realized_r": float(trade.realized_r),
+    }
+
+
+def _virtual_trade_from_payload(payload: dict | None) -> VirtualTrade | None:
+    if not isinstance(payload, dict):
+        return None
+    return VirtualTrade(
+        trade_id=str(payload["trade_id"]),
+        entry_time=pd.Timestamp(payload["entry_time"]),
+        entry=float(payload["entry"]),
+        sl=float(payload["sl"]),
+        tp1=float(payload["tp1"]) if payload.get("tp1") is not None else None,
+        tp2=float(payload["tp2"]),
+        side=str(payload["side"]),
+        risk_dollars=float(payload["risk_dollars"]),
+        tp1_close_fraction=float(payload.get("tp1_close_fraction") or 0.0),
+        protection_r=float(payload.get("protection_r") or 0.0),
+        protection_basis=str(payload.get("protection_basis") or "SL_DISTANCE"),
+        protection_mode=str(payload.get("protection_mode") or "FIXED"),
+        protection_steps=list(payload.get("protection_steps") or []),
+        tp1_hit=bool(payload.get("tp1_hit")),
+        remaining_fraction=float(payload.get("remaining_fraction", 1.0)),
+        protected_sl=(
+            float(payload["protected_sl"])
+            if payload.get("protected_sl") is not None else None
+        ),
+        realized_r=float(payload.get("realized_r") or 0.0),
+    )
+
+
 def _closed_result(trade: VirtualTrade, candle, outcome: str, total_r: float,
                    *, resolved: bool = True, exit_price: float | None = None) -> dict:
     pnl = float(total_r) * float(trade.risk_dollars) if resolved else 0.0
@@ -300,7 +353,8 @@ def _evaluation_reason(evaluation) -> tuple[str | None, str | None]:
 
 
 def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_override=None,
-                   include_replay=False, evaluation_start=None, evaluation_end=None) -> dict:
+                   include_replay=False, evaluation_start=None, evaluation_end=None,
+                   continuation=None, finalize_open_trade=True) -> dict:
     value = normalize_definition(definition)
     timeline = build_market_facts(
         market_bundle,
@@ -308,15 +362,24 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         value["trading_timeframe"],
         value["trend"]["timeframe"],
     )
-    balance = float(start_balance)
-    if balance <= 0:
+    base_balance = float(start_balance)
+    if base_balance <= 0:
         raise ValueError("SIMULATION_BALANCE_INVALID")
 
-    state = EvaluationState()
-    active: VirtualTrade | None = None
+    continuation_value = continuation if isinstance(continuation, dict) else {}
+    balance = float(continuation_value.get("balance", base_balance))
+    if balance <= 0:
+        raise ValueError("SIMULATION_BALANCE_INVALID")
+    chunk_start_balance = balance
+
+    state = EvaluationState(
+        str(continuation_value.get("evaluator_status") or "WAITING"),
+        continuation_value.get("pending_setup"),
+    )
+    active = _virtual_trade_from_payload(continuation_value.get("active_trade"))
     trades: list[dict] = []
     replay: list[dict] = []
-    ordinal = 0
+    ordinal = int(continuation_value.get("ordinal") or 0)
 
     # Fast Backtest must explain *why* a strategy produced few or zero trades.
     # Keep diagnostics independent from replay frames so FAST and REPLAY return
@@ -409,7 +472,7 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         if include_replay:
             replay.append(_replay_frame(timestamp, candle, evaluation, active, None))
 
-    if active is not None:
+    if active is not None and finalize_open_trade:
         trades.append({
             "trade_id": active.trade_id,
             "side": active.side,
@@ -428,7 +491,7 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
             "tp1_hit": active.tp1_hit,
         })
 
-    metrics = simulation_metrics(float(start_balance), trades)
+    metrics = simulation_metrics(chunk_start_balance, trades)
 
     stage_pass_counts = {
         stage: sum(
@@ -478,6 +541,16 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         "stage_pass_counts": stage_pass_counts,
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "no_setup_reasons": dict(sorted(no_setup_reasons.items())),
+        "setup_details": [
+            {
+                "setup_id": setup_id,
+                "passed_stages": sorted(item["passed_stages"]),
+                "last_state": item.get("last_state"),
+                "last_reason": item.get("last_reason"),
+                "signaled": bool(item.get("signaled")),
+            }
+            for setup_id, item in diagnostic_setups.items()
+        ],
     }
 
     output = {
@@ -485,6 +558,13 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         "trades": trades,
         "equity_curve": metrics["equity_curve"],
         "diagnostics": diagnostics,
+        "continuation": {
+            "balance": float(balance),
+            "evaluator_status": str(state.status),
+            "pending_setup": state.pending_setup,
+            "active_trade": _virtual_trade_payload(active),
+            "ordinal": int(ordinal),
+        },
     }
     if include_replay:
         output["replay"] = replay
