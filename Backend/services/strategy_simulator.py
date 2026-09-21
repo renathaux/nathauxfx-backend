@@ -121,6 +121,25 @@ def resolve_virtual_trade(trade: VirtualTrade, candle) -> dict | None:
                 return _closed_result(trade, candle, "TP2", final_r, exit_price=trade.tp2)
             return None
 
+        tp1_r = trade.r_at(float(trade.tp1))
+        tp2_r = trade.r_at(float(trade.tp2))
+        tp2_is_nearer = tp2_r <= tp1_r
+
+        # TP2 is broker-side in the real flow. If a dynamic opposite-swing TP2
+        # is closer than TP1, reaching TP2 closes the whole trade before the
+        # app-managed partial TP1 can occur. The old simulator ignored this
+        # case and could later count a false full SL.
+        if tp2_is_nearer:
+            if original_sl_hit and tp2_hit:
+                return _closed_result(trade, candle, "AMBIGUOUS_INTRABAR", 0.0, resolved=False)
+            if tp2_hit:
+                return _closed_result(
+                    trade, candle, "TP2", tp2_r, exit_price=trade.tp2
+                )
+            if original_sl_hit:
+                return _closed_result(trade, candle, "SL", -1.0, exit_price=trade.sl)
+            return None
+
         if original_sl_hit and tp1_hit:
             return _closed_result(trade, candle, "AMBIGUOUS_INTRABAR", 0.0, resolved=False)
         if original_sl_hit:
@@ -229,7 +248,7 @@ def _evaluation_reason(evaluation) -> tuple[str | None, str | None]:
 
 
 def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_override=None,
-                   include_replay=False) -> dict:
+                   include_replay=False, evaluation_start=None, evaluation_end=None) -> dict:
     value = normalize_definition(definition)
     timeline = build_market_facts(
         market_bundle,
@@ -255,8 +274,15 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
     candles_analyzed = 0
     evaluations = 0
     signals_emitted = 0
+    window_start = pd.Timestamp(evaluation_start) if evaluation_start is not None else None
+    window_end = pd.Timestamp(evaluation_end) if evaluation_end is not None else None
 
     for timestamp in timeline.timestamps():
+        stamp = pd.Timestamp(timestamp)
+        if window_start is not None and stamp < window_start:
+            continue
+        if window_end is not None and stamp >= window_end:
+            continue
         candle = timeline.candle(timestamp)
         if candle is None:
             continue
@@ -370,8 +396,22 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         reason = setup.get("last_reason") or "NO_VALID_ENTRY"
         rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
 
+    all_timestamps = timeline.timestamps()
+    history_start = (
+        pd.Timestamp(all_timestamps[0]).isoformat()
+        if all_timestamps else None
+    )
+    warmup_candles = 0
+    if window_start is not None:
+        warmup_candles = sum(
+            1 for item in all_timestamps
+            if pd.Timestamp(item) < window_start
+        )
+
     diagnostics = {
         "candles_analyzed": candles_analyzed,
+        "warmup_candles": warmup_candles,
+        "history_start": history_start,
         "evaluations": evaluations,
         "setups_detected": len(diagnostic_setups),
         "signals_emitted": signals_emitted,

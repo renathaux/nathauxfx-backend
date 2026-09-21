@@ -17,14 +17,14 @@ def bar(timestamp, open_, high, low, close):
     }
 
 
-def trade(*, tp1=None, close_fraction=0.0, protection_r=0.0):
+def trade(*, tp1=None, tp2=120.0, close_fraction=0.0, protection_r=0.0):
     return VirtualTrade(
         trade_id="trade_1",
         entry_time=pd.Timestamp("2026-09-17T10:00:00Z"),
         entry=100.0,
         sl=90.0,
         tp1=tp1,
-        tp2=120.0,
+        tp2=tp2,
         side="BUY",
         risk_dollars=100.0,
         tp1_close_fraction=close_fraction,
@@ -52,6 +52,22 @@ def test_tp1_partial_then_tp2_combines_realized_r():
     assert result["outcome"] == "TP2"
     assert result["r"] == pytest.approx(1.2)
     assert result["pnl_dollars"] == pytest.approx(120.0)
+
+
+def test_nearer_tp2_closes_full_trade_before_tp1():
+    value = trade(tp1=170.0, tp2=101.0, close_fraction=0.4, protection_r=0.2)
+    result = resolve_virtual_trade(value, bar("2026-09-17T10:05:00Z", 100, 101.2, 99.5, 101.0))
+    assert result["outcome"] == "TP2"
+    assert result["tp1_hit"] is False
+    assert result["r"] == pytest.approx(0.1)
+    assert result["pnl_dollars"] == pytest.approx(10.0)
+
+
+def test_nearer_tp2_and_sl_same_candle_is_ambiguous():
+    value = trade(tp1=170.0, tp2=101.0, close_fraction=0.4, protection_r=0.2)
+    result = resolve_virtual_trade(value, bar("2026-09-17T10:05:00Z", 100, 101.2, 89.0, 100.0))
+    assert result["outcome"] == "AMBIGUOUS_INTRABAR"
+    assert result["resolved"] is False
 
 
 def test_pre_tp1_sl_and_tp1_same_candle_is_ambiguous():
@@ -189,3 +205,52 @@ def test_diagnostics_explain_zero_trade_run(monkeypatch):
     assert result["diagnostics"]["setups_detected"] == 0
     assert result["diagnostics"]["trades_opened"] == 0
     assert result["diagnostics"]["no_setup_reasons"] == {"BOS_CHOCH_REQUIRED": 4}
+
+
+def test_warmup_candles_seed_facts_but_are_not_evaluated(monkeypatch):
+    import services.strategy_simulator as simulator
+
+    index = pd.date_range("2026-09-17T09:00:00Z", periods=6, freq="5min")
+    frame = pd.DataFrame({
+        "Open": [100] * 6,
+        "High": [101] * 6,
+        "Low": [99] * 6,
+        "Close": [100] * 6,
+        "Volume": [0] * 6,
+    }, index=index)
+    bundle = {"5m": frame, "15m": frame.iloc[:0], "1h": frame.iloc[:0], "4h": frame.iloc[:0]}
+
+    class Timeline:
+        def timestamps(self):
+            return list(index)
+        def candle(self, timestamp):
+            row = frame.loc[pd.Timestamp(timestamp)]
+            return type("Candle", (), {
+                "timestamp": pd.Timestamp(timestamp), "open": row.Open,
+                "high": row.High, "low": row.Low, "close": row.Close,
+            })()
+
+    monkeypatch.setattr(simulator, "build_market_facts", lambda *args, **kwargs: Timeline())
+
+    called = []
+    def fake_evaluate(definition, timeline, timestamp, prior_state, *, symbol, account_balance, risk_override=None):
+        called.append(pd.Timestamp(timestamp))
+        return EvaluationResult(
+            "WAIT",
+            {"structure": {"state": "WAITING", "reason": "BOS_CHOCH_REQUIRED"}},
+            None, None, None, None, None, None,
+            EvaluationState("WAITING", None),
+        )
+
+    monkeypatch.setattr(simulator, "evaluate_strategy", fake_evaluate)
+    start = pd.Timestamp("2026-09-17T09:15:00Z")
+    end = pd.Timestamp("2026-09-17T09:30:00Z")
+    result = run_simulation(
+        _definition(), bundle, "EURUSD", 10000.0,
+        evaluation_start=start, evaluation_end=end,
+    )
+
+    assert called == list(index[3:6])
+    assert result["diagnostics"]["candles_analyzed"] == 3
+    assert result["diagnostics"]["warmup_candles"] == 3
+    assert result["diagnostics"]["history_start"] == index[0].isoformat()

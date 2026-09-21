@@ -54,3 +54,27 @@ def test_static_simulator_bundle_aggregates_without_database():
     assert len(bundle["15m"]) == 4
     assert len(bundle["1h"]) == 1
     assert bundle["4h"].empty
+
+
+def test_static_simulator_bundle_keeps_pre_start_warmup_candles():
+    rows = []
+    history_start = pd.Timestamp("2026-09-01T00:00:00Z")
+    for index in range(12):
+        stamp = history_start + pd.Timedelta(minutes=5 * index)
+        rows.append({
+            "timestamp": stamp.isoformat(),
+            "open": 1.10,
+            "high": 1.11,
+            "low": 1.09,
+            "close": 1.10,
+            "volume": 0,
+        })
+
+    bundle = build_static_market_bundle(
+        rows,
+        "2026-09-01T00:30:00Z",
+        "2026-09-01T01:00:00Z",
+    )
+
+    assert bundle["5m"].index[0] == history_start
+    assert len(bundle["5m"]) == 12
