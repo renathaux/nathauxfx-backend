@@ -133,12 +133,15 @@ def test_route_uses_static_candles_and_positive_balance(monkeypatch):
         strategy_definition, bundle, symbol, balance,
         *, risk_override=None, include_replay=False,
         evaluation_start=None, evaluation_end=None,
+        continuation=None, finalize_open_trade=True,
     ):
         calls["definition"] = strategy_definition
         calls["balance"] = balance
         calls["replay"] = include_replay
         calls["evaluation_start"] = evaluation_start
         calls["evaluation_end"] = evaluation_end
+        calls["continuation"] = continuation
+        calls["finalize"] = finalize_open_trade
         return {
             "metrics": {"starting_balance": balance},
             "trades": [],
@@ -160,6 +163,8 @@ def test_route_uses_static_candles_and_positive_balance(monkeypatch):
     assert calls["replay"] is True
     assert calls["evaluation_start"] == payload().start
     assert calls["evaluation_end"] == payload().end
+    assert calls["continuation"] is None
+    assert calls["finalize"] is True
 
 
 def test_missing_static_history_is_rejected_before_simulation(monkeypatch):
@@ -201,3 +206,49 @@ def test_manual_history_database_endpoint_is_retired(monkeypatch):
         route.manual_replay_history(request, SimpleNamespace())
     assert exc.value.status_code == 410
     assert "STATIC_JSON" in str(exc.value.detail)
+
+
+def test_route_forwards_simulator_continuation(monkeypatch):
+    calls = {}
+    identity = SimpleNamespace(scope="CTRADER:DEMO:47810571")
+
+    @contextmanager
+    def fake_pinned():
+        yield identity
+
+    monkeypatch.setattr(route, "_actor", lambda request: {"email": "x@example.com"})
+    monkeypatch.setattr(route, "pinned_account", fake_pinned)
+    monkeypatch.setattr(
+        route, "get_ctrader_account_snapshot", lambda: {"balance": 1000.0}
+    )
+    monkeypatch.setattr(
+        route, "build_static_market_bundle",
+        lambda rows, start, end: {"5m": object(), "15m": object(), "1h": object(), "4h": object()},
+    )
+
+    def fake_run(*args, **kwargs):
+        calls.update(kwargs)
+        return {
+            "metrics": {"starting_balance": 990.0},
+            "trades": [],
+            "equity_curve": [],
+            "diagnostics": {},
+            "continuation": kwargs.get("continuation"),
+        }
+
+    monkeypatch.setattr(route, "run_simulation", fake_run)
+    continuation = {
+        "balance": 990.0,
+        "evaluator_status": "WAITING",
+        "pending_setup": None,
+        "active_trade": None,
+        "ordinal": 3,
+    }
+    result = route.strategy_simulation_run(
+        payload(continuation=continuation, finalize=False),
+        SimpleNamespace(),
+    )
+
+    assert result["ok"] is True
+    assert calls["continuation"] == continuation
+    assert calls["finalize_open_trade"] is False
