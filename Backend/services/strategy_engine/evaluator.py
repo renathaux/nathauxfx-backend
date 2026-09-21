@@ -170,9 +170,9 @@ def _stop_price(definition: dict, setup: dict, entry: float, direction: str, pip
 def _target_prices(definition: dict, timeline, timestamp, entry: float, sl: float, direction: str, pip_size: float):
     distance = abs(entry - sl)
     sign = 1.0 if direction == "BUY" else -1.0
-    tp1_def = definition["tp1"]
-    tp1 = entry + sign * distance * float(tp1_def["target_r"]) if tp1_def["enabled"] else None
 
+    # TP2 is resolved first because TP1 can optionally be expressed as a
+    # percentage of the Entry-to-TP2 path instead of a percentage of SL risk.
     tp2_def = definition["tp2"]
     if tp2_def["method"] == "FIXED_R":
         tp2 = entry + sign * distance * float(tp2_def["value"])
@@ -180,6 +180,16 @@ def _target_prices(definition: dict, timeline, timestamp, entry: float, sl: floa
         tp2 = entry + sign * float(tp2_def["value"]) * pip_size
     else:
         tp2 = timeline.opposite_swing(timestamp, direction, entry)
+
+    tp1_def = definition["tp1"]
+    tp1 = None
+    if tp1_def["enabled"]:
+        fraction = float(tp1_def["target_r"])
+        if tp1_def.get("target_basis") == "TP2_DISTANCE":
+            if tp2 is not None:
+                tp1 = entry + (float(tp2) - entry) * fraction
+        else:
+            tp1 = entry + sign * distance * fraction
     return tp1, tp2
 
 
