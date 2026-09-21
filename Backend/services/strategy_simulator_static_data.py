@@ -42,7 +42,10 @@ def _canonical_frame(candles, start, end) -> pd.DataFrame:
     seen = set()
     for candle in candles or []:
         timestamp = _utc(_value(candle, "timestamp"))
-        if timestamp < start_utc or timestamp >= end_utc:
+        # Keep client-supplied candles before the requested start as warm-up
+        # history. They seed BOS/CHOCH, swing structure and EMAs, but the
+        # simulator will not open/count trades before the requested start.
+        if timestamp >= end_utc:
             continue
         if timestamp in seen:
             raise ValueError("STATIC_SIMULATION_HISTORY_INVALID: duplicate candle timestamp")
@@ -81,6 +84,8 @@ def _canonical_frame(candles, start, end) -> pd.DataFrame:
 
     frame = pd.DataFrame(records, index=pd.DatetimeIndex(timestamps))
     frame = frame.sort_index()
+    if not (frame.index >= start_utc).any():
+        raise ValueError("STATIC_SIMULATION_HISTORY_UNAVAILABLE")
     return frame[["Open", "High", "Low", "Close", "Volume"]]
 
 
