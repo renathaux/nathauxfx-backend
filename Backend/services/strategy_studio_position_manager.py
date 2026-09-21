@@ -153,10 +153,15 @@ def _target_hit(side, price, target):
 def _step_for_price(levels, price):
     if price is None or levels.get("protection_mode") != "TP2_STEPS":
         return None
-    side = levels.get("side")
+    entry = _float(levels.get("entry"))
+    tp2 = _float(levels.get("tp2"))
+    if entry is None or tp2 is None or tp2 == entry:
+        return None
+
+    progress_percent = (float(price) - entry) / (tp2 - entry) * 100.0
     reached = [
         item for item in (levels.get("step_levels") or [])
-        if _target_hit(side, price, item.get("trigger"))
+        if progress_percent + 1e-9 >= float(item.get("trigger_percent") or 0.0)
     ]
     if not reached:
         return None
