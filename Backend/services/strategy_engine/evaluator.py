@@ -72,7 +72,10 @@ def _trend_passes(definition: dict, trend, direction: str) -> tuple[bool, str | 
         "SWING_STRUCTURE": trend.swing_structure_direction,
     }
     for method in methods:
-        if values.get(method) != direction:
+        current = values.get(method)
+        if current is None:
+            return False, f"TREND_{method}_UNAVAILABLE"
+        if current != direction:
             return False, f"TREND_{method}_DISAGREES"
     return True, None
 

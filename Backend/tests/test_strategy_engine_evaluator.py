@@ -95,6 +95,20 @@ def test_all_selected_trend_filters_must_agree():
     assert result.steps["trend"]["state"] == "BLOCKED"
 
 
+def test_missing_selected_trend_fact_is_reported_unavailable():
+    value = definition()
+    value["trend"] = {"timeframe": "15m", "methods": ["SWING_STRUCTURE"]}
+    timeline = FakeTimeline(
+        candles={T0: candle(T0, 1.099, 1.102, 1.098, 1.101)},
+        events={T0: event()},
+        trends={T0: TrendFacts("BUY", "BUY", "BUY", None)},
+    )
+    result = evaluate_strategy(value, timeline, T0, EvaluationState(), symbol="EURUSD", account_balance=10000)
+    assert result.signal == "WAIT"
+    assert result.steps["trend"]["state"] == "BLOCKED"
+    assert result.steps["trend"]["reason"] == "TREND_SWING_STRUCTURE_UNAVAILABLE"
+
+
 def test_bos_close_entry_builds_sl_tp_and_risk_budget():
     timeline = FakeTimeline(
         candles={T0: candle(T0, 1.099, 1.102, 1.098, 1.101)},
