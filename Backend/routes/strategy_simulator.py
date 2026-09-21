@@ -55,7 +55,7 @@ class ManualHistoryRequest(BaseModel):
     end: datetime
 
 
-MAX_STATIC_SIMULATION_CANDLES = 10000
+MAX_STATIC_SIMULATION_CANDLES = 25000
 
 
 def _snapshot_balance(snapshot) -> float | None:
@@ -157,6 +157,8 @@ def strategy_simulation_run(payload: SimulationRequest, request: Request):
                 balance,
                 risk_override=override,
                 include_replay=payload.mode == "REPLAY",
+                evaluation_start=payload.start,
+                evaluation_end=payload.end,
             )
     except HTTPException:
         raise
