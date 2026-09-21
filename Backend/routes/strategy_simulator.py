@@ -46,6 +46,8 @@ class SimulationRequest(BaseModel):
     mode: Literal["FAST", "REPLAY"] = "FAST"
     risk_override: RiskOverride | None = None
     candles_5m: list[SimulationCandle]
+    continuation: dict | None = None
+    finalize: bool = True
 
 
 class ManualHistoryRequest(BaseModel):
@@ -159,6 +161,8 @@ def strategy_simulation_run(payload: SimulationRequest, request: Request):
                 include_replay=payload.mode == "REPLAY",
                 evaluation_start=payload.start,
                 evaluation_end=payload.end,
+                continuation=payload.continuation,
+                finalize_open_trade=payload.finalize,
             )
     except HTTPException:
         raise
