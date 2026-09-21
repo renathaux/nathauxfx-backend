@@ -47,6 +47,7 @@ class ConfirmationDefinition(_StrictModel):
 
 class EntryDefinition(_StrictModel):
     method: Literal["BOS_CHOCH_CLOSE", "CONFIRMATION_CLOSE", "RETEST"]
+    remember_bos_on_confirmation_failure: bool = False
 
 
 class StopLossDefinition(_StrictModel):
@@ -172,6 +173,16 @@ def _cross_field_errors(value: StrategyDefinition) -> dict[str, str]:
         errors["entry.method"] = "Retest entry requires Retest broken level confirmation"
     elif value.entry.method == "BOS_CHOCH_CLOSE" and value.confirmation.rules:
         errors["entry.method"] = "BOS/CHOCH-close entry cannot depend on future confirmation rules"
+
+    if value.entry.remember_bos_on_confirmation_failure:
+        if value.entry.method != "CONFIRMATION_CLOSE":
+            errors["entry.remember_bos_on_confirmation_failure"] = (
+                "Remember BOS requires confirmation-close entry"
+            )
+        elif "NEXT_SAME_DIRECTION" not in value.confirmation.rules:
+            errors["entry.remember_bos_on_confirmation_failure"] = (
+                "Remember BOS requires Next candle closes same direction confirmation"
+            )
 
     if value.stop_loss.method == "LAST_SWING":
         if value.stop_loss.fixed_distance is not None:
@@ -389,7 +400,10 @@ def strategy_summary(definition: dict) -> str:
         "CONFIRMATION_CLOSE": "confirmation close",
         "RETEST": "retest entry",
     }
-    parts.append(entry_labels[value["entry"]["method"]])
+    entry_text = entry_labels[value["entry"]["method"]]
+    if value["entry"].get("remember_bos_on_confirmation_failure"):
+        entry_text += " / remember BOS on failed next candle and enter on valid re-break"
+    parts.append(entry_text)
 
     stop = value["stop_loss"]
     if stop["method"] == "LAST_SWING":
