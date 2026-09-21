@@ -17,7 +17,8 @@ def bar(timestamp, open_, high, low, close):
     }
 
 
-def trade(*, tp1=None, tp2=120.0, close_fraction=0.0, protection_r=0.0):
+def trade(*, tp1=None, tp2=120.0, close_fraction=0.0, protection_r=0.0,
+          protection_basis="SL_DISTANCE", protection_mode="FIXED", protection_steps=None):
     return VirtualTrade(
         trade_id="trade_1",
         entry_time=pd.Timestamp("2026-09-17T10:00:00Z"),
@@ -29,6 +30,9 @@ def trade(*, tp1=None, tp2=120.0, close_fraction=0.0, protection_r=0.0):
         risk_dollars=100.0,
         tp1_close_fraction=close_fraction,
         protection_r=protection_r,
+        protection_basis=protection_basis,
+        protection_mode=protection_mode,
+        protection_steps=list(protection_steps or []),
     )
 
 
@@ -68,6 +72,57 @@ def test_nearer_tp2_and_sl_same_candle_is_ambiguous():
     result = resolve_virtual_trade(value, bar("2026-09-17T10:05:00Z", 100, 101.2, 89.0, 100.0))
     assert result["outcome"] == "AMBIGUOUS_INTRABAR"
     assert result["resolved"] is False
+
+
+def test_fixed_protection_can_use_tp2_distance():
+    value = trade(
+        tp1=114.0, tp2=120.0, close_fraction=0.4,
+        protection_r=0.5, protection_basis="TP2_DISTANCE",
+    )
+    result = resolve_virtual_trade(
+        value, bar("2026-09-17T10:05:00Z", 100, 115, 99.5, 114)
+    )
+    assert result is None
+    assert value.tp1_hit is True
+    assert value.protected_sl == pytest.approx(110.0)
+
+
+def test_step_protection_follows_tp2_progress_after_tp1():
+    steps = [
+        {"trigger_percent": 70, "secure_percent": 50},
+        {"trigger_percent": 80, "secure_percent": 60},
+        {"trigger_percent": 90, "secure_percent": 70},
+    ]
+    value = trade(
+        tp1=114.0, tp2=120.0, close_fraction=0.4,
+        protection_mode="TP2_STEPS", protection_steps=steps,
+    )
+
+    first = resolve_virtual_trade(
+        value, bar("2026-09-17T10:05:00Z", 100, 115, 99.5, 114)
+    )
+    assert first is None
+    assert value.tp1_hit is True
+    assert value.protected_sl == pytest.approx(110.0)
+
+    second = resolve_virtual_trade(
+        value, bar("2026-09-17T10:10:00Z", 114, 117, 111, 116)
+    )
+    assert second is None
+    assert value.protected_sl == pytest.approx(112.0)
+
+    third = resolve_virtual_trade(
+        value, bar("2026-09-17T10:15:00Z", 116, 119, 113, 118)
+    )
+    assert third is None
+    assert value.protected_sl == pytest.approx(114.0)
+
+    closed = resolve_virtual_trade(
+        value, bar("2026-09-17T10:20:00Z", 118, 118.5, 113.5, 114)
+    )
+    assert closed["outcome"] == "PROTECTED_SL"
+    assert closed["exit_price"] == pytest.approx(114.0)
+    assert closed["r"] == pytest.approx(1.4)
 
 
 def test_pre_tp1_sl_and_tp1_same_candle_is_ambiguous():
