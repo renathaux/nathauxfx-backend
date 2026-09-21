@@ -16,6 +16,12 @@ from services.strategy_engine.types import EvaluationState
 from services.strategy_studio_schema import normalize_definition
 
 
+DIAGNOSTIC_STAGE_ORDER = [
+    "trend", "structure", "break_validation", "confirmation", "entry",
+    "stop_loss", "tp1", "tp2", "risk",
+]
+
+
 @dataclass
 class VirtualTrade:
     trade_id: str
@@ -211,6 +217,17 @@ def _replay_frame(timestamp, candle, evaluation, open_trade: VirtualTrade | None
     return payload
 
 
+def _evaluation_reason(evaluation) -> tuple[str | None, str | None]:
+    """Return the first blocking/waiting evaluator reason for diagnostics."""
+    for stage in DIAGNOSTIC_STAGE_ORDER:
+        detail = (evaluation.steps or {}).get(stage) or {}
+        state = detail.get("state")
+        reason = detail.get("reason")
+        if state in {"BLOCKED", "WAITING"} and reason:
+            return str(state), str(reason)
+    return None, None
+
+
 def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_override=None,
                    include_replay=False) -> dict:
     value = normalize_definition(definition)
@@ -230,10 +247,20 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
     replay: list[dict] = []
     ordinal = 0
 
+    # Fast Backtest must explain *why* a strategy produced few or zero trades.
+    # Keep diagnostics independent from replay frames so FAST and REPLAY return
+    # the same funnel/rejection summary without storing every candle decision.
+    diagnostic_setups: dict[str, dict] = {}
+    no_setup_reasons: dict[str, int] = {}
+    candles_analyzed = 0
+    evaluations = 0
+    signals_emitted = 0
+
     for timestamp in timeline.timestamps():
         candle = timeline.candle(timestamp)
         if candle is None:
             continue
+        candles_analyzed += 1
 
         if active is not None:
             closed = resolve_virtual_trade(active, candle)
@@ -256,8 +283,34 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
             account_balance=balance,
             risk_override=risk_override,
         )
+        evaluations += 1
         state = evaluation.next_state
+
+        reason_state, reason = _evaluation_reason(evaluation)
+        if evaluation.setup_id:
+            setup_diag = diagnostic_setups.setdefault(
+                str(evaluation.setup_id),
+                {
+                    "passed_stages": set(),
+                    "last_state": None,
+                    "last_reason": None,
+                    "signaled": False,
+                },
+            )
+            for stage in DIAGNOSTIC_STAGE_ORDER:
+                detail = (evaluation.steps or {}).get(stage) or {}
+                if detail.get("state") == "PASSED":
+                    setup_diag["passed_stages"].add(stage)
+            if reason:
+                setup_diag["last_state"] = reason_state
+                setup_diag["last_reason"] = reason
+        elif reason:
+            no_setup_reasons[reason] = no_setup_reasons.get(reason, 0) + 1
+
         if evaluation.signal in {"BUY", "SELL"}:
+            signals_emitted += 1
+            if evaluation.setup_id:
+                diagnostic_setups[str(evaluation.setup_id)]["signaled"] = True
             ordinal += 1
             tp1 = value["tp1"]
             active = VirtualTrade(
@@ -295,10 +348,48 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         })
 
     metrics = simulation_metrics(float(start_balance), trades)
+
+    stage_pass_counts = {
+        stage: sum(
+            1 for setup in diagnostic_setups.values()
+            if stage in setup["passed_stages"]
+        )
+        for stage in DIAGNOSTIC_STAGE_ORDER
+    }
+    rejection_reasons: dict[str, int] = {}
+    blocked_setups = 0
+    waiting_setups = 0
+    for setup in diagnostic_setups.values():
+        if setup["signaled"]:
+            continue
+        final_state = setup.get("last_state")
+        if final_state == "BLOCKED":
+            blocked_setups += 1
+        elif final_state == "WAITING":
+            waiting_setups += 1
+        reason = setup.get("last_reason") or "NO_VALID_ENTRY"
+        rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+
+    diagnostics = {
+        "candles_analyzed": candles_analyzed,
+        "evaluations": evaluations,
+        "setups_detected": len(diagnostic_setups),
+        "signals_emitted": signals_emitted,
+        "trades_opened": signals_emitted,
+        "resolved_trades": metrics["total_resolved_trades"],
+        "open_trades_at_end": sum(1 for item in trades if item.get("outcome") == "OPEN_AT_END"),
+        "blocked_setups": blocked_setups,
+        "waiting_setups": waiting_setups,
+        "stage_pass_counts": stage_pass_counts,
+        "rejection_reasons": dict(sorted(rejection_reasons.items())),
+        "no_setup_reasons": dict(sorted(no_setup_reasons.items())),
+    }
+
     output = {
         "metrics": {key: value for key, value in metrics.items() if key != "equity_curve"},
         "trades": trades,
         "equity_curve": metrics["equity_curve"],
+        "diagnostics": diagnostics,
     }
     if include_replay:
         output["replay"] = replay
