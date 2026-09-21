@@ -55,11 +55,19 @@ class StopLossDefinition(_StrictModel):
     fixed_distance: float | None = None
 
 
+class TP1ProtectionStep(_StrictModel):
+    trigger_percent: float
+    secure_percent: float
+
+
 class TP1Definition(_StrictModel):
     enabled: bool
     target_r: float | None = None
+    target_basis: Literal["SL_DISTANCE", "TP2_DISTANCE"] = "SL_DISTANCE"
     close_percent: float | None = None
     protection_r: float | None = None
+    protection_mode: Literal["FIXED", "TP2_STEPS"] = "FIXED"
+    protection_steps: list[TP1ProtectionStep] = Field(default_factory=list)
 
 
 class TP2Definition(_StrictModel):
@@ -185,10 +193,46 @@ def _cross_field_errors(value: StrategyDefinition) -> dict[str, str]:
     if value.tp1.enabled:
         if not _valid_positive(value.tp1.target_r):
             errors["tp1.target_r"] = "TP1 target must be greater than 0"
+        elif value.tp1.target_basis == "TP2_DISTANCE" and float(value.tp1.target_r) > 1:
+            errors["tp1.target_r"] = "TP1 based on TP2 must be between 0% and 100% of the Entry-to-TP2 distance"
         if not _valid_percent(value.tp1.close_percent):
             errors["tp1.close_percent"] = "TP1 close percent must be greater than 0 and no more than 100"
-        if not _is_finite_number(value.tp1.protection_r):
-            errors["tp1.protection_r"] = "TP1 protection is required"
+
+        if value.tp1.protection_mode == "FIXED":
+            if not _is_finite_number(value.tp1.protection_r):
+                errors["tp1.protection_r"] = "TP1 protection is required"
+            elif value.tp1.target_basis == "TP2_DISTANCE" and not (0 <= float(value.tp1.protection_r) <= 1):
+                errors["tp1.protection_r"] = "TP2-based protection must be between 0% and 100%"
+        else:
+            if value.tp1.target_basis != "TP2_DISTANCE":
+                errors["tp1.protection_mode"] = "Step protection requires TP1 to be based on the Entry-to-TP2 distance"
+            steps = list(value.tp1.protection_steps or [])
+            if not steps:
+                errors["tp1.protection_steps"] = "Add at least one TP2 progress protection step"
+            else:
+                previous_trigger = -1.0
+                previous_secure = -1.0
+                for index, step in enumerate(steps):
+                    trigger = float(step.trigger_percent)
+                    secure = float(step.secure_percent)
+                    path = f"tp1.protection_steps.{index}"
+                    if not _valid_percent(trigger):
+                        errors[path] = "Trigger must be greater than 0% and no more than 100%"
+                        continue
+                    if not _is_finite_number(secure) or secure < 0 or secure > 100:
+                        errors[path] = "Secure level must be between 0% and 100%"
+                        continue
+                    if secure >= trigger:
+                        errors[path] = "Secure level must stay below its trigger level"
+                        continue
+                    if trigger <= previous_trigger:
+                        errors[path] = "Protection triggers must increase"
+                        continue
+                    if secure < previous_secure:
+                        errors[path] = "Secure levels must not move backward"
+                        continue
+                    previous_trigger = trigger
+                    previous_secure = secure
 
     if not _valid_positive(value.risk.value):
         errors["risk.value"] = "Risk value must be a finite number greater than 0"
@@ -199,13 +243,29 @@ def _cross_field_errors(value: StrategyDefinition) -> dict[str, str]:
 def _normalize_tp1(payload: dict) -> dict:
     normalized = dict(payload or {})
     tp1 = normalized.get("tp1")
-    if isinstance(tp1, dict) and tp1.get("enabled") is False:
-        normalized["tp1"] = {
-            **tp1,
+    if not isinstance(tp1, dict):
+        return normalized
+
+    value = dict(tp1)
+    value.setdefault("target_basis", "SL_DISTANCE")
+    value.setdefault("protection_mode", "FIXED")
+    value.setdefault("protection_steps", [])
+
+    if value.get("enabled") is False:
+        value.update({
             "target_r": None,
             "close_percent": None,
             "protection_r": None,
-        }
+            "target_basis": "SL_DISTANCE",
+            "protection_mode": "FIXED",
+            "protection_steps": [],
+        })
+    elif value.get("protection_mode") == "TP2_STEPS":
+        value["protection_r"] = None
+    else:
+        value["protection_steps"] = []
+
+    normalized["tp1"] = value
     return normalized
 
 
@@ -342,9 +402,25 @@ def strategy_summary(definition: dict) -> str:
 
     tp1 = value["tp1"]
     if tp1["enabled"]:
-        protect = "breakeven" if float(tp1["protection_r"]) == 0 else f"+{_fmt(tp1['protection_r'])}R"
+        target_percent = float(tp1["target_r"]) * 100.0
+        target_basis = "TP2 distance" if tp1["target_basis"] == "TP2_DISTANCE" else "SL distance"
+        if tp1["protection_mode"] == "TP2_STEPS":
+            step_text = ", ".join(
+                f"{_fmt(step['trigger_percent'])}%→secure {_fmt(step['secure_percent'])}%"
+                for step in tp1["protection_steps"]
+            )
+            protect = f"step protect {step_text}"
+        else:
+            protection_percent = float(tp1["protection_r"]) * 100.0
+            protect_basis = "TP2" if tp1["target_basis"] == "TP2_DISTANCE" else "SL"
+            protect = (
+                "breakeven"
+                if protection_percent == 0
+                else f"secure {_fmt(protection_percent)}% of {protect_basis} distance"
+            )
         parts.append(
-            f"TP1 {_fmt(tp1['target_r'])}R / close {_fmt(tp1['close_percent'])}% / protect {protect}"
+            f"TP1 {_fmt(target_percent)}% of {target_basis} / "
+            f"close {_fmt(tp1['close_percent'])}% / {protect}"
         )
 
     tp2 = value["tp2"]
