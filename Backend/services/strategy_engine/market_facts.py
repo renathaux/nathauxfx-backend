@@ -5,7 +5,7 @@ from bisect import bisect_right
 
 import pandas as pd
 
-from indicators.smc import analyze_structure
+from indicators.smc import analyze_structure, detect_confirmed_swings
 from services.strategy_engine.types import CandleFacts, StructureEventFacts, TrendFacts
 
 
@@ -43,6 +43,28 @@ def _ema_direction(close: float, ema: float) -> str | None:
     if close < ema:
         return "SELL"
     return None
+
+
+def _serialise_confirmed_swings(frame: pd.DataFrame) -> list[dict]:
+    """Build non-repainting swing facts independently from the active BOS engine.
+
+    The current exported SMC authority intentionally uses the legacy TradingView
+    structure engine for BOS/CHOCH parity. That engine returns no `swings`
+    collection, so Strategy Studio must not rely on analyze_structure(...)["swings"]
+    for SWING_STRUCTURE trend filters or OPPOSITE_SWING targets.
+    """
+    swings = detect_confirmed_swings(frame)
+    return [
+        {
+            "type": swing.swing_type,
+            "timestamp": swing.timestamp,
+            "confirmed_timestamp": swing.confirmed_timestamp,
+            "price": float(swing.price),
+            "index": int(swing.index),
+            "confirmed_index": int(swing.confirmed_index),
+        }
+        for swing in swings
+    ]
 
 
 def _swing_structure(swings: list[dict], timestamp: pd.Timestamp) -> str | None:
@@ -124,6 +146,7 @@ def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_tim
 
     point_size = POINT_SIZE.get(public_symbol)
     trading_analysis = analyze_structure(trading, timeframe=trading_tf, point_size=point_size)
+    trading_swings = _serialise_confirmed_swings(trading)
 
     candles: dict[pd.Timestamp, CandleFacts] = {}
     for timestamp, row in trading.iterrows():
@@ -157,7 +180,7 @@ def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_tim
         [(_utc(item["timestamp"]), _direction(item.get("direction"))) for item in trend_analysis.get("events") or []],
         key=lambda pair: pair[0],
     )
-    trend_swings = trend_analysis.get("swings") or []
+    trend_swings = _serialise_confirmed_swings(trend_frame)
     ema50 = trend_frame.Close.astype(float).ewm(span=50, adjust=False).mean()
     ema200 = trend_frame.Close.astype(float).ewm(span=200, adjust=False).mean()
 
@@ -192,5 +215,5 @@ def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_tim
         events=events,
         trends=trends,
         timestamps=trading.index,
-        trading_swings=trading_analysis.get("swings") or [],
+        trading_swings=trading_swings,
     )
