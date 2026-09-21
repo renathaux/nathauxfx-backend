@@ -12,6 +12,8 @@ from services.strategy_engine.types import (
 
 T0 = pd.Timestamp("2026-09-17T10:00:00Z")
 T1 = pd.Timestamp("2026-09-17T10:05:00Z")
+T2 = pd.Timestamp("2026-09-17T10:10:00Z")
+T3 = pd.Timestamp("2026-09-17T10:15:00Z")
 
 
 class FakeTimeline:
@@ -201,3 +203,134 @@ def test_failed_immediate_confirmation_blocks_that_setup():
     assert second.signal == "WAIT"
     assert second.steps["confirmation"]["state"] == "BLOCKED"
     assert second.next_state.pending_setup is None
+
+
+def test_remember_bos_waits_for_later_rebreak_after_failed_next_candle():
+    value = definition()
+    value["confirmation"]["rules"] = ["NEXT_SAME_DIRECTION", "SECOND_CLOSE_BEYOND"]
+    value["entry"] = {
+        "method": "CONFIRMATION_CLOSE",
+        "remember_bos_on_confirmation_failure": True,
+    }
+    timeline = FakeTimeline(
+        candles={
+            T0: candle(T0, 1.0990, 1.1020, 1.0980, 1.1010),
+            # Immediate next candle fails BUY direction and closes back below the
+            # remembered 1.1000 BOS level, which re-arms the zone.
+            T1: candle(T1, 1.1010, 1.1015, 1.0970, 1.0980),
+            T2: candle(T2, 1.0980, 1.1000, 1.0975, 1.0990),
+            # Later candle breaks the remembered BOS level again and closes BUY.
+            T3: candle(T3, 1.0990, 1.1030, 1.0985, 1.1020),
+        },
+        events={T0: event()},
+    )
+
+    first = evaluate_strategy(
+        value, timeline, T0, EvaluationState(),
+        symbol="EURUSD", account_balance=10000,
+    )
+    failed = evaluate_strategy(
+        value, timeline, T1, first.next_state,
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert failed.signal == "WAIT"
+    assert failed.steps["confirmation"]["state"] == "WAITING"
+    assert failed.steps["confirmation"]["reason"] == "REMEMBER_BOS_WAITING_REBREAK"
+    assert failed.next_state.pending_setup["remember_bos"] is True
+    assert failed.next_state.pending_setup["remember_rearmed"] is True
+
+    waiting = evaluate_strategy(
+        value, timeline, T2, failed.next_state,
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert waiting.signal == "WAIT"
+    assert waiting.next_state.pending_setup["broken_level"] == pytest.approx(1.1000)
+
+    rebreak = evaluate_strategy(
+        value, timeline, T3, waiting.next_state,
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert rebreak.signal == "BUY"
+    assert rebreak.entry == pytest.approx(1.1020)
+    assert rebreak.steps["confirmation"]["state"] == "PASSED"
+    assert rebreak.steps["confirmation"]["reason"] == "REMEMBER_BOS_REBREAK_PASSED"
+    assert rebreak.next_state.pending_setup is None
+
+
+def test_remember_bos_requires_zone_reset_before_rebreak():
+    value = definition()
+    value["confirmation"]["rules"] = ["NEXT_SAME_DIRECTION"]
+    value["entry"] = {
+        "method": "CONFIRMATION_CLOSE",
+        "remember_bos_on_confirmation_failure": True,
+    }
+    timeline = FakeTimeline(
+        candles={
+            T0: candle(T0, 1.0990, 1.1020, 1.0980, 1.1010),
+            # Red candle fails same-direction, but still closes above BOS level.
+            T1: candle(T1, 1.1020, 1.1025, 1.1002, 1.1005),
+            # Still above: cannot count as a fresh re-break.
+            T2: candle(T2, 1.1004, 1.1020, 1.1001, 1.1015),
+            # Reset through the remembered zone.
+            T3: candle(T3, 1.1010, 1.1012, 1.0980, 1.0990),
+        },
+        events={T0: event()},
+    )
+
+    first = evaluate_strategy(
+        value, timeline, T0, EvaluationState(),
+        symbol="EURUSD", account_balance=10000,
+    )
+    failed = evaluate_strategy(
+        value, timeline, T1, first.next_state,
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert failed.next_state.pending_setup["remember_rearmed"] is False
+
+    still_above = evaluate_strategy(
+        value, timeline, T2, failed.next_state,
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert still_above.signal == "WAIT"
+    assert still_above.steps["confirmation"]["reason"] == "REMEMBER_BOS_WAITING_ZONE_RESET"
+
+    reset = evaluate_strategy(
+        value, timeline, T3, still_above.next_state,
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert reset.signal == "WAIT"
+    assert reset.steps["confirmation"]["reason"] == "REMEMBER_BOS_REARMED"
+    assert reset.next_state.pending_setup["remember_rearmed"] is True
+
+
+def test_same_direction_structure_does_not_replace_remembered_bos_zone():
+    value = definition()
+    value["confirmation"]["rules"] = ["NEXT_SAME_DIRECTION"]
+    value["entry"] = {
+        "method": "CONFIRMATION_CLOSE",
+        "remember_bos_on_confirmation_failure": True,
+    }
+    timeline = FakeTimeline(
+        candles={
+            T0: candle(T0, 1.0990, 1.1020, 1.0980, 1.1010),
+            T1: candle(T1, 1.1010, 1.1015, 1.0970, 1.0980),
+            T2: candle(T2, 1.0980, 1.0998, 1.0975, 1.0990),
+        },
+        events={
+            T0: event(),
+            T2: event(timestamp=T2, direction="BUY", broken=1.1050, invalidation=1.0960, trigger_close=1.1060),
+        },
+    )
+    first = evaluate_strategy(
+        value, timeline, T0, EvaluationState(),
+        symbol="EURUSD", account_balance=10000,
+    )
+    failed = evaluate_strategy(
+        value, timeline, T1, first.next_state,
+        symbol="EURUSD", account_balance=10000,
+    )
+    remembered = evaluate_strategy(
+        value, timeline, T2, failed.next_state,
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert remembered.next_state.pending_setup["broken_level"] == pytest.approx(1.1000)

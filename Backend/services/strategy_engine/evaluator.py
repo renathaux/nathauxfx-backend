@@ -140,6 +140,59 @@ def _confirmation(definition: dict, timeline, timestamp, candle, setup: dict) ->
     return "PASSED", None
 
 
+def _remember_bos_enabled(definition: dict) -> bool:
+    entry = definition.get("entry") or {}
+    return bool(entry.get("remember_bos_on_confirmation_failure"))
+
+
+def _arm_remembered_bos(setup: dict, candle, timestamp) -> dict:
+    remembered = copy.deepcopy(setup)
+    remembered["remember_bos"] = True
+    remembered["remember_failed_timestamp"] = pd.Timestamp(timestamp).isoformat()
+    # A genuine re-break requires price to return to the non-broken side first.
+    # If the failed confirmation already closed back through the level, the
+    # remembered zone is immediately re-armed.
+    remembered["remember_rearmed"] = not _beyond(
+        candle.close,
+        remembered["broken_level"],
+        remembered["direction"],
+    )
+    return remembered
+
+
+def _remembered_bos_confirmation(definition: dict, candle, setup: dict) -> tuple[str, str | None]:
+    direction = setup["direction"]
+    broken_level = setup["broken_level"]
+
+    if not setup.get("remember_rearmed"):
+        if not _beyond(candle.close, broken_level, direction):
+            setup["remember_rearmed"] = True
+            return "WAITING", "REMEMBER_BOS_REARMED"
+        return "WAITING", "REMEMBER_BOS_WAITING_ZONE_RESET"
+
+    if not _beyond(candle.close, broken_level, direction):
+        return "WAITING", "REMEMBER_BOS_WAITING_REBREAK"
+
+    # Once the remembered level is broken again, the candle must still satisfy
+    # the selected confirmation quality rules. Immediate-next timing is ignored
+    # because this mode explicitly waits for a later re-break.
+    for rule in definition["confirmation"]["rules"]:
+        if rule == "NEXT_SAME_DIRECTION" and not _same_direction(candle, direction):
+            return "WAITING", "REMEMBER_BOS_REBREAK_WRONG_DIRECTION"
+        if rule == "SECOND_CLOSE_BEYOND":
+            # Already guaranteed by the re-break test above.
+            continue
+        if rule == "RETEST_LEVEL":
+            touched = candle.low <= broken_level <= candle.high
+            if not touched:
+                return "WAITING", "REMEMBER_BOS_REBREAK_RETEST_PENDING"
+        if rule == "MIN_BODY_PERCENT" and candle.body_percent < float(
+            definition["confirmation"]["minimum_body_percent"]
+        ):
+            return "WAITING", "REMEMBER_BOS_REBREAK_BODY_TOO_SMALL"
+    return "PASSED", "REMEMBER_BOS_REBREAK_PASSED"
+
+
 def _entry_price(definition: dict, candle, setup: dict) -> float | None:
     method = definition["entry"]["method"]
     if method == "BOS_CHOCH_CLOSE":
@@ -221,12 +274,17 @@ def evaluate_strategy(definition: dict, timeline, timestamp, prior_state: Evalua
     pending = copy.deepcopy(prior_state.pending_setup) if prior_state and prior_state.pending_setup else None
     event = timeline.structure_event(stamp)
 
-    if pending and event is not None and event.direction != pending.get("direction"):
-        pending = None
-
-    new_event = event is not None
+    remembering = bool(pending and pending.get("remember_bos"))
+    # While remembering a failed BOS confirmation, same-direction structure
+    # events must not replace the original zone. An opposite BOS/CHOCH does
+    # replace it and starts a fresh setup.
+    new_event = event is not None and not (
+        remembering
+        and event.direction == pending.get("direction")
+    )
     if new_event:
         pending = _new_setup(event)
+        remembering = False
 
     if pending is None:
         steps["trend"] = _step("NOT_APPLICABLE")
@@ -252,15 +310,46 @@ def evaluate_strategy(definition: dict, timeline, timestamp, prior_state: Evalua
         steps["structure"] = _step("PASSED", direction=direction)
         steps["break_validation"] = _step("PASSED") if value["structure"]["break_validation"] else _step("NOT_APPLICABLE")
 
-    confirmation_state, confirmation_reason = _confirmation(value, timeline, stamp, candle, pending)
+    if pending.get("remember_bos"):
+        confirmation_state, confirmation_reason = _remembered_bos_confirmation(
+            value, candle, pending
+        )
+    else:
+        confirmation_state, confirmation_reason = _confirmation(
+            value, timeline, stamp, candle, pending
+        )
+
     if not value["confirmation"]["rules"]:
         steps["confirmation"] = _step("NOT_APPLICABLE")
     else:
         steps["confirmation"] = _step(confirmation_state, confirmation_reason)
+
     if confirmation_state == "WAITING":
-        return _result(steps, setup_id=setup_id, state=EvaluationState("WAITING", pending))
+        return _result(
+            steps,
+            setup_id=setup_id,
+            state=EvaluationState("WAITING", pending),
+        )
     if confirmation_state == "BLOCKED":
-        return _result(steps, setup_id=setup_id, state=EvaluationState("BLOCKED", None))
+        if (
+            _remember_bos_enabled(value)
+            and confirmation_reason == "NEXT_CANDLE_WRONG_DIRECTION"
+        ):
+            remembered = _arm_remembered_bos(pending, candle, stamp)
+            steps["confirmation"] = _step(
+                "WAITING",
+                "REMEMBER_BOS_WAITING_REBREAK",
+            )
+            return _result(
+                steps,
+                setup_id=setup_id,
+                state=EvaluationState("WAITING", remembered),
+            )
+        return _result(
+            steps,
+            setup_id=setup_id,
+            state=EvaluationState("BLOCKED", None),
+        )
 
     entry = _entry_price(value, candle, pending)
     if entry is None:
