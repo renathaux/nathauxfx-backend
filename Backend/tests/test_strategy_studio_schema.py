@@ -175,3 +175,42 @@ def test_step_protection_requires_increasing_safe_steps():
     }
     errors = validation_errors(payload)
     assert "tp1.protection_steps.1" in errors
+
+
+def test_remember_bos_entry_option_is_valid_and_readable():
+    payload = valid_definition()
+    payload["entry"] = {
+        "method": "CONFIRMATION_CLOSE",
+        "remember_bos_on_confirmation_failure": True,
+    }
+    assert validation_errors(payload) == {}
+    normalized = normalize_definition(payload)
+    assert normalized["entry"]["remember_bos_on_confirmation_failure"] is True
+    assert "remember BOS on failed next candle" in strategy_summary(normalized)
+
+
+def test_remember_bos_requires_next_same_direction_confirmation():
+    payload = valid_definition()
+    payload["confirmation"]["rules"] = ["SECOND_CLOSE_BEYOND"]
+    payload["entry"] = {
+        "method": "CONFIRMATION_CLOSE",
+        "remember_bos_on_confirmation_failure": True,
+    }
+    errors = validation_errors(payload)
+    assert "entry.remember_bos_on_confirmation_failure" in errors
+
+
+def test_remember_bos_requires_confirmation_close_entry():
+    payload = valid_definition()
+    payload["confirmation"] = {"rules": [], "minimum_body_percent": None}
+    payload["entry"] = {
+        "method": "BOS_CHOCH_CLOSE",
+        "remember_bos_on_confirmation_failure": True,
+    }
+    errors = validation_errors(payload)
+    assert "entry.remember_bos_on_confirmation_failure" in errors
+
+
+def test_legacy_entry_defaults_remember_bos_off():
+    normalized = normalize_definition(valid_definition())
+    assert normalized["entry"]["remember_bos_on_confirmation_failure"] is False
