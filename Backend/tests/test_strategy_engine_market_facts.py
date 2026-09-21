@@ -129,3 +129,53 @@ def test_market_facts_exposes_bos_or_choch_and_trend_values():
     for event in events:
         assert event.direction in {"BUY", "SELL"}
         assert event.event_type in {"BOS", "CHOCH"}
+
+
+def test_market_facts_builds_swings_independently_from_legacy_bos_engine(monkeypatch):
+    import services.strategy_engine.market_facts as market_facts
+
+    frame = _frame([
+        (1.05, 1.10, 1.00, 1.06),
+        (1.06, 1.12, 1.02, 1.08),
+        (1.08, 1.20, 1.05, 1.15),
+        (1.15, 1.18, 1.08, 1.12),
+    ])
+    stamps = list(frame.index)
+
+    # The production BOS/CHOCH authority is the legacy TradingView-parity
+    # engine, whose analysis payload intentionally has no swings.
+    monkeypatch.setattr(
+        market_facts,
+        "analyze_structure",
+        lambda *args, **kwargs: {"events": [], "swings": []},
+    )
+
+    def swing(kind, index, confirmed_index, price):
+        return type("Swing", (), {
+            "swing_type": kind,
+            "index": index,
+            "confirmed_index": confirmed_index,
+            "timestamp": stamps[index].isoformat(),
+            "confirmed_timestamp": stamps[confirmed_index].isoformat(),
+            "price": price,
+        })()
+
+    confirmed = [
+        swing("HIGH", 0, 0, 1.10),
+        swing("LOW", 0, 0, 1.00),
+        swing("HIGH", 2, 2, 1.20),
+        swing("LOW", 2, 2, 1.05),
+    ]
+    monkeypatch.setattr(
+        market_facts,
+        "detect_confirmed_swings",
+        lambda *args, **kwargs: confirmed,
+    )
+
+    bundle = {"5m": frame, "15m": frame, "1h": frame, "4h": frame}
+    timeline = market_facts.build_market_facts(bundle, "EURUSD", "5m", "15m")
+    last = frame.index[-1]
+
+    assert timeline.trend(last).swing_structure_direction == "BUY"
+    assert timeline.opposite_swing(last, "BUY", 1.08) == pytest.approx(1.10)
+    assert timeline.opposite_swing(last, "SELL", 1.08) == pytest.approx(1.05)
