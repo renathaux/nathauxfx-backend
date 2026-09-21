@@ -309,3 +309,104 @@ def test_warmup_candles_seed_facts_but_are_not_evaluated(monkeypatch):
     assert result["diagnostics"]["candles_analyzed"] == 3
     assert result["diagnostics"]["warmup_candles"] == 3
     assert result["diagnostics"]["history_start"] == index[0].isoformat()
+
+
+def test_simulation_continuation_carries_open_trade_across_chunks(monkeypatch):
+    import services.strategy_simulator as simulator
+
+    def frame(start, highs, lows, closes):
+        index = pd.date_range(start, periods=len(highs), freq="5min")
+        data = pd.DataFrame({
+            "Open": [100.0] * len(highs),
+            "High": highs,
+            "Low": lows,
+            "Close": closes,
+            "Volume": [0.0] * len(highs),
+        }, index=index)
+        return data
+
+    first_frame = frame(
+        "2026-09-17T10:00:00Z",
+        [101.0, 105.0],
+        [99.0, 95.0],
+        [100.0, 102.0],
+    )
+    second_frame = frame(
+        "2026-09-17T10:10:00Z",
+        [121.0, 121.0],
+        [99.0, 99.0],
+        [119.0, 119.0],
+    )
+
+    class Timeline:
+        def __init__(self, data):
+            self.data = data
+        def timestamps(self):
+            return list(self.data.index)
+        def candle(self, timestamp):
+            row = self.data.loc[pd.Timestamp(timestamp)]
+            return type("Candle", (), {
+                "timestamp": pd.Timestamp(timestamp),
+                "open": row.Open, "high": row.High,
+                "low": row.Low, "close": row.Close,
+            })()
+
+    monkeypatch.setattr(
+        simulator,
+        "build_market_facts",
+        lambda market_bundle, *args, **kwargs: Timeline(market_bundle["5m"]),
+    )
+
+    def fake_evaluate(definition, timeline, timestamp, prior_state, *, symbol, account_balance, risk_override=None):
+        if pd.Timestamp(timestamp) == first_frame.index[0]:
+            return EvaluationResult(
+                signal="BUY", steps={}, setup_id="setup_chunked",
+                entry=100.0, sl=90.0, tp1=None, tp2=120.0,
+                risk_budget={
+                    "method": "PERCENT_BALANCE",
+                    "value": 1.0,
+                    "dollars": account_balance * 0.01,
+                },
+                next_state=EvaluationState("READY", None),
+            )
+        return EvaluationResult(
+            "WAIT", {}, None, None, None, None, None, None,
+            EvaluationState("WAITING", None),
+        )
+
+    monkeypatch.setattr(simulator, "evaluate_strategy", fake_evaluate)
+
+    first_bundle = {
+        "5m": first_frame,
+        "15m": first_frame.iloc[:0],
+        "1h": first_frame.iloc[:0],
+        "4h": first_frame.iloc[:0],
+    }
+    first = run_simulation(
+        _definition(), first_bundle, "EURUSD", 10000.0,
+        finalize_open_trade=False,
+    )
+
+    assert first["trades"] == []
+    assert first["continuation"]["balance"] == pytest.approx(10000.0)
+    assert first["continuation"]["active_trade"]["trade_id"].startswith("sim_")
+    assert first["continuation"]["ordinal"] == 1
+
+    second_bundle = {
+        "5m": second_frame,
+        "15m": second_frame.iloc[:0],
+        "1h": second_frame.iloc[:0],
+        "4h": second_frame.iloc[:0],
+    }
+    second = run_simulation(
+        _definition(), second_bundle, "EURUSD", 10000.0,
+        continuation=first["continuation"],
+        finalize_open_trade=True,
+    )
+
+    assert len(second["trades"]) == 1
+    assert second["trades"][0]["outcome"] == "TP2"
+    assert second["trades"][0]["pnl_dollars"] == pytest.approx(200.0)
+    assert second["continuation"]["balance"] == pytest.approx(10200.0)
+    assert second["continuation"]["active_trade"] is None
+    assert second["continuation"]["ordinal"] == 1
