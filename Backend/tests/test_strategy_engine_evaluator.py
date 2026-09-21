@@ -127,6 +127,29 @@ def test_bos_close_entry_builds_sl_tp_and_risk_budget():
     ]
 
 
+def test_tp1_can_be_percentage_of_entry_to_tp2_distance():
+    value = definition()
+    value["tp1"] = {
+        "enabled": True,
+        "target_r": 0.70,
+        "target_basis": "TP2_DISTANCE",
+        "close_percent": 40,
+        "protection_r": 0.50,
+        "protection_mode": "FIXED",
+        "protection_steps": [],
+    }
+    value["tp2"] = {"method": "FIXED_R", "value": 2.0}
+    timeline = FakeTimeline(
+        candles={T0: candle(T0, 1.099, 1.102, 1.098, 1.101)},
+        events={T0: event()},
+    )
+    result = evaluate_strategy(value, timeline, T0, EvaluationState(), symbol="EURUSD", account_balance=10000)
+    # Risk distance is 60 pips: TP2 is 120 pips above entry, so 70% of
+    # Entry->TP2 is 84 pips above entry.
+    assert result.tp2 == pytest.approx(1.1130)
+    assert result.tp1 == pytest.approx(1.1094)
+
+
 def test_break_validation_uses_and_logic():
     value = definition()
     value["structure"]["break_validation"] = ["CLOSE_BEYOND", "MIN_BODY_PERCENT", "MIN_DISTANCE"]

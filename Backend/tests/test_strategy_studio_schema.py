@@ -63,7 +63,15 @@ def test_disabled_tp1_normalizes_values_to_none():
     payload = valid_definition()
     payload["tp1"] = {"enabled": False, "target_r": 1.0, "close_percent": 80, "protection_r": 0.4}
     result = normalize_definition(payload)
-    assert result["tp1"] == {"enabled": False, "target_r": None, "close_percent": None, "protection_r": None}
+    assert result["tp1"] == {
+        "enabled": False,
+        "target_r": None,
+        "target_basis": "SL_DISTANCE",
+        "close_percent": None,
+        "protection_r": None,
+        "protection_mode": "FIXED",
+        "protection_steps": [],
+    }
 
 
 def test_min_distance_requires_positive_value():
@@ -93,7 +101,7 @@ def test_summary_is_deterministic_and_readable():
     assert text == (
         "5m BOS/CHOCH -> close beyond level + body >= 50% -> "
         "next candle same direction + second close beyond level -> confirmation close -> "
-        "5m swing SL + 5 pip buffer -> TP1 0.75R / close 80% / protect +0.2R -> "
+        "5m swing SL + 5 pip buffer -> TP1 75% of SL distance / close 80% / secure 20% of SL distance -> "
         "TP2 2R -> risk 1% balance -> LIVE fundamentals block opposite bias"
     )
 
@@ -111,3 +119,59 @@ def test_require_alignment_is_valid_and_appears_in_summary():
     result = normalize_definition(payload)
     assert result["fundamentals"]["mode"] == "REQUIRE_ALIGNMENT"
     assert "LIVE fundamentals require alignment" in strategy_summary(result)
+
+
+def test_tp2_based_tp1_and_step_protection_are_valid():
+    payload = valid_definition()
+    payload["tp1"] = {
+        "enabled": True,
+        "target_r": 0.70,
+        "target_basis": "TP2_DISTANCE",
+        "close_percent": 40,
+        "protection_r": None,
+        "protection_mode": "TP2_STEPS",
+        "protection_steps": [
+            {"trigger_percent": 70, "secure_percent": 50},
+            {"trigger_percent": 80, "secure_percent": 60},
+            {"trigger_percent": 90, "secure_percent": 70},
+        ],
+    }
+    assert validation_errors(payload) == {}
+    normalized = normalize_definition(payload)
+    assert normalized["tp1"]["target_basis"] == "TP2_DISTANCE"
+    assert normalized["tp1"]["protection_mode"] == "TP2_STEPS"
+    assert normalized["tp1"]["protection_steps"][1] == {
+        "trigger_percent": 80.0,
+        "secure_percent": 60.0,
+    }
+    summary = strategy_summary(payload)
+    assert "TP1 70% of TP2 distance" in summary
+    assert "70%→secure 50%" in summary
+    assert "90%→secure 70%" in summary
+
+
+def test_tp2_based_tp1_cannot_be_beyond_tp2():
+    payload = valid_definition()
+    payload["tp1"].update({
+        "target_basis": "TP2_DISTANCE",
+        "target_r": 1.20,
+    })
+    assert "tp1.target_r" in validation_errors(payload)
+
+
+def test_step_protection_requires_increasing_safe_steps():
+    payload = valid_definition()
+    payload["tp1"] = {
+        "enabled": True,
+        "target_r": 0.70,
+        "target_basis": "TP2_DISTANCE",
+        "close_percent": 40,
+        "protection_r": None,
+        "protection_mode": "TP2_STEPS",
+        "protection_steps": [
+            {"trigger_percent": 70, "secure_percent": 50},
+            {"trigger_percent": 80, "secure_percent": 85},
+        ],
+    }
+    errors = validation_errors(payload)
+    assert "tp1.protection_steps.1" in errors

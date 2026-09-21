@@ -91,13 +91,44 @@ def _levels(row, position):
     except (TypeError, ValueError):
         close_percent = None
 
+    target_basis = str(tp1.get("target_basis") or "SL_DISTANCE").upper()
+    protection_mode = str(tp1.get("protection_mode") or "FIXED").upper()
+    raw_steps = tp1.get("protection_steps") if isinstance(tp1.get("protection_steps"), list) else []
+
     target = protected = None
-    if entry is not None and stop is not None:
-        risk_distance = abs(entry - stop)
+    step_levels = []
+    if entry is not None:
         if target_r is not None and math.isfinite(target_r):
-            target = entry + risk_distance * target_r if side == "BUY" else entry - risk_distance * target_r
-        if protection_r is not None and math.isfinite(protection_r):
-            protected = entry + risk_distance * protection_r if side == "BUY" else entry - risk_distance * protection_r
+            if target_basis == "TP2_DISTANCE" and tp2 is not None:
+                target = entry + (tp2 - entry) * target_r
+            elif stop is not None:
+                risk_distance = abs(entry - stop)
+                target = entry + risk_distance * target_r if side == "BUY" else entry - risk_distance * target_r
+
+        if protection_mode == "FIXED" and protection_r is not None and math.isfinite(protection_r):
+            if target_basis == "TP2_DISTANCE" and tp2 is not None:
+                protected = entry + (tp2 - entry) * protection_r
+            elif stop is not None:
+                risk_distance = abs(entry - stop)
+                protected = entry + risk_distance * protection_r if side == "BUY" else entry - risk_distance * protection_r
+
+        if protection_mode == "TP2_STEPS" and tp2 is not None:
+            path = tp2 - entry
+            for item in raw_steps:
+                if not isinstance(item, dict):
+                    continue
+                trigger_percent = _float(item.get("trigger_percent"))
+                secure_percent = _float(item.get("secure_percent"))
+                if trigger_percent is None or secure_percent is None:
+                    continue
+                step_levels.append({
+                    "trigger_percent": trigger_percent,
+                    "secure_percent": secure_percent,
+                    "trigger": entry + path * trigger_percent / 100.0,
+                    "protected": entry + path * secure_percent / 100.0,
+                })
+            step_levels.sort(key=lambda item: item["trigger_percent"])
+
     return {
         "enabled": bool(tp1.get("enabled")),
         "target": target,
@@ -105,6 +136,11 @@ def _levels(row, position):
         "close_percent": close_percent,
         "tp2": tp2,
         "side": side,
+        "entry": entry,
+        "current_sl": stop,
+        "target_basis": target_basis,
+        "protection_mode": protection_mode,
+        "step_levels": step_levels,
     }
 
 
@@ -112,6 +148,32 @@ def _target_hit(side, price, target):
     if price is None or target is None:
         return False
     return (side == "BUY" and price >= target) or (side == "SELL" and price <= target)
+
+
+def _step_for_price(levels, price):
+    if price is None or levels.get("protection_mode") != "TP2_STEPS":
+        return None
+    entry = _float(levels.get("entry"))
+    tp2 = _float(levels.get("tp2"))
+    if entry is None or tp2 is None or tp2 == entry:
+        return None
+
+    progress_percent = (float(price) - entry) / (tp2 - entry) * 100.0
+    reached = [
+        item for item in (levels.get("step_levels") or [])
+        if progress_percent + 1e-9 >= float(item.get("trigger_percent") or 0.0)
+    ]
+    if not reached:
+        return None
+    return max(reached, key=lambda item: float(item.get("trigger_percent") or 0.0))
+
+
+def _is_more_protective(side, current_sl, desired_sl):
+    if desired_sl is None:
+        return False
+    if current_sl is None:
+        return True
+    return desired_sl > current_sl if side == "BUY" else desired_sl < current_sl
 
 
 def _partial_volume(row, position, close_percent):
@@ -196,7 +258,7 @@ def _terminalize_missing(rows, positions, now):
     return count
 
 
-def _partial_close(row, position, levels, now, *, catchup):
+def _partial_close(row, position, levels, price, now, *, catchup):
     volume = _partial_volume(row, position, levels["close_percent"])
     if volume is None:
         return {"action": "TP1_PARTIAL_CLOSE", "status": "BLOCKED", "reason": "INVALID_PARTIAL_CLOSE_VOLUME"}
@@ -221,9 +283,20 @@ def _partial_close(row, position, levels, now, *, catchup):
     if catchup:
         return {"action": "TP1_CATCHUP_PARTIAL_CLOSE", "status": "COMPLETED", "volume": volume}
 
-    protected = levels.get("protected")
+    step = None
+    if levels.get("protection_mode") == "TP2_STEPS":
+        step = _step_for_price(levels, price)
+        protected = step.get("protected") if step else None
+    else:
+        protected = levels.get("protected")
+
     if protected is None:
-        return {"action": "TP1_PARTIAL_CLOSE_AND_PROTECT", "status": "PROTECTION_FAILED", "volume": volume}
+        return {
+            "action": "TP1_PARTIAL_CLOSE_AND_PROTECT",
+            "status": "PROTECTION_FAILED",
+            "volume": volume,
+            "reason": "PROTECTION_LEVEL_UNAVAILABLE",
+        }
     protection = modify_position_stop_loss(
         str(row.broker_position_id),
         protected,
@@ -252,6 +325,56 @@ def _partial_close(row, position, levels, now, *, catchup):
         "status": "COMPLETED",
         "volume": volume,
         "protected_sl": protected,
+        "trigger_percent": step.get("trigger_percent") if step else None,
+        "secure_percent": step.get("secure_percent") if step else None,
+    }
+
+
+def _advance_step_protection(row, position, levels, price, now):
+    step = _step_for_price(levels, price)
+    if step is None:
+        return None
+    desired = _float(step.get("protected"))
+    current_sl = _float(
+        (position or {}).get("sl"),
+        (position or {}).get("stop_loss"),
+        (position or {}).get("stopLoss"),
+    )
+    if not _is_more_protective(levels.get("side"), current_sl, desired):
+        return None
+
+    result = modify_position_stop_loss(
+        str(row.broker_position_id),
+        desired,
+        take_profit_price=levels.get("tp2"),
+    )
+    if not isinstance(result, dict) or not result.get("ok"):
+        if _is_ambiguous(result):
+            row.status = "RECONCILIATION_REQUIRED"
+            row.updated_at = now
+            return {
+                "action": "TP2_STEP_PROTECTION",
+                "status": "RECONCILIATION_REQUIRED",
+                "trigger_percent": step.get("trigger_percent"),
+                "secure_percent": step.get("secure_percent"),
+                "broker_result": result,
+            }
+        return {
+            "action": "TP2_STEP_PROTECTION",
+            "status": "FAILED",
+            "trigger_percent": step.get("trigger_percent"),
+            "secure_percent": step.get("secure_percent"),
+            "broker_result": result,
+        }
+
+    row.protection_applied_at = now
+    row.updated_at = now
+    return {
+        "action": "TP2_STEP_PROTECTION",
+        "status": "COMPLETED",
+        "trigger_percent": step.get("trigger_percent"),
+        "secure_percent": step.get("secure_percent"),
+        "protected_sl": desired,
     }
 
 
@@ -295,15 +418,28 @@ def _manage(owner_id, account_identity, open_positions, prices, *, resume, sessi
 
             definition = row.definition_snapshot if isinstance(row.definition_snapshot, dict) else {}
             tp1_definition = definition.get("tp1") if isinstance(definition.get("tp1"), dict) else {}
-            if not tp1_definition.get("enabled") or row.tp1_completed_at is not None:
+            if not tp1_definition.get("enabled"):
                 continue
 
             levels = _levels(row, position)
             price = _current_price(str(row.symbol), levels["side"], position, prices)
-            if not _target_hit(levels["side"], price, levels["target"]):
+
+            if row.tp1_completed_at is None:
+                if not _target_hit(levels["side"], price, levels["target"]):
+                    continue
+                action = _partial_close(
+                    row, position, levels, price, now,
+                    catchup=bool(resume and was_suspended),
+                )
+                actions.append(action)
                 continue
-            action = _partial_close(row, position, levels, now, catchup=bool(resume and was_suspended))
-            actions.append(action)
+
+            if levels.get("protection_mode") == "TP2_STEPS":
+                action = _advance_step_protection(
+                    row, position, levels, price, now
+                )
+                if action is not None:
+                    actions.append(action)
 
         session.commit()
 
