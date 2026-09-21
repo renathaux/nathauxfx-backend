@@ -145,5 +145,47 @@ def test_fast_run_and_replay_have_identical_trades_and_metrics(monkeypatch):
     replay = run_simulation(_definition(), _bundle(), "EURUSD", 10000.0, include_replay=True)
     assert fast["trades"] == replay["trades"]
     assert fast["metrics"] == replay["metrics"]
+    assert fast["diagnostics"] == replay["diagnostics"]
+    assert fast["diagnostics"]["candles_analyzed"] == 4
+    assert fast["diagnostics"]["setups_detected"] == 1
+    assert fast["diagnostics"]["signals_emitted"] == 1
+    assert fast["diagnostics"]["trades_opened"] == 1
+    assert fast["diagnostics"]["resolved_trades"] == 1
     assert "replay" not in fast
     assert replay["replay"]
+
+
+def test_diagnostics_explain_zero_trade_run(monkeypatch):
+    import services.strategy_simulator as simulator
+
+    class Timeline:
+        def timestamps(self):
+            return list(_bundle()["5m"].index)
+        def candle(self, timestamp):
+            row = _bundle()["5m"].loc[pd.Timestamp(timestamp)]
+            return type("Candle", (), {
+                "timestamp": pd.Timestamp(timestamp), "open": row.Open,
+                "high": row.High, "low": row.Low, "close": row.Close,
+            })()
+
+    monkeypatch.setattr(simulator, "build_market_facts", lambda *args, **kwargs: Timeline())
+
+    def fake_wait(definition, timeline, timestamp, prior_state, *, symbol, account_balance, risk_override=None):
+        steps = {
+            "trend": {"state": "NOT_APPLICABLE"},
+            "structure": {"state": "WAITING", "reason": "BOS_CHOCH_REQUIRED"},
+        }
+        return EvaluationResult(
+            "WAIT", steps, None, None, None, None, None, None,
+            EvaluationState("WAITING", None),
+        )
+
+    monkeypatch.setattr(simulator, "evaluate_strategy", fake_wait)
+    result = run_simulation(_definition(), _bundle(), "EURUSD", 10000.0)
+
+    assert result["metrics"]["total_resolved_trades"] == 0
+    assert result["diagnostics"]["candles_analyzed"] == 4
+    assert result["diagnostics"]["evaluations"] == 4
+    assert result["diagnostics"]["setups_detected"] == 0
+    assert result["diagnostics"]["trades_opened"] == 0
+    assert result["diagnostics"]["no_setup_reasons"] == {"BOS_CHOCH_REQUIRED": 4}
