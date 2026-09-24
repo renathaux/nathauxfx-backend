@@ -41,6 +41,7 @@ class StructureDefinition(_StrictModel):
 
 
 class ConfirmationDefinition(_StrictModel):
+    max_setup_age_bars: int | None = Field(default=None, ge=1, strict=True)
     rules: list[Literal["NEXT_SAME_DIRECTION", "SECOND_CLOSE_BEYOND", "RETEST_LEVEL", "MIN_BODY_PERCENT"]] = Field(default_factory=list)
     minimum_body_percent: float | None = None
 
@@ -50,7 +51,15 @@ class EntryDefinition(_StrictModel):
     remember_bos_on_confirmation_failure: bool = False
 
 
+class StopDistanceFilter(_StrictModel):
+    enabled: bool = False
+    mode: Literal["PERCENT_ENTRY", "PIPS"] = "PERCENT_ENTRY"
+    minimum: float | None = None
+    maximum: float | None = None
+
+
 class StopLossDefinition(_StrictModel):
+    distance_filter: StopDistanceFilter = Field(default_factory=StopDistanceFilter)
     method: Literal["LAST_SWING", "FIXED_DISTANCE"]
     buffer_pips: float | None = None
     fixed_distance: float | None = None
@@ -89,6 +98,7 @@ class StrategyDefinition(_StrictModel):
     schema_version: Literal[1]
     symbols: list[Literal["EURUSD", "XAUUSD"]]
     trading_timeframe: Literal["5m", "15m", "1h"]
+    structure_timeframe: Literal["5m", "15m", "1h"] | None = None
     trend: TrendDefinition
     structure: StructureDefinition
     confirmation: ConfirmationDefinition
@@ -101,6 +111,8 @@ class StrategyDefinition(_StrictModel):
 
     @model_validator(mode="after")
     def validate_cross_fields(self):
+        if self.structure_timeframe is None:
+            self.structure_timeframe = self.trading_timeframe
         errors = _cross_field_errors(self)
         if errors:
             joined = "; ".join(f"{path}: {message}" for path, message in errors.items())
@@ -135,6 +147,19 @@ def _cross_field_errors(value: StrategyDefinition) -> dict[str, str]:
         errors["symbols"] = "Select at least one symbol"
     elif _duplicates(value.symbols):
         errors["symbols"] = "Symbols cannot contain duplicates"
+
+    structure_tf = value.structure_timeframe or value.trading_timeframe
+    if TIMEFRAME_RANK.get(structure_tf, 0) < TIMEFRAME_RANK.get(value.trading_timeframe, 0):
+        errors["structure_timeframe"] = "Structure timeframe must be equal to or higher than trading timeframe"
+
+    distance_filter = value.stop_loss.distance_filter
+    if distance_filter.enabled:
+        if not _valid_nonnegative(distance_filter.minimum):
+            errors["stop_loss.distance_filter.minimum"] = "Minimum must be a finite number zero or greater"
+        if not _valid_nonnegative(distance_filter.maximum):
+            errors["stop_loss.distance_filter.maximum"] = "Maximum must be a finite number zero or greater"
+        elif _valid_nonnegative(distance_filter.minimum) and distance_filter.maximum < distance_filter.minimum:
+            errors["stop_loss.distance_filter.maximum"] = "Maximum must be at least the minimum"
 
     if _duplicates(value.trend.methods):
         errors["trend.methods"] = "Trend methods cannot contain duplicates"
@@ -318,6 +343,7 @@ def _parse_without_cross_validation(payload: dict) -> StrategyDefinition:
         "schema_version": payload["schema_version"],
         "symbols": payload["symbols"],
         "trading_timeframe": payload["trading_timeframe"],
+        "structure_timeframe": payload.get("structure_timeframe") or payload["trading_timeframe"],
         "trend": TrendDefinition.model_validate(payload["trend"]),
         "structure": StructureDefinition.model_validate(payload["structure"]),
         "confirmation": ConfirmationDefinition.model_validate(payload["confirmation"]),
@@ -367,7 +393,7 @@ def strategy_summary(definition: dict) -> str:
         }
         parts.append(f"{trend['timeframe']} trend " + " + ".join(labels[item] for item in trend["methods"]))
 
-    parts.append(f"{tf} BOS/CHOCH")
+    parts.append(f"{value['structure_timeframe']} BOS/CHOCH")
 
     structure = value["structure"]
     validation_labels = []
@@ -395,6 +421,9 @@ def strategy_summary(definition: dict) -> str:
     if confirmation_labels:
         parts.append(" + ".join(confirmation_labels))
 
+    if confirmation["max_setup_age_bars"] is not None:
+        parts.append(f"setup valid {confirmation['max_setup_age_bars']} {tf} bars from original event")
+
     entry_labels = {
         "BOS_CHOCH_CLOSE": "BOS/CHOCH close",
         "CONFIRMATION_CLOSE": "confirmation close",
@@ -407,12 +436,16 @@ def strategy_summary(definition: dict) -> str:
 
     stop = value["stop_loss"]
     if stop["method"] == "LAST_SWING":
-        stop_text = f"{tf} swing SL"
+        stop_text = f"{value['structure_timeframe']} swing SL"
         if stop["buffer_pips"] is not None and float(stop["buffer_pips"]) != 0:
             stop_text += f" + {_fmt(stop['buffer_pips'])} pip buffer"
     else:
         stop_text = f"SL {_fmt(stop['fixed_distance'])} pips/points"
     parts.append(stop_text)
+    distance_filter = stop["distance_filter"]
+    if distance_filter["enabled"]:
+        unit = "% of entry" if distance_filter["mode"] == "PERCENT_ENTRY" else "pips"
+        parts.append(f"SL distance {_fmt(distance_filter['minimum'])}–{_fmt(distance_filter['maximum'])} {unit}")
 
     tp1 = value["tp1"]
     if tp1["enabled"]:

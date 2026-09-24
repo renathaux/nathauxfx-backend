@@ -278,6 +278,7 @@ def build_studio_candidate(owner_id, account_identity, symbol, market_bundle,
         public_symbol,
         definition["trading_timeframe"],
         definition["trend"]["timeframe"],
+        definition.get("structure_timeframe", definition["trading_timeframe"]),
     )
     timestamps = list(timeline.timestamps())
     if not timestamps:

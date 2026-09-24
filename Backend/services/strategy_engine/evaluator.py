@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import math
 
 import pandas as pd
 
@@ -301,7 +302,8 @@ def evaluate_strategy(definition: dict, timeline, timestamp, prior_state: Evalua
         if not trend_ok:
             return _result(steps, setup_id=setup_id, state=EvaluationState("BLOCKED", None))
 
-        break_ok, break_reason = _break_validation(value, candle, pending, PIP_SIZE[public_symbol])
+        structure_candle = timeline.structure_candle(stamp) if hasattr(timeline, "structure_candle") else candle
+        break_ok, break_reason = _break_validation(value, structure_candle, pending, PIP_SIZE[public_symbol])
         steps["break_validation"] = _step("PASSED") if break_ok else _step("BLOCKED", break_reason)
         if not break_ok:
             return _result(steps, setup_id=setup_id, state=EvaluationState("BLOCKED", None))
@@ -309,6 +311,22 @@ def evaluate_strategy(definition: dict, timeline, timestamp, prior_state: Evalua
         steps["trend"] = _step("PASSED") if value["trend"]["methods"] else _step("NOT_APPLICABLE")
         steps["structure"] = _step("PASSED", direction=direction)
         steps["break_validation"] = _step("PASSED") if value["structure"]["break_validation"] else _step("NOT_APPLICABLE")
+
+    max_age = value["confirmation"]["max_setup_age_bars"]
+    if max_age is not None:
+        # Persist the count and watermark across simulator chunks / LIVE calls.
+        # Count actual closed bars, not wall time (weekends and gaps do not age).
+        last = pd.Timestamp(pending.get("age_timestamp", pending["event_timestamp"]))
+        age = int(pending.get("age_bars", 0))
+        cursor = timeline.next_timestamp(last)
+        while cursor is not None and pd.Timestamp(cursor) <= stamp:
+            age += 1
+            last = pd.Timestamp(cursor)
+            cursor = timeline.next_timestamp(last)
+        pending.update(age_bars=age, age_timestamp=last.isoformat())
+        if age > max_age:
+            steps["confirmation"] = _step("BLOCKED", "SETUP_EXPIRED", age_bars=age, maximum_bars=max_age)
+            return _result(steps, setup_id=setup_id, state=EvaluationState("BLOCKED", None))
 
     if pending.get("remember_bos"):
         confirmation_state, confirmation_reason = _remembered_bos_confirmation(
@@ -362,6 +380,19 @@ def evaluate_strategy(definition: dict, timeline, timestamp, prior_state: Evalua
         steps["stop_loss"] = _step("WAITING", "STOP_LOSS_UNAVAILABLE")
         return _result(steps, setup_id=setup_id, entry=float(entry), state=EvaluationState("WAITING", pending))
     steps["stop_loss"] = _step("PASSED", price=float(sl))
+
+    distance_filter = value["stop_loss"]["distance_filter"]
+    if distance_filter["enabled"]:
+        distance = abs(float(entry) - float(sl))
+        distance = distance / float(entry) * 100.0 if distance_filter["mode"] == "PERCENT_ENTRY" else distance / PIP_SIZE[public_symbol]
+        reason = None
+        if distance < distance_filter["minimum"] and not math.isclose(distance, distance_filter["minimum"], rel_tol=1e-10, abs_tol=1e-10):
+            reason = "SL_DISTANCE_BELOW_MINIMUM"
+        elif distance > distance_filter["maximum"] and not math.isclose(distance, distance_filter["maximum"], rel_tol=1e-10, abs_tol=1e-10):
+            reason = "SL_DISTANCE_ABOVE_MAXIMUM"
+        steps["stop_loss"] = _step("BLOCKED" if reason else "PASSED", reason, price=float(sl), distance=distance, mode=distance_filter["mode"])
+        if reason:
+            return _result(steps, setup_id=setup_id, entry=float(entry), sl=float(sl), state=EvaluationState("BLOCKED", None))
 
     tp1, tp2 = _target_prices(value, timeline, stamp, float(entry), float(sl), direction, PIP_SIZE[public_symbol])
     if value["tp1"]["enabled"]:

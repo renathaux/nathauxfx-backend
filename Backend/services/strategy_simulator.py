@@ -361,6 +361,7 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         symbol,
         value["trading_timeframe"],
         value["trend"]["timeframe"],
+        value["structure_timeframe"],
     )
     base_balance = float(start_balance)
     if base_balance <= 0:

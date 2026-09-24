@@ -85,7 +85,8 @@ def _swing_structure(swings: list[dict], timestamp: pd.Timestamp) -> str | None:
 
 
 class MarketFactsTimeline:
-    def __init__(self, *, candles, events, trends, timestamps, trading_swings):
+    def __init__(self, *, candles, events, trends, timestamps, trading_swings, structure_candles=None):
+        self._structure_candles = structure_candles or candles
         self._candles = candles
         self._events = events
         self._trends = trends
@@ -97,6 +98,9 @@ class MarketFactsTimeline:
 
     def candle(self, timestamp) -> CandleFacts | None:
         return self._candles.get(_utc(timestamp))
+
+    def structure_candle(self, timestamp):
+        return self._structure_candles.get(_utc(timestamp))
 
     def structure_event(self, timestamp) -> StructureEventFacts | None:
         return self._events.get(_utc(timestamp))
@@ -137,7 +141,7 @@ class MarketFactsTimeline:
 
 
 def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_timeframe: str,
-                       trend_timeframe: str | None) -> MarketFactsTimeline:
+                       trend_timeframe: str | None, structure_timeframe: str | None = None) -> MarketFactsTimeline:
     public_symbol = str(symbol or "").upper().replace("/", "")
     trading_tf = str(trading_timeframe or "").lower()
     trading = _normalize(bundle.get(trading_tf))
@@ -145,7 +149,20 @@ def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_tim
         raise ValueError("SIMULATION_HISTORY_UNAVAILABLE")
 
     point_size = POINT_SIZE.get(public_symbol)
-    trading_analysis = analyze_structure(trading, timeframe=trading_tf, point_size=point_size)
+    structure_tf = structure_timeframe or trading_tf
+    structure_frame = _normalize(bundle.get(structure_tf))
+    if structure_frame.empty:
+        raise ValueError("SIMULATION_STRUCTURE_HISTORY_UNAVAILABLE")
+    structure_analysis = analyze_structure(structure_frame, timeframe=structure_tf, point_size=point_size)
+    # Bundles use candle OPEN timestamps. A higher-frame event is available on
+    # the trading candle whose CLOSE matches its close, never at its open.
+    minutes = {"5m": 5, "15m": 15, "1h": 60}
+    availability_offset = pd.Timedelta(minutes=minutes[structure_tf] - minutes[trading_tf])
+    structure_candles = {}
+    for timestamp, row in structure_frame.iterrows():
+        stamp = _utc(timestamp) + availability_offset
+        span = max(float(row.High) - float(row.Low), 1e-12)
+        structure_candles[stamp] = CandleFacts(stamp, float(row.Open), float(row.High), float(row.Low), float(row.Close), abs(float(row.Close)-float(row.Open))/span*100.0)
     trading_swings = _serialise_confirmed_swings(trading)
 
     candles: dict[pd.Timestamp, CandleFacts] = {}
@@ -158,8 +175,10 @@ def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_tim
         )
 
     events: dict[pd.Timestamp, StructureEventFacts] = {}
-    for raw in trading_analysis.get("events") or []:
-        stamp = _utc(raw["timestamp"])
+    for raw in structure_analysis.get("events") or []:
+        stamp = _utc(raw["timestamp"]) + availability_offset
+        if stamp not in candles:
+            continue
         invalidation = raw.get("event_invalidation_swing") or {}
         events[stamp] = StructureEventFacts(
             timestamp=stamp,
@@ -216,4 +235,5 @@ def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_tim
         trends=trends,
         timestamps=trading.index,
         trading_swings=trading_swings,
+        structure_candles=structure_candles,
     )
