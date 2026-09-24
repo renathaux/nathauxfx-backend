@@ -21,5 +21,9 @@ def initialize_worker_namespace():
 
 if __name__ == '__main__':
     initialize_worker_namespace()
+    import os
+    if os.environ.get('CAPACITY_STAGING') == '1':
+        from capacity_probe.worker_faults import install
+        install()
     from services.strategy_fast_worker import main
     main(sys.argv[1])
