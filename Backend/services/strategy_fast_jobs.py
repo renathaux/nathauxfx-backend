@@ -13,11 +13,17 @@ import time
 import uuid
 from pathlib import Path
 
+FAST_JOB_CONCURRENCY = 1  # One serial manager; never start overlapping workers.
 TERMINAL={'COMPLETED','FAILED','CANCELLED'}
 
 def write_json(path,value):
     temporary=path.with_suffix('.tmp-'+uuid.uuid4().hex)
-    temporary.write_text(json.dumps(value,allow_nan=False));os.replace(temporary,path)
+    try:
+        with temporary.open('w') as stream:
+            json.dump(value,stream,allow_nan=False)
+        os.replace(temporary,path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 def read_json(path):
     return json.loads(path.read_text())
@@ -48,7 +54,7 @@ class FastJobs:
             self._cleanup()
             states=[read_json(p) for p in self.root.glob('*/state.json')]
             active=[s for s in states if s['status'] not in TERMINAL]
-            if len(states)>=self.max_jobs or len(active)>=2 or any(s['owner']==owner for s in active):
+            if len(states)>=self.max_jobs or len(active)>=FAST_JOB_CONCURRENCY+1 or any(s['owner']==owner for s in active):
                 raise JobBusy('A backtest is already running or the worker queue is full. Try again after it finishes.')
             job_id=uuid.uuid4().hex;directory=self.root/job_id;directory.mkdir(mode=0o700)
             write_json(directory/'input.json',payload)
@@ -92,7 +98,7 @@ class FastJobs:
                 value.update(status='RUNNING',current_stage='Starting worker');write_json(path,value)
             error=None
             try:
-                process=subprocess.Popen([sys.executable,'-m','services.strategy_fast_worker',str(directory)],cwd=Path(__file__).resolve().parents[1],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                process=subprocess.Popen([sys.executable,str(Path(__file__).resolve().parents[1]/'fast_backtest_worker.py'),str(directory)],cwd=Path(__file__).resolve().parents[1],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
                 deadline=time.monotonic()+600
                 while process.poll() is None:
                     if (directory/'cancel').exists() or time.monotonic()>deadline:

@@ -256,3 +256,45 @@ def test_symlink_cache_root_is_bypassed(tmp_path, monkeypatch):
     monkeypatch.setattr(history, "_download", lambda url: b"canonical")
     assert history._read_file("manifest.json", None, "a" * 40) == b"canonical"
     assert not list(elsewhere.iterdir())
+
+
+def test_fast_remote_load_retains_no_raw_ram_bytes(dataset, monkeypatch):
+    calls = []
+    def download(url):
+        relative = url.split('/Frontend/replay-data/', 1)[1]
+        calls.append(relative)
+        return (dataset / relative).read_bytes()
+    monkeypatch.delenv("SIMULATOR_HISTORY_DIR", raising=False)
+    monkeypatch.setattr(history, "_download", download)
+    first = history.load_fast_history("XAUUSD", "2024-02-01", "2024-02-01T00:10Z")
+    second = history.load_fast_history("XAUUSD", "2024-02-01", "2024-02-01T00:10Z")
+    assert history.history_file_cache_info()["bytes"] == 0
+    assert len(calls) == 3  # Disk cache survives both loads.
+    assert first.history_hash == second.history_hash
+    pd.testing.assert_frame_equal(first.frame, second.frame, check_exact=True)
+
+
+@pytest.mark.parametrize("hint", [None, 1, -10, 100000000000, "bad"])
+def test_manifest_counts_only_hint_allocation(dataset, hint):
+    path = dataset / "manifest.json"
+    payload = json.loads(path.read_text())
+    for month in payload["symbols"]["XAUUSD"]["months"]:
+        payload["symbols"]["XAUUSD"][month]["count"] = hint
+    path.write_text(json.dumps(payload))
+    result = load(dataset)
+    assert len(result.frame) == 3
+    assert result.frame.index.is_monotonic_increasing
+    assert all(str(dtype) == "float64" for dtype in result.frame.dtypes)
+
+
+def test_mixed_timestamp_precision_preserved_across_months(dataset):
+    path = dataset / "XAUUSD/2024-02.json"
+    payload = json.loads(path.read_text())
+    payload['candles'][0]['timestamp'] = '2024-02-01T00:00:00.000000001Z'
+    # Use consistent ISO formatting within each month for pandas parsing.
+    payload['candles'][1]['timestamp'] = '2024-02-01T00:05:00.000000000Z'
+    payload['candles'][2]['timestamp'] = '2024-02-01T00:10:00.000000000Z'
+    path.write_text(json.dumps(payload))
+    result = load(dataset)
+    frames = [history._month_frame(json.loads((dataset / 'XAUUSD' / f'{month}.json').read_text()), 'XAUUSD', month, pd.Timestamp('2024-01-25', tz='UTC'), pd.Timestamp('2024-02-01T00:10Z')) for month in result.months]
+    pd.testing.assert_frame_equal(result.frame, pd.concat(frames).sort_index(), check_exact=True)

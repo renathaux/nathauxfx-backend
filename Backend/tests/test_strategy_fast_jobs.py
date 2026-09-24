@@ -61,3 +61,56 @@ def test_cleanup_never_removes_current_process_and_only_evicts_needed_result(tmp
     assert (tmp_path/c['job_id']/'state.json').exists()
     assert (tmp_path/b['job_id']/'state.json').exists()
     assert not (tmp_path/a['job_id']).exists()
+
+
+def test_queued_workers_never_overlap(tmp_path,payload,monkeypatch):
+    import services.strategy_fast_jobs as module
+    assert module.FAST_JOB_CONCURRENCY == 1
+    live = []
+    finished = []
+    class ControlledProcess:
+        returncode = None
+        def __init__(self,args,**kwargs):
+            assert not live, 'second heavy worker started before first exited'
+            self.directory = module.Path(args[-1])
+            live.append(self)
+        def poll(self):
+            write_json(self.directory/'result.json',{'ok':True})
+            self.returncode = 0
+            live.remove(self)
+            finished.append(self.directory.name)
+            return 0
+    monkeypatch.setattr(module.subprocess,'Popen',ControlledProcess)
+    jobs=FastJobs(tmp_path,start_worker=False)
+    first=jobs.create('alice',payload);second=jobs.create('bob',payload)
+    jobs._work()
+    assert finished == [first['job_id'],second['job_id']]
+    assert not live and jobs.active_job is None
+    assert jobs.get('alice',first['job_id'])['status']=='COMPLETED'
+    assert jobs.get('bob',second['job_id'])['status']=='COMPLETED'
+
+
+def test_failed_serialization_keeps_previous_result_and_removes_temporary(tmp_path):
+    target=tmp_path/'result.json'
+    write_json(target,{'ok':True})
+    with pytest.raises(ValueError):write_json(target,{'bad':float('nan')})
+    assert read_json(target)=={'ok':True}
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_isolated_worker_imports_no_live_bootstrap():
+    import subprocess,sys
+    from pathlib import Path
+    backend=Path(__file__).resolve().parents[1]
+    script='''
+from fast_backtest_worker import initialize_worker_namespace
+initialize_worker_namespace()
+import services.strategy_fast_worker
+import sys
+blocked = ('ctrader_connector', 'api', 'database', 'sqlalchemy',
+           'services.paper_live_entry_service', 'services.indicator_event_stream_service',
+           'services.neon_observer_optimization')
+assert not set(blocked).intersection(sys.modules), set(blocked).intersection(sys.modules)
+assert services.__spec__.loader.__class__.__name__ == 'NamespaceLoader'
+'''
+    subprocess.run([sys.executable,'-c',script],cwd=backend,check=True)

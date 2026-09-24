@@ -12,7 +12,7 @@ from bisect import bisect_left
 import pandas as pd
 
 from services.strategy_engine import market_facts
-from services.strategy_engine.market_facts_compact import CandleStore
+from services.strategy_engine.market_facts_compact import CandleStore, SwingStore
 
 _MINUTES = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}
 
@@ -25,6 +25,7 @@ class CandleStoreView(CandleStore):
         # NumPy pickle reconstructs writable arrays; restore the immutable bound.
         parent.times.flags.writeable = False
         parent.values.flags.writeable = False
+        self.time_scale = parent.time_scale
         self.times = parent.times[first:last]
         self.values = parent.values[first:last]
 
@@ -55,13 +56,12 @@ def window_swings(swings, first, last, *, pivot_indices=None):
             for s in swings[left:right] if s["confirmed_index"] < last]
 
 
-def build_window_facts(bundle, symbol, trading_timeframe, trend_timeframe,
+def iter_window_facts(bundle, symbol, trading_timeframe, trend_timeframe,
                        structure_timeframe, windows, progress=None):
-    """Return (start, end, timeline) for each (start, end, history_start) window.
+    """Yield each legacy window once, retaining only shared numeric history.
 
-    Caller owns the bounded FactsCache and may pickle this whole list together;
-    shared backing arrays are then serialized only once. progress receives 0..1
-    once per completed window, and may raise to cancel preprocessing.
+    Consume sequentially and release each timeline before requesting the next.
+    Progress runs before yielding, and may raise to cancel preprocessing.
     """
     trading_tf = trading_timeframe
     structure_tf = structure_timeframe or trading_tf
@@ -73,12 +73,10 @@ def build_window_facts(bundle, symbol, trading_timeframe, trend_timeframe,
         frame = bundle[tf]
         if not frame.index.is_monotonic_increasing or frame.index.has_duplicates:
             raise ValueError("SIMULATION_HISTORY_INDEX_INVALID")
-    global_swings = {tf: market_facts._serialise_confirmed_swings(bundle[tf]) for tf in {trading_tf, trend_tf}}
-    pivot_indices = {tf: [s["index"] for s in swings] for tf, swings in global_swings.items()}
+    global_swings = {tf: SwingStore(bundle[tf]) for tf in {trading_tf, trend_tf}}
     trading_store = CandleStore(bundle[trading_tf])
     offset = pd.Timedelta(minutes=_MINUTES[structure_tf] - _MINUTES[trading_tf])
     structure_store = trading_store if structure_tf == trading_tf else CandleStore(bundle[structure_tf], offset)
-    output = []
     windows = list(windows)
     for window_index, (start, end, history_start) in enumerate(windows):
         start, end, history_start = map(market_facts._utc, (start, end, history_start))
@@ -86,14 +84,22 @@ def build_window_facts(bundle, symbol, trading_timeframe, trend_timeframe,
             raise ValueError("SIMULATION_WINDOW_INVALID")
         bounds = {tf: _slice_bounds(bundle[tf], tf, history_start, end) for tf in required}
         sliced = {tf: bundle[tf].iloc[first:last] for tf, (first, last) in bounds.items()}
-        swings = {tf: window_swings(global_swings[tf], *bounds[tf], pivot_indices=pivot_indices[tf]) for tf in global_swings}
+        swings = {tf: global_swings[tf].window(*bounds[tf]) for tf in global_swings}
+        candles = CandleStoreView(trading_store, *bounds[trading_tf])
+        structure_candles = (candles if structure_tf == trading_tf else
+                             CandleStoreView(structure_store, *bounds[structure_tf]))
         timeline = market_facts.build_market_facts(sliced, symbol, trading_tf, trend_tf, structure_tf,
-                                                  compact=True, precomputed_swings_by_tf=swings)
-        # Release temporary copies constructed by the generic compact builder.
-        timeline._candles = CandleStoreView(trading_store, *bounds[trading_tf])
-        timeline._structure_candles = (timeline._candles if structure_tf == trading_tf else
-                                       CandleStoreView(structure_store, *bounds[structure_tf]))
-        output.append((start, end, timeline))
+                                                  compact=True, precomputed_swings_by_tf=swings,
+                                                  compact_candle_stores=(candles, structure_candles))
+        del sliced, swings
         if progress is not None:
             progress((window_index + 1) / len(windows))
-    return output
+        yield start, end, timeline
+        del timeline
+
+
+def build_window_facts(bundle, symbol, trading_timeframe, trend_timeframe,
+                       structure_timeframe, windows, progress=None):
+    """Compatibility list API; workers should consume iter_window_facts lazily."""
+    return list(iter_window_facts(bundle, symbol, trading_timeframe, trend_timeframe,
+                                  structure_timeframe, windows, progress))

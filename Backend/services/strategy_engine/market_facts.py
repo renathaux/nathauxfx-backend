@@ -168,7 +168,7 @@ class MarketFactsTimeline:
 
 def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_timeframe: str,
                        trend_timeframe: str | None, structure_timeframe: str | None = None, *, compact=False,
-                       precomputed_swings_by_tf=None) -> MarketFactsTimeline:
+                       precomputed_swings_by_tf=None, compact_candle_stores=None) -> MarketFactsTimeline:
     public_symbol = str(symbol or "").upper().replace("/", "")
     trading_tf = str(trading_timeframe or "").lower()
     trading = _normalize(bundle.get(trading_tf))
@@ -192,8 +192,11 @@ def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_tim
     availability_offset = pd.Timedelta(minutes=minutes[structure_tf] - minutes[trading_tf])
     if compact:
         from services.strategy_engine.market_facts_compact import CandleStore, CompactTimeline
-        structure_candles = CandleStore(structure_frame, availability_offset)
-        candles = CandleStore(trading)
+        if compact_candle_stores is None:
+            structure_candles = CandleStore(structure_frame, availability_offset)
+            candles = CandleStore(trading)
+        else:
+            candles, structure_candles = compact_candle_stores
         trading_swings = swings_for(trading_tf, trading)
     else:
         structure_candles = {}

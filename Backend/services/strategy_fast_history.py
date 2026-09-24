@@ -2,8 +2,8 @@
 
 Mount Frontend/replay-data via SIMULATOR_HISTORY_DIR, or fetch the public,
 commit-pinned dataset. Local files are reread on each job to detect changes;
-remote immutable file bytes share a 64 MiB process LRU and a 128 MiB disk
-LRU across worker subprocesses. A mounted canonical dataset remains preferred.
+remote immutable file bytes share a 128 MiB disk LRU across worker
+subprocesses. FAST jobs bypass the optional process RAM cache. A mounted canonical dataset remains preferred.
 """
 from __future__ import annotations
 
@@ -179,7 +179,7 @@ def history_file_cache_info() -> dict:
         return {"bytes": _CACHE_BYTES, "entries": len(_FILES), "limit_bytes": MAX_CACHE_BYTES}
 
 
-def _read_file(relative: str, directory: Path | None, revision: str) -> bytes:
+def _read_file(relative: str, directory: Path | None, revision: str, *, retain_in_memory: bool = True) -> bytes:
     global _CACHE_BYTES
     relative = _validate_relative(relative)
     revision = _validate_revision(revision)
@@ -191,7 +191,7 @@ def _read_file(relative: str, directory: Path | None, revision: str) -> bytes:
         return value
     key = (revision, relative)
     with _LOCK:
-        if key in _FILES:
+        if retain_in_memory and key in _FILES:
             _FILES.move_to_end(key)
             value = _FILES[key]
             _touch_disk(revision, relative)
@@ -200,6 +200,8 @@ def _read_file(relative: str, directory: Path | None, revision: str) -> bytes:
     if value is None:
         value = _download(f"{_RAW_ROOT}{revision}/Frontend/replay-data/{relative}")
         _write_disk(revision, relative, value)
+    if not retain_in_memory:
+        return value
     with _LOCK:
         previous = _FILES.pop(key, None)
         if previous is not None:
@@ -273,7 +275,7 @@ def load_fast_history(symbol: str, start, end, warmup_days: int = 7, *, history_
     revision = _validate_revision(revision or os.environ.get("SIMULATOR_HISTORY_REVISION", DEFAULT_HISTORY_REVISION))
     directory_value = history_dir if history_dir is not None else os.environ.get("SIMULATOR_HISTORY_DIR")
     directory = Path(directory_value).expanduser().resolve() if directory_value else None
-    manifest_raw = _read_file("manifest.json", directory, revision)
+    manifest_raw = _read_file("manifest.json", directory, revision, retain_in_memory=False)
     manifest = json.loads(manifest_raw)
     if manifest.get("version") != 1 or manifest.get("base_timeframe") != "5m":
         raise ValueError("STATIC_HISTORY_MANIFEST_INVALID")
@@ -294,21 +296,53 @@ def load_fast_history(symbol: str, start, end, warmup_days: int = 7, *, history_
     digest.update(f"{revision}:{symbol}:{history_start.isoformat()}:{end.isoformat()}".encode())
     digest.update(manifest_raw)
     raw_bytes = len(manifest_raw)
-    frames = []
+    # Manifest counts are sizing hints only; never trust them for validation or
+    # bounds. Grow for unusual/off-grid data, and trim after loading. Keeping
+    # only one monthly frame avoids concat + global-sort copies of five years.
+    dense_count = max(1, int((end - history_start) / pd.Timedelta(minutes=5)) + 1)
+    hinted_count = sum(available.get(month, {}).get("count", 0)
+                       if isinstance(available.get(month, {}).get("count"), int) else 0
+                       for month in months)
+    capacity = min(hinted_count, dense_count) if hinted_count > 0 else dense_count
+    values = np.empty((capacity, 5), dtype=np.float64)
+    stamps = np.empty(capacity, dtype=np.int64)
+    position = 0
+    timestamp_unit = None
     for month_index, month in enumerate(months):
-        raw = _read_file(f"{symbol}/{month}.json", directory, revision)
+        raw = _read_file(f"{symbol}/{month}.json", directory, revision, retain_in_memory=False)
         digest.update(month.encode())
         digest.update(raw)
         raw_bytes += len(raw)
-        # Only this month's raw dictionaries exist; retained frames are numeric.
-        frames.append(_month_frame(json.loads(raw), symbol, month, history_start, end))
+        monthly = _month_frame(json.loads(raw), symbol, month, history_start, end)
+        del raw
+        unit = monthly.index.unit
+        if timestamp_unit is None:
+            timestamp_unit = unit
+        elif np.dtype(f"datetime64[{unit}]") != np.dtype(f"datetime64[{timestamp_unit}]"):
+            common_unit = np.datetime_data(np.result_type(f"datetime64[{timestamp_unit}]", f"datetime64[{unit}]"))[0]
+            if common_unit != timestamp_unit:
+                stamps[:position] = stamps[:position].view(f"datetime64[{timestamp_unit}]").astype(f"datetime64[{common_unit}]").view(np.int64)
+                timestamp_unit = common_unit
+        required = position + len(monthly)
+        if required > capacity:
+            capacity = max(required, capacity + max(len(monthly), capacity // 4))
+            values.resize((capacity, 5), refcheck=False)
+            stamps.resize(capacity, refcheck=False)
+        values[position:required] = monthly.to_numpy(copy=False)
+        stamps[position:required] = monthly.index.as_unit(timestamp_unit).asi8
+        position = required
+        del monthly
         if progress is not None:
             progress((month_index + 1) / len(months))
-    frame = pd.concat(frames).sort_index()
+    values.resize((position, 5), refcheck=False)
+    stamps.resize(position, refcheck=False)
+    index = pd.DatetimeIndex(stamps.view(f"datetime64[{timestamp_unit}]"), tz="UTC")
+    frame = pd.DataFrame(values, index=index, columns=_COLUMNS, copy=False)
     if frame.empty or not (frame.index >= start).any():
         raise ValueError("STATIC_HISTORY_RANGE_UNAVAILABLE")
-    if frame.index.has_duplicates:
-        raise ValueError("STATIC_HISTORY_DUPLICATE_TIMESTAMP")
+    # Each month is already sorted and checked for duplicate timestamps and
+    # month ownership, so chronological disjoint months need no global sort
+    # or duplicate-index hash table.
     return LoadedHistory(frame, digest.hexdigest(), revision, str(directory) if directory else f"{_RAW_ROOT}{revision}/Frontend/replay-data", months, raw_bytes)
 
 
