@@ -236,6 +236,12 @@ async def log_unhandled_api_errors(request: Request, call_next):
         traceback.print_exc()
         raise
 
+@app.on_event("shutdown")
+def stop_fast_backtest_manager():
+    from services.strategy_fast_jobs import shutdown_manager
+    shutdown_manager()
+
+
 @app.on_event("startup")
 def start_background_task():
     global BACKGROUND_THREAD

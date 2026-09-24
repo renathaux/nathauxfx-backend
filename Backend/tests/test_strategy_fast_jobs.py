@@ -32,6 +32,7 @@ def test_worker_failure_publishes_failed_not_partial(tmp_path,payload,monkeypatc
         returncode=1
         def __init__(self,*a,**kw):pass
         def poll(self):return 1
+        def wait(self,timeout=None):return 1
     monkeypatch.setattr(module.subprocess,'Popen',FailedProcess)
     jobs=FastJobs(tmp_path,start_worker=False);j=jobs.create('a',payload)
     jobs._work()
@@ -74,7 +75,9 @@ def test_queued_workers_never_overlap(tmp_path,payload,monkeypatch):
             assert not live, 'second heavy worker started before first exited'
             self.directory = module.Path(args[-1])
             live.append(self)
+        def wait(self,timeout=None):return self.returncode
         def poll(self):
+            if self.returncode is not None:return self.returncode
             write_json(self.directory/'result.json',{'ok':True})
             self.returncode = 0
             live.remove(self)
