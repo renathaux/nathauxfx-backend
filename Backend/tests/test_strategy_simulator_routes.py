@@ -253,3 +253,61 @@ def test_route_forwards_simulator_continuation(monkeypatch):
     assert result["ok"] is True
     assert calls["continuation"] == continuation
     assert calls["finalize_open_trade"] is False
+
+
+def fast_payload(**overrides):
+    values = payload().model_dump(exclude={'mode', 'candles_5m', 'continuation', 'finalize_open_trade'})
+    values.update(overrides)
+    return route.FastJobRequest(**values)
+
+
+@pytest.mark.parametrize('operation', ['create', 'get', 'cancel'])
+def test_fast_job_routes_require_authenticated_actor_before_job_access(monkeypatch, operation):
+    calls = []
+    def denied(request, mutation=False):
+        calls.append(mutation)
+        raise HTTPException(status_code=401, detail='AUTHENTICATION_REQUIRED')
+    monkeypatch.setattr(route, '_actor', denied)
+    monkeypatch.setattr(route, '_fast_jobs', lambda: pytest.fail('must authenticate first'))
+    with pytest.raises(HTTPException) as exc:
+        if operation == 'create': route.create_fast_job(fast_payload(), SimpleNamespace())
+        elif operation == 'get': route.get_fast_job('job', SimpleNamespace())
+        else: route.cancel_fast_job('job', SimpleNamespace())
+    assert exc.value.status_code == 401
+    assert calls == [operation != 'get']
+
+
+def test_fast_job_captures_read_only_account_balance_and_owner(monkeypatch, tmp_path):
+    from services.strategy_fast_jobs import FastJobs
+    jobs = FastJobs(tmp_path, start_worker=False)
+    actors = []
+    def actor(request, mutation=False):
+        actors.append(mutation)
+        return {'email': 'alice@example.com'}
+    @contextmanager
+    def pinned(): yield SimpleNamespace(scope='CTRADER:DEMO:123')
+    monkeypatch.setattr(route, '_actor', actor)
+    monkeypatch.setattr(route, '_fast_jobs', lambda: jobs)
+    monkeypatch.setattr(route, 'pinned_account', pinned)
+    monkeypatch.setattr(route, 'get_ctrader_account_snapshot', lambda: {'balance': 12345})
+    created = route.create_fast_job(fast_payload(), SimpleNamespace())
+    import json
+    saved = json.loads((tmp_path / created['job_id'] / 'input.json').read_text())
+    assert saved['starting_balance'] == 12345
+    assert saved['account_scope'] == 'CTRADER:DEMO:123'
+    assert actors == [True]
+    monkeypatch.setattr(route, '_actor', lambda request, mutation=False: {'email': 'bob@example.com'})
+    for operation in (route.get_fast_job, route.cancel_fast_job):
+        with pytest.raises(HTTPException) as exc: operation(created['job_id'], SimpleNamespace())
+        assert exc.value.status_code == 404
+
+
+@pytest.mark.parametrize('overrides', [
+    {'end': '2036-09-02T00:00:00Z'}, {'end': '2026-08-01T00:00:00Z'},
+    {'start': '2026-09-01T00:00:00'}, {'symbol': 'XAUUSD'},
+])
+def test_fast_job_rejects_invalid_range_and_symbol_before_account_read(monkeypatch, overrides):
+    monkeypatch.setattr(route, '_actor', lambda request, mutation=False: {'email': 'alice@example.com'})
+    monkeypatch.setattr(route, '_fast_jobs', lambda: pytest.fail('invalid payload'))
+    with pytest.raises(HTTPException) as exc: route.create_fast_job(fast_payload(**overrides), SimpleNamespace())
+    assert exc.value.status_code == 400

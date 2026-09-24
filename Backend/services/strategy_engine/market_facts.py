@@ -13,6 +13,8 @@ POINT_SIZE = {"EURUSD": 0.00001, "XAUUSD": 0.01}
 
 
 def _utc(value) -> pd.Timestamp:
+    if isinstance(value, pd.Timestamp) and str(value.tzinfo) == "UTC":
+        return value
     stamp = pd.Timestamp(value)
     if stamp.tzinfo is None:
         return stamp.tz_localize("UTC")
@@ -84,12 +86,36 @@ def _swing_structure(swings: list[dict], timestamp: pd.Timestamp) -> str | None:
     return None
 
 
+class SwingDirectionIndex:
+    """Prefix state of confirmed swings; only confirmations at/before query time.
+
+    detect_confirmed_swings supplies stable confirmation order. No future swing
+    participates in the prefix direction, including tied confirmation times.
+    """
+    def __init__(self, swings):
+        self.times = []
+        self.directions = []
+        highs, lows = [], []
+        for swing in swings:
+            (highs if swing['type'] == 'HIGH' else lows).append(float(swing['price']))
+            direction = None
+            if len(highs) >= 2 and len(lows) >= 2:
+                if highs[-1] > highs[-2] and lows[-1] > lows[-2]: direction = 'BUY'
+                elif highs[-1] < highs[-2] and lows[-1] < lows[-2]: direction = 'SELL'
+            self.times.append(_utc(swing['confirmed_timestamp']))
+            self.directions.append(direction)
+    def at(self, stamp):
+        position = bisect_right(self.times, stamp) - 1
+        return self.directions[position] if position >= 0 else None
+
+
 class MarketFactsTimeline:
     def __init__(self, *, candles, events, trends, timestamps, trading_swings, structure_candles=None):
         self._structure_candles = structure_candles or candles
         self._candles = candles
         self._events = events
         self._trends = trends
+        self._trend_keys = sorted(trends)
         self._timestamps = sorted(_utc(value) for value in timestamps)
         self._trading_swings = list(trading_swings)
 
@@ -110,7 +136,7 @@ class MarketFactsTimeline:
         direct = self._trends.get(stamp)
         if direct is not None:
             return direct
-        keys = sorted(self._trends)
+        keys = self._trend_keys
         position = bisect_right(keys, stamp) - 1
         if position < 0:
             return TrendFacts(None, None, None, None)
@@ -141,12 +167,18 @@ class MarketFactsTimeline:
 
 
 def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_timeframe: str,
-                       trend_timeframe: str | None, structure_timeframe: str | None = None) -> MarketFactsTimeline:
+                       trend_timeframe: str | None, structure_timeframe: str | None = None, *, compact=False,
+                       precomputed_swings_by_tf=None) -> MarketFactsTimeline:
     public_symbol = str(symbol or "").upper().replace("/", "")
     trading_tf = str(trading_timeframe or "").lower()
     trading = _normalize(bundle.get(trading_tf))
     if trading.empty:
         raise ValueError("SIMULATION_HISTORY_UNAVAILABLE")
+
+    def swings_for(timeframe, frame):
+        if precomputed_swings_by_tf is not None and timeframe in precomputed_swings_by_tf:
+            return precomputed_swings_by_tf[timeframe]
+        return _serialise_confirmed_swings(frame)
 
     point_size = POINT_SIZE.get(public_symbol)
     structure_tf = structure_timeframe or trading_tf
@@ -158,22 +190,29 @@ def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_tim
     # the trading candle whose CLOSE matches its close, never at its open.
     minutes = {"5m": 5, "15m": 15, "1h": 60}
     availability_offset = pd.Timedelta(minutes=minutes[structure_tf] - minutes[trading_tf])
-    structure_candles = {}
-    for timestamp, row in structure_frame.iterrows():
-        stamp = _utc(timestamp) + availability_offset
-        span = max(float(row.High) - float(row.Low), 1e-12)
-        structure_candles[stamp] = CandleFacts(stamp, float(row.Open), float(row.High), float(row.Low), float(row.Close), abs(float(row.Close)-float(row.Open))/span*100.0)
-    trading_swings = _serialise_confirmed_swings(trading)
+    if compact:
+        from services.strategy_engine.market_facts_compact import CandleStore, CompactTimeline
+        structure_candles = CandleStore(structure_frame, availability_offset)
+        candles = CandleStore(trading)
+        trading_swings = swings_for(trading_tf, trading)
+    else:
+        structure_candles = {}
+        for row in structure_frame.itertuples():
+            timestamp = row.Index
+            stamp = _utc(timestamp) + availability_offset
+            span = max(float(row.High) - float(row.Low), 1e-12)
+            structure_candles[stamp] = CandleFacts(stamp, float(row.Open), float(row.High), float(row.Low), float(row.Close), abs(float(row.Close)-float(row.Open))/span*100.0)
+        trading_swings = swings_for(trading_tf, trading)
 
-    candles: dict[pd.Timestamp, CandleFacts] = {}
-    for timestamp, row in trading.iterrows():
-        span = max(float(row.High) - float(row.Low), 1e-12)
-        candles[_utc(timestamp)] = CandleFacts(
-            timestamp=_utc(timestamp),
-            open=float(row.Open), high=float(row.High), low=float(row.Low), close=float(row.Close),
-            body_percent=abs(float(row.Close) - float(row.Open)) / span * 100.0,
-        )
-
+        candles: dict[pd.Timestamp, CandleFacts] = {}
+        for row in trading.itertuples():
+            timestamp = row.Index
+            span = max(float(row.High) - float(row.Low), 1e-12)
+            candles[_utc(timestamp)] = CandleFacts(
+                timestamp=_utc(timestamp),
+                open=float(row.Open), high=float(row.High), low=float(row.Low), close=float(row.Close),
+                body_percent=abs(float(row.Close) - float(row.Open)) / span * 100.0,
+            )
     events: dict[pd.Timestamp, StructureEventFacts] = {}
     for raw in structure_analysis.get("events") or []:
         stamp = _utc(raw["timestamp"]) + availability_offset
@@ -194,46 +233,39 @@ def build_market_facts(bundle: dict[str, pd.DataFrame], symbol: str, trading_tim
     if trend_frame.empty:
         trend_frame = trading
         trend_tf = trading_tf
-    trend_analysis = analyze_structure(trend_frame, timeframe=trend_tf, point_size=point_size)
+    trend_analysis = structure_analysis if trend_tf == structure_tf else analyze_structure(trend_frame, timeframe=trend_tf, point_size=point_size)
     trend_events = sorted(
         [(_utc(item["timestamp"]), _direction(item.get("direction"))) for item in trend_analysis.get("events") or []],
         key=lambda pair: pair[0],
     )
-    trend_swings = _serialise_confirmed_swings(trend_frame)
+    trend_swings = trading_swings if trend_tf == trading_tf else swings_for(trend_tf, trend_frame)
+    swing_directions = SwingDirectionIndex(trend_swings)
     ema50 = trend_frame.Close.astype(float).ewm(span=50, adjust=False).mean()
     ema200 = trend_frame.Close.astype(float).ewm(span=200, adjust=False).mean()
 
     trend_at_source: dict[pd.Timestamp, TrendFacts] = {}
     latest_structure = None
     event_cursor = 0
-    for timestamp, row in trend_frame.iterrows():
+    for row, ema50_value, ema200_value in zip(trend_frame.itertuples(), ema50, ema200):
+        timestamp = row.Index
         stamp = _utc(timestamp)
         while event_cursor < len(trend_events) and trend_events[event_cursor][0] <= stamp:
             latest_structure = trend_events[event_cursor][1]
             event_cursor += 1
         trend_at_source[stamp] = TrendFacts(
             bos_choch_direction=latest_structure,
-            ema50_direction=_ema_direction(float(row.Close), float(ema50.loc[timestamp])),
-            ema200_direction=_ema_direction(float(row.Close), float(ema200.loc[timestamp])),
-            swing_structure_direction=_swing_structure(trend_swings, stamp),
+            ema50_direction=_ema_direction(float(row.Close), float(ema50_value)),
+            ema200_direction=_ema_direction(float(row.Close), float(ema200_value)),
+            swing_structure_direction=swing_directions.at(stamp),
         )
 
-    source_keys = sorted(trend_at_source)
-    trends: dict[pd.Timestamp, TrendFacts] = {}
-    for timestamp in trading.index:
-        stamp = _utc(timestamp)
-        position = bisect_right(source_keys, stamp) - 1
-        trends[stamp] = (
-            trend_at_source[source_keys[position]]
-            if position >= 0
-            else TrendFacts(None, None, None, None)
-        )
-
-    return MarketFactsTimeline(
+    timeline_class = CompactTimeline if compact else MarketFactsTimeline
+    timeline = timeline_class(
         candles=candles,
         events=events,
-        trends=trends,
+        trends=trend_at_source,
         timestamps=trading.index,
         trading_swings=trading_swings,
         structure_candles=structure_candles,
     )
+    return timeline

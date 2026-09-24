@@ -221,3 +221,62 @@ def manual_replay_history(payload: ManualHistoryRequest, request: Request):
         status_code=410,
         detail="MANUAL_REPLAY_HISTORY_MOVED_TO_STATIC_JSON",
     )
+
+
+class FastJobRequest(BaseModel):
+    strategy_id: str
+    strategy_name: str | None = None
+    strategy_definition: dict
+    symbol: Literal['EURUSD', 'XAUUSD']
+    start: datetime
+    end: datetime
+    risk_override: RiskOverride | None = None
+
+
+def _fast_jobs():
+    import os
+    from services.strategy_fast_jobs import manager
+    if os.environ.get('SIMULATOR_FAST_JOBS_ENABLED') != '1':
+        raise HTTPException(status_code=503, detail='Fast jobs are not enabled on this server yet.')
+    return manager()
+
+
+@router.post('/fast-jobs')
+def create_fast_job(payload: FastJobRequest, request: Request):
+    from routes.strategy_studio import owner_key
+    from services.strategy_studio_schema import normalize_definition
+    from services.strategy_fast_jobs import JobBusy
+    actor=_actor(request, mutation=True)
+    try:
+        definition=normalize_definition(payload.strategy_definition)
+        if payload.symbol not in definition['symbols']:raise ValueError('Simulation symbol is not allowed by this strategy.')
+        if payload.start.tzinfo is None or payload.end.tzinfo is None:raise ValueError('Backtest dates must include a timezone.')
+        days=(payload.end-payload.start).total_seconds()/86400
+        if not 0 < days <= 5*366:raise ValueError('Fast Backtest requires a valid range of at most five years.')
+        override=_risk_override(payload.risk_override)
+    except ValueError as exc:raise HTTPException(status_code=400,detail=str(exc)) from exc
+    jobs=_fast_jobs()
+    with pinned_account() as identity:
+        balance=_snapshot_balance(get_ctrader_account_snapshot())
+        if balance is None:raise HTTPException(status_code=409,detail='Selected cTrader account balance is unavailable or nonpositive')
+        job_payload=dict(strategy_id=payload.strategy_id,strategy_name=payload.strategy_name,strategy_definition=definition,symbol=payload.symbol,start=payload.start.isoformat(),end=payload.end.isoformat(),risk_override=override,starting_balance=balance,account_scope=identity.scope)
+    try:return jobs.create(owner_key(actor),job_payload)
+    except JobBusy as exc:raise HTTPException(status_code=429,detail=str(exc)) from exc
+
+
+@router.get('/fast-jobs/{job_id}')
+def get_fast_job(job_id: str, request: Request):
+    from routes.strategy_studio import owner_key
+    from services.strategy_fast_jobs import JobNotFound
+    actor=_actor(request)
+    try:return _fast_jobs().get(owner_key(actor),job_id)
+    except JobNotFound:raise HTTPException(status_code=404,detail='Backtest job not found')
+
+
+@router.post('/fast-jobs/{job_id}/cancel')
+def cancel_fast_job(job_id: str, request: Request):
+    from routes.strategy_studio import owner_key
+    from services.strategy_fast_jobs import JobNotFound
+    actor=_actor(request, mutation=True)
+    try:return _fast_jobs().cancel(owner_key(actor),job_id)
+    except JobNotFound:raise HTTPException(status_code=404,detail='Backtest job not found')

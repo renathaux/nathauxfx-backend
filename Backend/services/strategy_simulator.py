@@ -10,7 +10,7 @@ import hashlib
 
 import pandas as pd
 
-from services.strategy_engine.evaluator import evaluate_strategy
+from services.strategy_engine.evaluator import evaluate_strategy_normalized as evaluate_strategy
 from services.strategy_engine.market_facts import build_market_facts
 from services.strategy_engine.types import EvaluationState
 from services.strategy_studio_schema import normalize_definition
@@ -354,9 +354,9 @@ def _evaluation_reason(evaluation) -> tuple[str | None, str | None]:
 
 def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_override=None,
                    include_replay=False, evaluation_start=None, evaluation_end=None,
-                   continuation=None, finalize_open_trade=True) -> dict:
+                   continuation=None, finalize_open_trade=True, timeline=None, progress=None, is_cancelled=None) -> dict:
     value = normalize_definition(definition)
-    timeline = build_market_facts(
+    timeline = timeline or build_market_facts(
         market_bundle,
         symbol,
         value["trading_timeframe"],
@@ -393,7 +393,13 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
     window_start = pd.Timestamp(evaluation_start) if evaluation_start is not None else None
     window_end = pd.Timestamp(evaluation_end) if evaluation_end is not None else None
 
-    for timestamp in timeline.timestamps():
+    timestamps = timeline.timestamps()
+    for candle_index, timestamp in enumerate(timestamps):
+        if candle_index % 2048 == 0:
+            if is_cancelled and is_cancelled():
+                raise InterruptedError("Backtest cancelled")
+            if progress:
+                progress(candle_index, len(timestamps))
         stamp = pd.Timestamp(timestamp)
         if window_start is not None and stamp < window_start:
             continue
@@ -515,7 +521,7 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         reason = setup.get("last_reason") or "NO_VALID_ENTRY"
         rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
 
-    all_timestamps = timeline.timestamps()
+    all_timestamps = timestamps
     history_start = (
         pd.Timestamp(all_timestamps[0]).isoformat()
         if all_timestamps else None

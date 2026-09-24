@@ -258,6 +258,13 @@ def _risk_budget(definition: dict, account_balance: float, risk_override: dict |
 def evaluate_strategy(definition: dict, timeline, timestamp, prior_state: EvaluationState,
                       *, symbol: str, account_balance: float, risk_override: dict | None = None) -> EvaluationResult:
     value = normalize_definition(copy.deepcopy(definition))
+    return evaluate_strategy_normalized(value, timeline, timestamp, prior_state,
+        symbol=symbol, account_balance=account_balance, risk_override=risk_override)
+
+
+def evaluate_strategy_normalized(value: dict, timeline, timestamp, prior_state: EvaluationState,
+                                 *, symbol: str, account_balance: float, risk_override: dict | None = None) -> EvaluationResult:
+    """Internal simulation path; caller validates the immutable definition once."""
     public_symbol = str(symbol or "").upper().replace("/", "")
     if public_symbol not in value["symbols"]:
         raise ValueError("SIMULATION_SYMBOL_NOT_ALLOWED")
