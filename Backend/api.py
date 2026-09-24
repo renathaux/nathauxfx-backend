@@ -222,6 +222,10 @@ app.include_router(shadow_router)
 app.include_router(strategy_lab_router)
 app.include_router(admin_access_router)
 
+from services.heavy_replay_admission import HeavyReplayAdmission
+app.add_middleware(HeavyReplayAdmission)
+
+
 @app.middleware("http")
 async def log_unhandled_api_errors(request: Request, call_next):
     try:

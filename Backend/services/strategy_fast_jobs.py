@@ -97,13 +97,30 @@ class FastJobs:
             thread.join()
 
     def _run_worker(self, directory):
+        from services.heavy_replay_admission import heavy_replay_lease, HeavyReplayBusy
+        while not self.stopping.is_set():
+            lease = heavy_replay_lease()
+            try:
+                fd = lease.__enter__()
+            except HeavyReplayBusy:
+                if (directory / "cancel").exists():
+                    return "Backtest cancelled while waiting for admission."
+                self.stopping.wait(.25)
+                continue
+            try:
+                return self._run_owned_worker(directory, fd)
+            finally:
+                lease.__exit__(None, None, None)
+        return "Backtest manager is shutting down."
+
+    def _run_owned_worker(self, directory, lease_fd):
         """Own the child until it has exited AND been reaped, even on exceptions."""
         process = None
         try:
             process = subprocess.Popen(
                 [sys.executable, str(Path(__file__).resolve().parents[1] / 'fast_backtest_worker.py'), str(directory)],
                 cwd=Path(__file__).resolve().parents[1],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=(lease_fd,),
             )
             deadline = time.monotonic() + 600
             while process.poll() is None:
