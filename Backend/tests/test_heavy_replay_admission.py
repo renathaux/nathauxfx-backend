@@ -45,7 +45,7 @@ def test_all_heavy_http_routes_share_fast_worker_lease(tmp_path,monkeypatch):
     async def app(scope,receive,send):called.append(scope['path'])
     gate=HeavyReplayAdmission(app)
     async def run():
-        for path in ['/strategy-simulator/run','/strategy-lab/replay','/strategy-simulator/manual-history']:
+        for path in ['/strategy-simulator/run','/strategy-lab/replay','/strategy-simulator/manual-history','/strategy-studio/parity/run']:
             messages=[]
             async def send(value):messages.append(value)
             with heavy_replay_lease():
@@ -55,3 +55,18 @@ def test_all_heavy_http_routes_share_fast_worker_lease(tmp_path,monkeypatch):
         await gate({'type':'http','method':'POST','path':'/strategy-simulator/run'},None,None)
         assert called==['/strategy-simulator/run']
     asyncio.run(run())
+
+
+def test_studio_readiness_does_not_compute_while_heavy_job_runs(tmp_path, monkeypatch):
+    from routes import strategy_studio as studio
+    monkeypatch.setenv('HEAVY_REPLAY_LOCK_PATH', str(tmp_path / 'heavy.lock'))
+    calls = []
+    monkeypatch.setattr(studio, 'has_unresolved_studio_reconciliation', lambda owner: False)
+    monkeypatch.setattr(studio, '_active_strategy', lambda owner: calls.append(owner))
+    with heavy_replay_lease():
+        result = studio.evaluate_live_handoff_readiness('owner')
+    assert not calls
+    assert result['ready'] is False
+    assert result['reason'] == 'HEAVY_BACKTEST_BUSY'
+    studio.evaluate_live_handoff_readiness('owner')
+    assert calls == ['owner']

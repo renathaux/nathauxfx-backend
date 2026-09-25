@@ -155,6 +155,17 @@ def _unavailable_readiness(reason: str) -> dict:
 
 
 def evaluate_live_handoff_readiness(owner: str) -> dict:
+    # Status polling also computes historical parity. Share admission with FAST
+    # without locking broker execution or the handoff-disable action.
+    from services.heavy_replay_admission import heavy_replay_lease, HeavyReplayBusy
+    try:
+        with heavy_replay_lease():
+            return _evaluate_live_handoff_readiness(owner)
+    except HeavyReplayBusy:
+        return _unavailable_readiness("HEAVY_BACKTEST_BUSY")
+
+
+def _evaluate_live_handoff_readiness(owner: str) -> dict:
     """Recompute entry parity from durable selected-account candles.
 
     Readiness is deliberately not persisted: every status read and every enable
@@ -435,6 +446,8 @@ def strategy_live_handoff(payload: LiveHandoffRequest, request: Request):
         }
 
     readiness = evaluate_live_handoff_readiness(owner)
+    if readiness.get("reason") == "HEAVY_BACKTEST_BUSY":
+        raise HTTPException(status_code=429, detail="HEAVY_BACKTEST_BUSY")
     active_strategy_id = readiness.get("active_strategy_id")
     if not active_strategy_id:
         raise HTTPException(

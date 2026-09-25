@@ -273,3 +273,17 @@ def test_unresolved_strategy_studio_reconciliation_detection(tmp_path):
 
     assert detector("user:1", factory) is True
     assert detector("user:2", factory) is False
+
+
+def test_live_handoff_busy_reports_admission_without_changing_state(monkeypatch, tmp_path):
+    from services.heavy_replay_admission import heavy_replay_lease
+    _auth(monkeypatch)
+    monkeypatch.setenv('HEAVY_REPLAY_LOCK_PATH', str(tmp_path / 'heavy.lock'))
+    setter = MagicMock()
+    monkeypatch.setattr(route_module, 'set_studio_live_state', setter)
+    with heavy_replay_lease():
+        response = _client().post('/strategy-studio/live-handoff', json={
+            'enabled': True, 'confirm': True, 'strategy_id': 'strat_1'})
+    assert response.status_code == 429
+    assert response.json()['detail'] == 'HEAVY_BACKTEST_BUSY'
+    setter.assert_not_called()

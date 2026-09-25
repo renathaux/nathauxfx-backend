@@ -29,7 +29,7 @@ def heavy_replay_lease():
 
 class HeavyReplayAdmission:
     """Hold the same lease through the legacy response's serialization/send."""
-    PATHS = {'/strategy-simulator/run', '/strategy-lab/replay', '/strategy-simulator/manual-history'}
+    PATHS = {'/strategy-simulator/run', '/strategy-lab/replay', '/strategy-simulator/manual-history', '/strategy-studio/parity/run'}
 
     def __init__(self, app):
         self.app = app
