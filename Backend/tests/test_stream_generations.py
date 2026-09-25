@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import os
 import json
 import pandas as pd
 import pytest
@@ -14,8 +15,18 @@ KEY = "XAUUSD~8EA44F1114"
 
 @pytest.fixture
 def Session(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path}/generations.db")
-    Base.metadata.create_all(engine)
+    postgres_url = os.getenv("STREAM_GENERATION_POSTGRES_TEST_URL")
+    if postgres_url:
+        engine = create_engine(postgres_url, pool_pre_ping=True)
+        # The PostgreSQL URL must point to a disposable verification database.
+        # Rebuild the schema for every test so the existing SQLite-oriented
+        # suite exercises the real PostgreSQL transaction/advisory-lock paths.
+        with engine.begin() as conn:
+            Base.metadata.drop_all(conn, checkfirst=True)
+            Base.metadata.create_all(conn)
+    else:
+        engine = create_engine(f"sqlite:///{tmp_path}/generations.db")
+        Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     t = pd.Timestamp("2026-09-22T03:00:00Z")
     with factory() as s:
@@ -61,7 +72,17 @@ def Session(tmp_path):
                 )
             )
         s.commit()
-    return factory
+    try:
+        yield factory
+    finally:
+        engine.dispose()
+        if postgres_url:
+            cleanup_engine = create_engine(postgres_url)
+            try:
+                with cleanup_engine.begin() as conn:
+                    Base.metadata.drop_all(conn, checkfirst=True)
+            finally:
+                cleanup_engine.dispose()
 
 
 def history():
