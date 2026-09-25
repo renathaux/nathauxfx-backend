@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-sqlalchemy
+sqlalchemy==2.0.54
 alembic
 psycopg2-binary
 cryptography
