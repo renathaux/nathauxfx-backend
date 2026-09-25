@@ -298,3 +298,20 @@ def test_mixed_timestamp_precision_preserved_across_months(dataset):
     result = load(dataset)
     frames = [history._month_frame(json.loads((dataset / 'XAUUSD' / f'{month}.json').read_text()), 'XAUUSD', month, pd.Timestamp('2024-01-25', tz='UTC'), pd.Timestamp('2024-02-01T00:10Z')) for month in result.months]
     pd.testing.assert_frame_equal(result.frame, pd.concat(frames).sort_index(), check_exact=True)
+
+
+def test_bounded_windows_preserve_full_job_fingerprint(dataset):
+    start='2024-01-31T23:55:00Z';end='2024-02-01T00:10:00Z'
+    expected=history.load_fast_history('XAUUSD',start,end,0,history_dir=dataset)
+    fingerprint=history.HistoryFingerprint('XAUUSD',end)
+    for left,right in [(start,'2024-02-01T00:00:00Z'),('2024-02-01T00:00:00Z',end)]:
+        history.load_fast_history('XAUUSD',left,right,0,history_dir=dataset,fingerprint=fingerprint)
+    assert fingerprint.hexdigest()==expected.history_hash
+
+
+def test_memory_first_download_bypasses_both_caches(monkeypatch):
+    monkeypatch.setattr(history,'_read_disk',lambda *args: pytest.fail('disk cache forbidden'))
+    monkeypatch.setattr(history,'_write_disk',lambda *args: pytest.fail('disk cache forbidden'))
+    monkeypatch.setattr(history,'_download',lambda url:b'{}')
+    assert history._read_file('manifest.json',None,history.DEFAULT_HISTORY_REVISION,retain_in_memory=False,use_disk_cache=False)==b'{}'
+    assert history.history_file_cache_info()['entries']==0

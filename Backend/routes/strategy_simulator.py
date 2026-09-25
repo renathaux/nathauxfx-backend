@@ -269,7 +269,7 @@ def get_fast_job(job_id: str, request: Request):
     from routes.strategy_studio import owner_key
     from services.strategy_fast_jobs import JobNotFound
     actor=_actor(request)
-    try:return _fast_jobs().get(owner_key(actor),job_id)
+    try:return _fast_jobs().response(owner_key(actor),job_id)
     except JobNotFound:raise HTTPException(status_code=404,detail='Backtest job not found')
 
 

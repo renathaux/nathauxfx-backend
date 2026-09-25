@@ -29,3 +29,30 @@ def test_cross_boundary_diagnostics_merge_once_and_keep_compounded_equity():
     assert d['warmup_candles'] == 7 and d['no_setup_reasons'] == {'NO_STRUCTURE': 4}
     # Aggregation must not mutate continuation/source diagnostics.
     assert waiting['passed_stages'] == ['trend', 'structure'] and waiting['signaled'] is False
+
+
+def test_spooled_results_read_one_chunk_at_a_time_and_cleanup(tmp_path):
+    from services.strategy_fast_results import DiskResults
+    import weakref
+    class Result(dict): pass
+    with DiskResults(tmp_path) as chunks:
+        directory=chunks.directory
+        result=Result(trades=[],diagnostics={})
+        ref=weakref.ref(result)
+        chunks.append(result)
+        del result
+        assert ref() is None
+        assert len(chunks)==1 and chunks[0]=={'trades':[],'diagnostics':{}}
+        assert list(chunks)==[chunks[0]]
+    assert not directory.exists()
+
+
+def test_spool_cleanup_on_exception(tmp_path):
+    import pytest
+    from services.strategy_fast_results import DiskResults
+    with pytest.raises(RuntimeError):
+        with DiskResults(tmp_path) as chunks:
+            directory=chunks.directory
+            chunks.append({'trades':[]})
+            raise RuntimeError('cancelled during evaluation')
+    assert not directory.exists()

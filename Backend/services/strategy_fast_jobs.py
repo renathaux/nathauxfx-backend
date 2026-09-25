@@ -5,6 +5,7 @@ Job files are ephemeral, private, and bounded; no candles or jobs go to Neon.
 A service restart marks interrupted jobs failed; completed results expire.
 """
 import atexit
+import shutil
 import logging
 import json
 import os
@@ -15,6 +16,23 @@ import time
 import uuid
 from pathlib import Path
 
+def release_file_cache(stream, *, written=False):
+    """Large ephemeral outputs belong on disk, not in the cgroup page cache."""
+    if not hasattr(os, 'posix_fadvise'):
+        return
+    try:
+        if written:
+            stream.flush()
+            os.fdatasync(stream.fileno())
+        os.posix_fadvise(stream.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError:
+        pass  # Advisory only; correctness never depends on kernel eviction.
+
+
+def _large_output(path):
+    return path.name == 'result.json' or path.parent.name.startswith('chunks-')
+
+
 FAST_JOB_CONCURRENCY = 1  # One serial manager; never start overlapping workers.
 TERMINAL={'COMPLETED','FAILED','CANCELLED'}
 
@@ -23,12 +41,16 @@ def write_json(path,value):
     try:
         with temporary.open('w') as stream:
             json.dump(value,stream,allow_nan=False)
+            if _large_output(path):release_file_cache(stream, written=True)
         os.replace(temporary,path)
     finally:
         temporary.unlink(missing_ok=True)
 
 def read_json(path):
-    return json.loads(path.read_text())
+    with path.open() as stream:
+        value = json.load(stream)
+        if _large_output(path):release_file_cache(stream)
+        return value
 
 class JobNotFound(Exception):pass
 class JobBusy(Exception):pass
@@ -39,6 +61,7 @@ class FastJobs:
         self.lock=threading.RLock();self.start_worker=start_worker;self.ttl=ttl;self.max_jobs=max_jobs
         self.thread=None;self.active_job=None;self.stopping=threading.Event()
         for path in self.root.glob('*/state.json'):
+            _cleanup_scratch(path.parent)
             value=read_json(path)
             if value['status'] not in TERMINAL:
                 value.update(status='FAILED',error='Backtest interrupted by service restart.',completed_at=time.time());write_json(path,value)
@@ -69,7 +92,7 @@ class FastJobs:
     def _path(self,job_id):
         if len(job_id)!=32 or any(c not in '0123456789abcdef' for c in job_id):raise JobNotFound()
         return self.root/job_id/'state.json'
-    def get(self,owner,job_id):
+    def get(self,owner,job_id, *, include_result=True):
         with self.lock:
             try:value=read_json(self._path(job_id))
             except (FileNotFoundError,ValueError):raise JobNotFound()
@@ -77,17 +100,51 @@ class FastJobs:
             value.pop('owner');value['result']=None
             progress_path=self.root/job_id/'progress.json'
             if value['status']=='RUNNING' and progress_path.exists():value.update(read_json(progress_path))
-            if value['status']=='COMPLETED':value['result']=read_json(self.root/job_id/'result.json')
+            if include_result and value['status']=='COMPLETED':value['result']=read_json(self.root/job_id/'result.json')
             return value
+    def response(self, owner, job_id):
+        """Keep the existing JSON envelope without materializing its result in API RAM."""
+        from starlette.responses import StreamingResponse
+        from starlette.background import BackgroundTask
+        with self.lock:
+            value = self.get(owner, job_id, include_result=False)
+            if value['status'] != 'COMPLETED':
+                return value
+            # Open under the eviction lock. An unlinked file remains readable
+            # through this owned descriptor until delivery or disconnect.
+            stream = (self.root / job_id / 'result.json').open('rb')
+        value.pop('result')
+        prefix = (json.dumps(value, allow_nan=False)[:-1] + ', "result":').encode()
+        def close_stream():
+            if not stream.closed:
+                release_file_cache(stream)
+                stream.close()
+        def chunks():
+            try:
+                yield prefix
+                while block := stream.read(65536):
+                    yield block
+                yield b'}'
+            finally:
+                close_stream()
+        class OwnedResponse(StreamingResponse):
+            async def __call__(self, scope, receive, send):
+                try:
+                    await super().__call__(scope, receive, send)
+                finally:
+                    close_stream()
+        return OwnedResponse(chunks(), media_type='application/json',
+                             background=BackgroundTask(close_stream))
+
     def cancel(self,owner,job_id):
         with self.lock:
-            self.get(owner,job_id)
+            self.get(owner,job_id, include_result=False)
             path=self._path(job_id);value=read_json(path)
             if value['status'] not in TERMINAL:
                 (path.parent/'cancel').touch()
                 value.update(status='CANCELLED',current_stage='Cancelled',completed_at=time.time(),error='Backtest cancelled. No completed result was changed.')
                 write_json(path,value)
-            return self.get(owner,job_id)
+            return self.response(owner,job_id)
     def close(self):
         """Stop admission and wait for the owning manager to reap its child."""
         with self.lock:
@@ -122,7 +179,7 @@ class FastJobs:
                 cwd=Path(__file__).resolve().parents[1],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=(lease_fd,),
             )
-            deadline = time.monotonic() + 600
+            deadline = time.monotonic() + 1800
             while process.poll() is None:
                 if self.stopping.is_set() or (directory / 'cancel').exists() or time.monotonic() > deadline:
                     return 'Backtest worker timed out or was cancelled.'
@@ -189,6 +246,7 @@ class FastJobs:
                         raise interrupted
                 finally:
                     with self.lock:
+                        _cleanup_scratch(directory)
                         self.active_job = None
         finally:
             with self.lock:
@@ -196,6 +254,18 @@ class FastJobs:
                 # empty-queue return. Do not erase its thread reference.
                 if self.thread is threading.current_thread():
                     self.thread = None
+
+
+def _cleanup_scratch(directory):
+    # Only call after worker ownership has ended (or on process restart).
+    for path in directory.glob('chunks-*'):
+        if path.is_dir():
+            shutil.rmtree(path)
+    for path in directory.glob('*.tmp-*'):
+        path.unlink(missing_ok=True)
+    state_path = directory / 'state.json'
+    if state_path.exists() and read_json(state_path)['status'] != 'COMPLETED':
+        (directory / 'result.json').unlink(missing_ok=True)
 
 
 def _terminate_and_reap(process, grace_seconds=5):

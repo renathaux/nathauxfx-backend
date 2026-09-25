@@ -64,3 +64,39 @@ def aggregate_results(results, starting_balance):
     result.pop('replay', None)
     result.update(starting_balance=starting_balance, trades=trades, metrics=metrics, equity_curve=curve, diagnostics=diagnostics, batch_chunks=len(results))
     return result
+
+
+class DiskResults:
+    """Reiterable window results; only the current decoded chunk resides in RAM."""
+    def __init__(self, parent=None):
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        self._temporary = TemporaryDirectory(prefix='chunks-', dir=parent)
+        self.directory = Path(self._temporary.name)
+        self.count = 0
+
+    def append(self, result):
+        from services.strategy_fast_jobs import write_json
+        write_json(self.directory / f'{self.count}.json', result)
+        self.count += 1
+
+    def __len__(self):
+        return self.count
+
+    def __getitem__(self, index):
+        from services.strategy_fast_jobs import read_json
+        if index < 0:
+            index += self.count
+        if not 0 <= index < self.count:
+            raise IndexError(index)
+        return read_json(self.directory / f'{index}.json')
+
+    def __iter__(self):
+        for index in range(self.count):
+            yield self[index]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self._temporary.cleanup()

@@ -54,6 +54,39 @@ class LoadedHistory:
         return self.history_hash
 
 
+class HistoryFingerprint:
+    """Hash each source month once, without retaining its bytes across windows."""
+    def __init__(self, symbol, end):
+        self.symbol = symbol
+        self.end = _utc(end)
+        self.digest = None
+        self.seen = {}
+        self.manifest_hash = None
+
+    def begin(self, revision, history_start, manifest):
+        content_hash = hashlib.sha256(manifest).digest()
+        if self.digest is None:
+            self.digest = hashlib.sha256()
+            self.digest.update(f"{revision}:{self.symbol}:{history_start.isoformat()}:{self.end.isoformat()}".encode())
+            self.digest.update(manifest)
+            self.manifest_hash = content_hash
+        elif self.manifest_hash != content_hash:
+            raise ValueError('STATIC_HISTORY_CHANGED_DURING_JOB')
+
+    def month(self, month, raw):
+        content_hash = hashlib.sha256(raw).digest()
+        if month in self.seen:
+            if self.seen[month] != content_hash:
+                raise ValueError('STATIC_HISTORY_CHANGED_DURING_JOB')
+            return
+        self.seen[month] = content_hash
+        self.digest.update(month.encode())
+        self.digest.update(raw)
+
+    def hexdigest(self):
+        return self.digest.hexdigest() if self.digest is not None else None
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise ValueError("STATIC_HISTORY_REDIRECT_REJECTED")
@@ -179,7 +212,7 @@ def history_file_cache_info() -> dict:
         return {"bytes": _CACHE_BYTES, "entries": len(_FILES), "limit_bytes": MAX_CACHE_BYTES}
 
 
-def _read_file(relative: str, directory: Path | None, revision: str, *, retain_in_memory: bool = True) -> bytes:
+def _read_file(relative: str, directory: Path | None, revision: str, *, retain_in_memory: bool = True, use_disk_cache: bool = True) -> bytes:
     global _CACHE_BYTES
     relative = _validate_relative(relative)
     revision = _validate_revision(revision)
@@ -189,6 +222,8 @@ def _read_file(relative: str, directory: Path | None, revision: str, *, retain_i
         if len(value) > MAX_FILE_BYTES:
             raise ValueError("STATIC_HISTORY_FILE_TOO_LARGE")
         return value
+    if not use_disk_cache:
+        return _download(f"{_RAW_ROOT}{revision}/Frontend/replay-data/{relative}")
     key = (revision, relative)
     with _LOCK:
         if retain_in_memory and key in _FILES:
@@ -256,7 +291,7 @@ def _month_frame(payload: dict, symbol: str, month: str, history_start, end) -> 
     return pd.DataFrame(values, index=timestamps[selected], columns=_COLUMNS).sort_index()
 
 
-def load_fast_history(symbol: str, start, end, warmup_days: int = 7, *, history_dir=None, revision=None, progress=None) -> LoadedHistory:
+def load_fast_history(symbol: str, start, end, warmup_days: int = 7, *, history_dir=None, revision=None, progress=None, use_disk_cache=True, fingerprint=None, require_evaluation=True) -> LoadedHistory:
     """Load one numeric 5m frame, with [start-warmup, end) candles.
 
     Configuration is server-owned. Requests must never forward user-selected
@@ -275,7 +310,8 @@ def load_fast_history(symbol: str, start, end, warmup_days: int = 7, *, history_
     revision = _validate_revision(revision or os.environ.get("SIMULATOR_HISTORY_REVISION", DEFAULT_HISTORY_REVISION))
     directory_value = history_dir if history_dir is not None else os.environ.get("SIMULATOR_HISTORY_DIR")
     directory = Path(directory_value).expanduser().resolve() if directory_value else None
-    manifest_raw = _read_file("manifest.json", directory, revision, retain_in_memory=False)
+    cache_options = {} if use_disk_cache else {"use_disk_cache": False}
+    manifest_raw = _read_file("manifest.json", directory, revision, retain_in_memory=False, **cache_options)
     manifest = json.loads(manifest_raw)
     if manifest.get("version") != 1 or manifest.get("base_timeframe") != "5m":
         raise ValueError("STATIC_HISTORY_MANIFEST_INVALID")
@@ -292,6 +328,8 @@ def load_fast_history(symbol: str, start, end, warmup_days: int = 7, *, history_
     missing = set(months) - set(available["months"])
     if missing:
         raise ValueError(f"STATIC_HISTORY_MONTH_UNAVAILABLE: {','.join(sorted(missing))}")
+    if fingerprint is not None:
+        fingerprint.begin(revision, history_start, manifest_raw)
     digest = hashlib.sha256()
     digest.update(f"{revision}:{symbol}:{history_start.isoformat()}:{end.isoformat()}".encode())
     digest.update(manifest_raw)
@@ -309,7 +347,9 @@ def load_fast_history(symbol: str, start, end, warmup_days: int = 7, *, history_
     position = 0
     timestamp_unit = None
     for month_index, month in enumerate(months):
-        raw = _read_file(f"{symbol}/{month}.json", directory, revision, retain_in_memory=False)
+        raw = _read_file(f"{symbol}/{month}.json", directory, revision, retain_in_memory=False, **cache_options)
+        if fingerprint is not None:
+            fingerprint.month(month, raw)
         digest.update(month.encode())
         digest.update(raw)
         raw_bytes += len(raw)
@@ -338,7 +378,7 @@ def load_fast_history(symbol: str, start, end, warmup_days: int = 7, *, history_
     stamps.resize(position, refcheck=False)
     index = pd.DatetimeIndex(stamps.view(f"datetime64[{timestamp_unit}]"), tz="UTC")
     frame = pd.DataFrame(values, index=index, columns=_COLUMNS, copy=False)
-    if frame.empty or not (frame.index >= start).any():
+    if require_evaluation and (frame.empty or not (frame.index >= start).any()):
         raise ValueError("STATIC_HISTORY_RANGE_UNAVAILABLE")
     # Each month is already sorted and checked for duplicate timestamps and
     # month ownership, so chronological disjoint months need no global sort

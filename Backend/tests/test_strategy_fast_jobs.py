@@ -117,3 +117,29 @@ assert not set(blocked).intersection(sys.modules), set(blocked).intersection(sys
 assert services.__spec__.loader.__class__.__name__ == 'NamespaceLoader'
 '''
     subprocess.run([sys.executable,'-c',script],cwd=backend,check=True)
+
+
+def test_http_result_stream_does_not_decode_result_and_survives_eviction(tmp_path,payload,monkeypatch):
+    import asyncio
+    import services.strategy_fast_jobs as module
+    jobs=FastJobs(tmp_path,start_worker=False)
+    created=jobs.create('alice',payload);directory=tmp_path/created['job_id']
+    state=read_json(directory/'state.json');state['status']='COMPLETED';write_json(directory/'state.json',state)
+    expected={'trades':[{'pnl':n} for n in range(20000)]}
+    write_json(directory/'result.json',expected)
+    original=module.read_json
+    def read(path):
+        assert path.name!='result.json', 'HTTP must stream result bytes, not decode the full file'
+        return original(path)
+    monkeypatch.setattr(module,'read_json',read)
+    with pytest.raises(JobNotFound): jobs.response('bob',created['job_id'])
+    response=jobs.response('alice',created['job_id'])
+    import shutil
+    shutil.rmtree(directory)
+    async def consume():
+        chunks=[chunk async for chunk in response.body_iterator]
+        await response.background()
+        assert max(map(len,chunks))<=65536
+        return json.loads(b''.join(chunks))
+    actual=asyncio.run(consume())
+    assert actual['result']==expected and 'owner' not in actual
