@@ -25,7 +25,10 @@ JSON envelope in 64 KiB blocks rather than decoding/copying the entire result
 in the API process. Linux advisory file-cache eviction follows large temporary
 file writes/reads. Correctness does not depend on eviction succeeding.
 
-Scratch files are removed on normal completion and exceptions. The owning
+Scratch files are removed on normal completion and exceptions. The API manager
+collects unreachable closed HTTP connection/task cycles at the job boundary,
+after reaping and releasing owned files, so repeated polling does not cause
+allocator growth across jobs. This does not replace explicit resource cleanup. The owning
 manager removes abandoned scratch and incomplete results after reaping a
 cancelled, timed-out or failed worker, and on restart. Completed result files
 retain the existing one-hour/20-job retention policy so polling still works;

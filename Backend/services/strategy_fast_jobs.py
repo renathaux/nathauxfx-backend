@@ -5,6 +5,7 @@ Job files are ephemeral, private, and bounded; no candles or jobs go to Neon.
 A service restart marks interrupted jobs failed; completed results expire.
 """
 import atexit
+import gc
 import shutil
 import logging
 import json
@@ -248,6 +249,10 @@ class FastJobs:
                     with self.lock:
                         _cleanup_scratch(directory)
                         self.active_job = None
+                    # Long jobs can accumulate unreachable ASGI connection/task
+                    # cycles from polling. Reap and release owned files first;
+                    # collect at this boundary so subsequent jobs reuse memory.
+                    gc.collect()
         finally:
             with self.lock:
                 # A new create() may have started another manager after the
