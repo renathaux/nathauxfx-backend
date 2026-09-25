@@ -113,6 +113,14 @@ class ReadyExecutionHandoffTests(unittest.TestCase):
         identity = patch('ctrader_account_context.selected_identity', return_value=AccountIdentity('handoff-test', 'demo'))
         identity.start()
         self.addCleanup(identity.stop)
+        # These are V3B handoff tests. Studio selection and configured RR are
+        # external settings boundaries, not a dependency on a developer database.
+        studio_owner = patch.object(api, "get_enabled_studio_live_owner", return_value=None)
+        studio_owner.start()
+        self.addCleanup(studio_owner.stop)
+        rr_window = patch.object(api, "get_configured_rr_window", return_value=(1.0, 3.0))
+        rr_window.start()
+        self.addCleanup(rr_window.stop)
         self.auto_enabled = api.LIVE_AUTO_TRADE_ENABLED.get("enabled")
         self.account_state = copy.deepcopy(api.LIVE_ACCOUNT_STATE)
         self.trade_history = copy.deepcopy(api.LIVE_TRADE_HISTORY)

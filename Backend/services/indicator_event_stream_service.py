@@ -582,7 +582,12 @@ def read_authoritative_event(event_id, *, session_factory=None):
             IndicatorEvent.event_id == str(event_id),
             IndicatorEvent.configuration_version == CONFIGURATION_VERSION,
         ).one_or_none()
-        return _event_payload(row) if row is not None else None
+        if row is None:
+            return None
+        from stream_generations import event_allowed
+        if not event_allowed(session, row.event_id):
+            return None
+        return _event_payload(row)
     finally:
         session.close()
 
@@ -618,6 +623,8 @@ def get_authoritative_structure(
         session = factory()
         try:
             now = datetime.now(timezone.utc)
+            from stream_generations import require_active
+            require_active(session, normalized_symbol, normalized_timeframe, for_update=True)
             _database_lock(session, normalized_symbol, normalized_timeframe)
             state = session.query(IndicatorStreamState).filter(
                 IndicatorStreamState.symbol == normalized_symbol,
@@ -912,6 +919,9 @@ def get_authoritative_structure(
                 if state.origin_candle is None:
                     state.origin_candle = _db_datetime(canonical.index[0])
                 state.activation_watermark = last_candle
+            if creating_stream:
+                from stream_generations import register_initial
+                register_initial(session, normalized_symbol, normalized_timeframe, state)
             state.last_processed_candle = last_candle
             state.status = "READY"
             state.reconciliation_reason = None
@@ -996,6 +1006,8 @@ def read_authoritative_structure(
     factory = session_factory or SessionLocal
     session = factory()
     try:
+        from stream_generations import require_active
+        require_active(session, normalized_symbol, normalized_timeframe)
         state = session.query(IndicatorStreamState).filter(
             IndicatorStreamState.symbol == normalized_symbol,
             IndicatorStreamState.timeframe == normalized_timeframe,
@@ -1010,6 +1022,10 @@ def read_authoritative_structure(
             reason = state.reconciliation_reason or f"indicator stream is {state.status}"
             raise IndicatorStreamUnavailable(reason)
 
+        from stream_generations import generation_for_storage
+        generation = generation_for_storage(session, normalized_symbol, normalized_timeframe)
+        if generation and generation.generation > 1:
+            visible = _stored_frame(session.query(IndicatorCandle).filter_by(symbol=normalized_symbol,timeframe=normalized_timeframe).order_by(IndicatorCandle.candle_timestamp).all())
         analysis = analyzer(
             visible,
             timeframe=normalized_timeframe,
@@ -1076,7 +1092,8 @@ def update_event_lifecycle(
     with _STREAM_LOCK:
         session = factory()
         try:
-            if session.get(IndicatorEvent, str(event_id)) is None:
+            from stream_generations import event_allowed
+            if not event_allowed(session, event_id, m5_confirmation_identity, for_update=True, require_confirmation=normalized_status == "ELIGIBLE", confirmation_id=m5_confirmation_id, account_id=normalized_account):
                 return False
             row = session.query(IndicatorEventLifecycle).filter(
                 IndicatorEventLifecycle.event_id == str(event_id),

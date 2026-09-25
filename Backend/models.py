@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from db import Base
 
@@ -782,3 +783,54 @@ class FundamentalInsightSnapshot(Base):
     status = Column(String(32), nullable=False)
     response_json = Column(JSON, nullable=False)
     generated_at = Column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class IndicatorStreamGeneration(Base):
+    """Additive namespaces; legacy candle/event/execution rows never re-keyed."""
+
+    __tablename__ = "indicator_stream_generations"
+    __table_args__ = (
+        UniqueConstraint("storage_key", "timeframe", name="uq_generation_storage"),
+        Index(
+            "uq_generation_active",
+            "root_key",
+            "timeframe",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
+    )
+    root_key = Column(String(20), primary_key=True)
+    timeframe = Column(String(10), primary_key=True)
+    generation = Column(Integer, primary_key=True)
+    storage_key = Column(String(20), nullable=False)
+    scope = Column(String(100), nullable=True)
+    public_symbol = Column(String(20), nullable=False)
+    status = Column(String(16), nullable=False)
+    configuration_version = Column(String(50), nullable=False)
+    activation_watermark = Column(DateTime(timezone=True), nullable=True)
+    history_hash = Column(String(64), nullable=True)
+    predecessor_snapshot = Column(JSON, nullable=True)
+    bootstrap_state = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class IndicatorStreamHead(Base):
+    __tablename__ = "indicator_stream_heads"
+    root_key = Column(String(20), primary_key=True)
+    timeframe = Column(String(10), primary_key=True)
+    active_generation = Column(Integer, nullable=False)
+
+
+class StrategySetupGeneration(Base):
+    """Additive fence for Studio's independent evaluator/setup namespace."""
+
+    __tablename__ = "strategy_setup_generations"
+    setup_id = Column(
+        String(96), ForeignKey("strategy_setup_lifecycle.setup_id"), primary_key=True
+    )
+    root_key = Column(String(20), primary_key=True)
+    timeframe = Column(String(10), primary_key=True)
+    generation = Column(Integer, nullable=False)
+    event_time = Column(DateTime(timezone=True), nullable=False)
+    confirmation_time = Column(DateTime(timezone=True), nullable=False)

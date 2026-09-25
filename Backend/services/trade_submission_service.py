@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from db import SessionLocal
 from models import (
+    IndicatorEvent,
     ExecutionProtocolState,
     IndicatorEventLifecycle,
     StrategySetupLifecycle,
@@ -144,6 +145,9 @@ def _transition_lifecycle_status(session, attempt, allowed, status, now, *, resu
             StrategySetupLifecycle.status.in_(allowed),
         ).update(values, synchronize_session=False)
 
+    from stream_generations import event_allowed
+    if not event_allowed(session, attempt.event_id, for_update=True):
+        return 0
     lifecycle_values = {
         IndicatorEventLifecycle.status: status,
         IndicatorEventLifecycle.updated_at: now,
@@ -173,6 +177,10 @@ def claim_submission(event_id, mode, account_id, symbol, signal_setup_id, payloa
         if not verify_execution_protocol(session=session):
             session.rollback()
             return {"ok": False, "reason": "execution protocol fence absent or incompatible"}
+        from stream_generations import event_allowed
+        if not event_allowed(session, event_id, (payload or {}).get("m5_confirmation_identity"), for_update=True, require_confirmation=True, confirmation_id=(payload or {}).get("m5_confirmation_id"), account_id=account_id):
+            session.rollback()
+            return {"ok": False, "reason": "inactive or historical stream generation"}
         lifecycle = session.query(IndicatorEventLifecycle).filter(
             IndicatorEventLifecycle.event_id == str(event_id),
             IndicatorEventLifecycle.mode == str(mode).upper(),
@@ -182,6 +190,12 @@ def claim_submission(event_id, mode, account_id, symbol, signal_setup_id, payloa
         if lifecycle is None or str(lifecycle.status).upper() != "ELIGIBLE":
             session.rollback()
             return {"ok": False, "reason": "event is not atomically claimable", "status": getattr(lifecycle, "status", None), "idempotency_key": key}
+        from stream_generations import generation_for_storage
+        event = session.get(IndicatorEvent, str(event_id))
+        generation = generation_for_storage(session, event.symbol, event.timeframe)
+        if generation and generation.generation > 1 and (lifecycle.m5_confirmation_id != (payload or {}).get("m5_confirmation_id") or lifecycle.m5_confirmation_identity != (payload or {}).get("m5_confirmation_identity")):
+            session.rollback()
+            return {"ok": False, "reason": "confirmation differs from eligible generation lifecycle"}
         changed = session.query(IndicatorEventLifecycle).filter(
             IndicatorEventLifecycle.event_id == str(event_id),
             IndicatorEventLifecycle.mode == str(mode).upper(),
@@ -288,6 +302,10 @@ def claim_strategy_submission(setup_id, account_id, symbol, direction, payload, 
             StrategySetupLifecycle.symbol == public_symbol,
             StrategySetupLifecycle.direction == public_direction,
         ).with_for_update().one_or_none()
+        from stream_generations import studio_claim_allowed
+        if lifecycle is not None and not studio_claim_allowed(session, lifecycle):
+            session.rollback()
+            return {"ok": False, "reason": "inactive or historical Studio generation"}
         if lifecycle is None or str(lifecycle.status).upper() != "ELIGIBLE":
             session.rollback()
             return {

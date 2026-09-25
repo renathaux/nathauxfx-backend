@@ -5,7 +5,7 @@ import pandas as pd
 
 from db import SessionLocal
 from models import IndicatorCandle
-from services.indicator_stream_account_scope import storage_symbol_for_scope
+from services.indicator_stream_account_scope import storage_symbol_for_scope, active_storage_symbol
 
 
 _AGGREGATION = {
@@ -56,8 +56,8 @@ def load_simulation_5m(symbol: str, start, end, *, stream_scope: str, session_fa
     if end_utc <= start_utc:
         raise ValueError("SIMULATION_RANGE_INVALID")
 
-    storage_symbol = storage_symbol_for_scope(public_symbol, scope)
     factory = _factory(session_factory)
+    storage_symbol = active_storage_symbol(public_symbol, scope, "5m", session_factory=factory)
     with factory() as session:
         rows = (
             session.query(IndicatorCandle)
