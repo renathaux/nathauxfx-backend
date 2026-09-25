@@ -625,10 +625,10 @@ def apply(factory, history, *, approved_plan, fail_before_switch=False):
                         symbol=key,
                         timeframe=tf,
                         candle_timestamp=t.to_pydatetime(),
-                        open_price=r.Open,
-                        high_price=r.High,
-                        low_price=r.Low,
-                        close_price=r.Close,
+                        open_price=float(r.Open),
+                        high_price=float(r.High),
+                        low_price=float(r.Low),
+                        close_price=float(r.Close),
                         created_at=now,
                     )
                 )
