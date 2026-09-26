@@ -289,6 +289,17 @@ def sparse_gap(symbol, previous, following, minutes=5):
             return True
         if symbol == "XAUUSD" and 17 * 60 <= minute < 18 * 60:
             return True
+        # Exact authoritative cTrader XAUUSD Labor Day 2026 omission. The
+        # broker history closes after the 18:30 UTC bar and resumes at the
+        # normal 22:00 UTC reopen. Keep this exception date-bounded so an
+        # unrelated weekday gap still fails closed.
+        if (
+            symbol == "XAUUSD"
+            and t.date() == pd.Timestamp("2026-09-07", tz="UTC").date()
+            and pd.Timestamp("2026-09-07T18:45:00Z") <= t
+            < pd.Timestamp("2026-09-07T22:00:00Z")
+        ):
+            return True
         # Exact previously observed cTrader EURUSD daily rollover omission.
         if symbol == "EURUSD" and t.dayofweek < 5 and t.hour == 20 and t.minute >= 30:
             return True

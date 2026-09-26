@@ -447,6 +447,27 @@ def test_precise_market_closures(previous, following, expected):
     )
 
 
+def test_xauusd_labor_day_2026_closure_is_narrow_and_15m_only():
+    assert generations.sparse_gap(
+        "XAUUSD",
+        pd.Timestamp("2026-09-07T18:30Z"),
+        pd.Timestamp("2026-09-07T22:00Z"),
+        15,
+    )
+    assert not generations.sparse_gap(
+        "XAUUSD",
+        pd.Timestamp("2026-09-07T18:30Z"),
+        pd.Timestamp("2026-09-07T22:15Z"),
+        15,
+    )
+    assert not generations.sparse_gap(
+        "XAUUSD",
+        pd.Timestamp("2026-09-08T18:30Z"),
+        pd.Timestamp("2026-09-08T22:00Z"),
+        15,
+    )
+
+
 def add_future_event(Session, key, offset=1):
     with Session() as s:
         state = s.get(IndicatorStreamState, (key, "5m"))
