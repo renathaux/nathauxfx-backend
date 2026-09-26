@@ -435,9 +435,6 @@ def test_full_replay_parity_and_restart(incident):
         ("2026-09-22T18:00Z", "2026-09-22T22:55Z", False),
         ("2026-09-22T20:55Z", "2026-09-22T22:00Z", True),
         ("2026-09-18T20:55Z", "2026-09-20T22:00Z", True),
-        ("2026-09-07T18:30Z", "2026-09-07T22:00Z", True),
-        ("2026-09-07T18:30Z", "2026-09-07T22:15Z", False),
-        ("2026-09-08T18:30Z", "2026-09-08T22:00Z", False),
         ("2026-12-18T21:55Z", "2026-12-20T23:00Z", True),
     ],
 )
@@ -447,6 +444,27 @@ def test_precise_market_closures(previous, following, expected):
             "XAUUSD", pd.Timestamp(previous), pd.Timestamp(following)
         )
         == expected
+    )
+
+
+def test_xauusd_labor_day_2026_closure_is_narrow_and_15m_only():
+    assert generations.sparse_gap(
+        "XAUUSD",
+        pd.Timestamp("2026-09-07T18:30Z"),
+        pd.Timestamp("2026-09-07T22:00Z"),
+        15,
+    )
+    assert not generations.sparse_gap(
+        "XAUUSD",
+        pd.Timestamp("2026-09-07T18:30Z"),
+        pd.Timestamp("2026-09-07T22:15Z"),
+        15,
+    )
+    assert not generations.sparse_gap(
+        "XAUUSD",
+        pd.Timestamp("2026-09-08T18:30Z"),
+        pd.Timestamp("2026-09-08T22:00Z"),
+        15,
     )
 
 
