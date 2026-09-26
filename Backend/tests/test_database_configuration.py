@@ -63,6 +63,9 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "v3b_signal_transitions",
             "strategy_setup_lifecycle",
             "strategy_studio_live_state",
+            "indicator_stream_generations",
+            "indicator_stream_heads",
+            "strategy_setup_generations",
         }
         self.assertEqual(set(Base.metadata.tables), expected)
         legacy_tables = expected - {
@@ -96,6 +99,9 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "v3b_signal_transitions",
             "strategy_setup_lifecycle",
             "strategy_studio_live_state",
+            "indicator_stream_generations",
+            "indicator_stream_heads",
+            "strategy_setup_generations",
         }
         self.assertTrue(
             legacy_tables.issubset(set(inspect(db.engine).get_table_names()))
@@ -180,6 +186,9 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "v3b_signal_transitions",
             "strategy_setup_lifecycle",
             "strategy_studio_live_state",
+            "indicator_stream_generations",
+            "indicator_stream_heads",
+            "strategy_setup_generations",
         }
         self.assertTrue(source_tables.issubset(tables))
 
