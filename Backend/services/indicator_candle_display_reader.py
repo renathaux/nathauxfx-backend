@@ -11,6 +11,7 @@ from models import IndicatorCandle
 from services.indicator_stream_account_scope import (
     active_ctrader_stream_scope,
     storage_symbol_for_scope,
+    active_storage_symbol,
 )
 
 
@@ -89,12 +90,12 @@ def load_durable_indicator_candles(
     with session_factory() as session:
         for public_symbol in symbols:
             symbol_output = {}
-            storage_symbol = storage_symbol_for_scope(public_symbol, scope)
             for timeframe in timeframes:
                 normalized_timeframe = str(timeframe or "").lower()
                 minutes = _TIMEFRAME_MINUTES.get(normalized_timeframe)
                 if minutes is None:
                     continue
+                storage_symbol = active_storage_symbol(public_symbol, scope, normalized_timeframe, session_factory=session_factory)
                 rows = (
                     session.query(IndicatorCandle)
                     .filter(
@@ -169,6 +170,14 @@ def load_dashboard_display_candles(
             minutes = _TIMEFRAME_MINUTES.get(timeframe)
             if minutes is None:
                 continue
+            # Once cut over, canonical generation bars take precedence over caches.
+            from stream_generations import resolve, generation_for_storage
+            with session_factory() as selection_session:
+                key = resolve(selection_session, storage_symbol_for_scope(public_symbol, scope), timeframe)
+                generation = generation_for_storage(selection_session, key, timeframe)
+                if generation and generation.generation > 1:
+                    missing.setdefault(public_symbol, []).append(timeframe)
+                    continue
             cache_key = f"{scope}:{public_symbol}:{timeframe}"
             cached = cache.get(cache_key) if isinstance(cache, dict) else None
             health = health_reader(public_symbol, timeframe) or {}

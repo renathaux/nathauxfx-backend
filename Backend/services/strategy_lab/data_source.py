@@ -14,6 +14,8 @@ def load_candles(symbol, timeframe, start, end, *, session_factory=SessionLocal)
     # context only; results are still constrained to the requested range.
     warmup_start = start - timedelta(days=45)
     with session_factory() as session:
+        from stream_generations import resolve
+        symbol = resolve(session, symbol, timeframe)
         rows = (
             session.query(IndicatorCandle)
             .filter(

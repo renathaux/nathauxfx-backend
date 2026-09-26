@@ -66,6 +66,17 @@ def storage_symbol_for_scope(symbol, scope):
     return storage
 
 
+def active_storage_symbol(symbol, scope, timeframe, *, session_factory=None):
+    """Resolve the durable head every time; never cache a generation selection."""
+    from db import SessionLocal
+    from stream_generations import resolve
+    root = storage_symbol_for_scope(symbol, scope)
+    with (session_factory or SessionLocal)() as session:
+        storage = resolve(session, root, stream._normal_timeframe(timeframe))
+    _SCOPE_META_BY_STORAGE[storage] = {"public_symbol": _normal_public_symbol(symbol), "stream_scope": scope}
+    return storage
+
+
 def _scope_meta(storage_symbol, payload=None):
     storage = str(storage_symbol or "").upper()
     payload = payload if isinstance(payload, dict) else {}
@@ -147,7 +158,7 @@ def account_scoped_get_authoritative_structure(
             kwargs["analyzer"] = analyzer
         return original(frame, public, timeframe, point_size, **kwargs)
 
-    storage = storage_symbol_for_scope(public, scope)
+    storage = active_storage_symbol(public, scope, timeframe, session_factory=session_factory)
     effective_analyzer = analyzer or stream.legacy_analyze_structure
     wrapped_analyzer = _scoped_analyzer(effective_analyzer, public, scope)
     kwargs = {
@@ -251,7 +262,7 @@ def account_scoped_read_authoritative_structure(
             kwargs["analyzer"] = analyzer
         return original(frame, public, timeframe, point_size, **kwargs)
 
-    storage = storage_symbol_for_scope(public, scope)
+    storage = active_storage_symbol(public, scope, timeframe, session_factory=session_factory)
     effective_analyzer = analyzer or stream.legacy_analyze_structure
     wrapped_analyzer = _scoped_analyzer(effective_analyzer, public, scope)
     try:

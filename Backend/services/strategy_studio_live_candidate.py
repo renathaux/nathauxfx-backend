@@ -103,7 +103,7 @@ def _pending_identity(prior_state, timeline, timestamp):
 
 def _setup_id(*, owner_id, strategy_id, schema_version, account_scope, symbol,
               direction, structure_event_time, entry_trigger_time, broken_level,
-              evaluator_setup_id) -> str:
+              evaluator_setup_id, generation_bindings=None) -> str:
     identity = {
         "owner_id": str(owner_id),
         "strategy_id": str(strategy_id),
@@ -116,6 +116,8 @@ def _setup_id(*, owner_id, strategy_id, schema_version, account_scope, symbol,
         "broken_level": broken_level,
         "evaluator_setup_id": evaluator_setup_id,
     }
+    if generation_bindings:
+        identity["stream_generations"] = sorted(generation_bindings, key=lambda b: (b["root_key"], b["timeframe"], b["generation"]))
     raw = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
     return "sts1_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:48]
 
@@ -132,10 +134,13 @@ def _existing_reason(status: str) -> str:
 
 def _persist_eligible_setup(factory, *, setup_id, owner_id, strategy_id,
                             account_identity, account_scope, symbol, direction,
-                            definition):
+                            definition, generation_bindings=None, event_time=None, confirmation_time=None):
     now = datetime.now(timezone.utc)
     session = factory()
     try:
+        from stream_generations import validate_studio_bindings
+        from models import StrategySetupGeneration
+        validate_studio_bindings(session, generation_bindings or [], event_time, confirmation_time)
         row = session.query(StrategySetupLifecycle).filter(
             StrategySetupLifecycle.setup_id == setup_id
         ).with_for_update().one_or_none()
@@ -153,6 +158,9 @@ def _persist_eligible_setup(factory, *, setup_id, owner_id, strategy_id,
                 updated_at=now,
             )
             session.add(row)
+            session.flush()
+            for binding in generation_bindings or []:
+                session.add(StrategySetupGeneration(setup_id=setup_id, root_key=binding['root_key'], timeframe=binding['timeframe'], generation=binding['generation'], event_time=pd.Timestamp(event_time).to_pydatetime(), confirmation_time=pd.Timestamp(confirmation_time).to_pydatetime()))
             session.commit()
             return "ELIGIBLE"
 
@@ -273,6 +281,15 @@ def build_studio_candidate(owner_id, account_identity, symbol, market_bundle,
             strategy_id=strategy_id,
         )
 
+    from stream_generations import studio_bundle, GenerationBlocked
+    try:
+        with factory() as generation_session:
+            market_bundle, generation_bindings = studio_bundle(generation_session, scope, public_symbol, market_bundle)
+        if generation_bindings:
+            prior_state = None  # rebuild deterministically from canonical full history on restart/cutover
+    except GenerationBlocked as exc:
+        return _wait("WAIT_STUDIO_GENERATION: " + str(exc), account_scope=scope)
+
     timeline = build_market_facts(
         market_bundle,
         public_symbol,
@@ -308,6 +325,8 @@ def build_studio_candidate(owner_id, account_identity, symbol, market_bundle,
         )
 
     setup_facts = _pending_identity(state_before_latest, timeline, timestamp)
+    if generation_bindings and (not setup_facts['structure_event_time'] or any(pd.Timestamp(setup_facts['structure_event_time']) <= pd.Timestamp(b['activation_watermark']) or timestamp <= pd.Timestamp(b['activation_watermark']) for b in generation_bindings)):
+        return _wait("WAIT_STUDIO_GENERATION_HISTORICAL", account_scope=scope)
     stable_setup_id = _setup_id(
         owner_id=owner,
         strategy_id=strategy_id,
@@ -319,18 +338,25 @@ def build_studio_candidate(owner_id, account_identity, symbol, market_bundle,
         entry_trigger_time=timestamp.isoformat(),
         broken_level=setup_facts["broken_level"],
         evaluator_setup_id=result.setup_id,
+        generation_bindings=generation_bindings,
     )
-    status = _persist_eligible_setup(
-        factory,
-        setup_id=stable_setup_id,
-        owner_id=owner,
-        strategy_id=strategy_id,
-        account_identity=account_identity,
-        account_scope=scope,
-        symbol=public_symbol,
-        direction=result.signal,
-        definition=definition,
-    )
+    try:
+        status = _persist_eligible_setup(
+            factory,
+            setup_id=stable_setup_id,
+            owner_id=owner,
+            strategy_id=strategy_id,
+            account_identity=account_identity,
+            account_scope=scope,
+            symbol=public_symbol,
+            direction=result.signal,
+            definition=definition,
+            generation_bindings=generation_bindings,
+            event_time=setup_facts["structure_event_time"],
+            confirmation_time=timestamp,
+        )
+    except GenerationBlocked:
+        return _wait("WAIT_STUDIO_GENERATION_CHANGED", account_scope=scope)
     if status != "ELIGIBLE":
         return _wait(
             _existing_reason(status),

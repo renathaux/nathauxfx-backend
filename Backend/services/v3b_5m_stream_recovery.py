@@ -243,6 +243,11 @@ def _build_plan(session, request, closed_frame):
     )
     timeframe, _interval_minutes = _timeframe_minutes(request.timeframe)
 
+    from stream_generations import require_active, GenerationBlocked
+    try:
+        require_active(session, storage_key, timeframe, for_update=True)
+    except GenerationBlocked as exc:
+        raise V3B5MRecoveryBlocked(str(exc)) from exc
     stream._database_lock(session, storage_key, timeframe)
     state = session.query(IndicatorStreamState).filter_by(
         symbol=storage_key, timeframe=timeframe
