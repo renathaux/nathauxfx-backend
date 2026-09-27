@@ -121,6 +121,44 @@ def test_require_alignment_is_valid_and_appears_in_summary():
     assert "LIVE fundamentals require alignment" in strategy_summary(result)
 
 
+def test_legacy_definition_defaults_session_filter_off():
+    payload = valid_definition()
+    result = normalize_definition(payload)
+    assert result["session_filter"] == {
+        "enabled": False,
+        "timezone": "UTC",
+        "blocked_start": "17:00",
+        "blocked_end": "20:00",
+    }
+
+
+def test_session_filter_is_valid_and_readable():
+    payload = valid_definition()
+    payload["session_filter"] = {
+        "enabled": True,
+        "timezone": "UTC",
+        "blocked_start": "17:00",
+        "blocked_end": "20:00",
+    }
+    assert validation_errors(payload) == {}
+    result = normalize_definition(payload)
+    assert result["session_filter"]["enabled"] is True
+    assert "block entries 17:00–20:00 UTC" in strategy_summary(result)
+
+
+def test_session_filter_rejects_equal_or_invalid_times():
+    payload = valid_definition()
+    payload["session_filter"] = {
+        "enabled": True,
+        "timezone": "UTC",
+        "blocked_start": "17:00",
+        "blocked_end": "17:00",
+    }
+    assert "session_filter.blocked_end" in validation_errors(payload)
+    payload["session_filter"]["blocked_end"] = "25:00"
+    assert "session_filter.blocked_end" in validation_errors(payload)
+
+
 def test_tp2_based_tp1_and_step_protection_are_valid():
     payload = valid_definition()
     payload["tp1"] = {
