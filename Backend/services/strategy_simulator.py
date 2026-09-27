@@ -36,6 +36,7 @@ class VirtualTrade:
     protection_r: float = 0.0
     protection_basis: str = "SL_DISTANCE"
     protection_mode: str = "FIXED"
+    protection_trigger_method: str = "CANDLE_CLOSE"
     protection_steps: list[dict] = field(default_factory=list)
     tp1_hit: bool = False
     remaining_fraction: float = 1.0
@@ -85,13 +86,13 @@ def _fixed_protection_level(trade: VirtualTrade) -> float:
     return float(trade.entry) + trade.sign * trade.risk_distance * fraction
 
 
-def _step_protection_level(trade: VirtualTrade, close: float) -> float | None:
+def _step_protection_level(trade: VirtualTrade, progress_price: float) -> float | None:
     if trade.protection_mode != "TP2_STEPS" or not trade.protection_steps:
         return None
     path = float(trade.tp2) - float(trade.entry)
     if path == 0:
         return None
-    progress = (float(close) - float(trade.entry)) / path * 100.0
+    progress = (float(progress_price) - float(trade.entry)) / path * 100.0
     if progress < 0:
         return None
     reached = [
@@ -120,6 +121,18 @@ def _update_step_protection_on_close(trade: VirtualTrade, close: float) -> None:
         trade.protected_sl = float(candidate)
 
 
+def _touch_step_candidate(trade: VirtualTrade, high: float, low: float) -> float | None:
+    favorable_extreme = high if trade.side == "BUY" else low
+    candidate = _step_protection_level(trade, favorable_extreme)
+    return float(candidate) if _better_stop(trade, candidate) else None
+
+
+def _touch_step_is_intrabar_ambiguous(
+    trade: VirtualTrade, high: float, low: float, candidate: float | None
+) -> bool:
+    return candidate is not None and _touch_stop(trade, high, low, float(candidate))
+
+
 def _virtual_trade_payload(trade: VirtualTrade | None) -> dict | None:
     if trade is None:
         return None
@@ -136,6 +149,7 @@ def _virtual_trade_payload(trade: VirtualTrade | None) -> dict | None:
         "protection_r": float(trade.protection_r),
         "protection_basis": trade.protection_basis,
         "protection_mode": trade.protection_mode,
+        "protection_trigger_method": trade.protection_trigger_method,
         "protection_steps": list(trade.protection_steps or []),
         "tp1_hit": bool(trade.tp1_hit),
         "remaining_fraction": float(trade.remaining_fraction),
@@ -162,6 +176,9 @@ def _virtual_trade_from_payload(payload: dict | None) -> VirtualTrade | None:
         protection_r=float(payload.get("protection_r") or 0.0),
         protection_basis=str(payload.get("protection_basis") or "SL_DISTANCE"),
         protection_mode=str(payload.get("protection_mode") or "FIXED"),
+        protection_trigger_method=str(
+            payload.get("protection_trigger_method") or "CANDLE_CLOSE"
+        ),
         protection_steps=list(payload.get("protection_steps") or []),
         tp1_hit=bool(payload.get("tp1_hit")),
         remaining_fraction=float(payload.get("remaining_fraction", 1.0)),
@@ -260,10 +277,19 @@ def resolve_virtual_trade(trade: VirtualTrade, candle) -> dict | None:
             if trade.remaining_fraction <= 0:
                 return _closed_result(trade, candle, "TP1_FULL", trade.realized_r, exit_price=trade.tp1)
 
-            # Step protection uses closed-candle progress for deterministic
-            # backtests. A newly selected stop becomes active on the next candle.
             if trade.protection_mode == "TP2_STEPS":
-                _update_step_protection_on_close(trade, _value(candle, "close"))
+                if trade.protection_trigger_method == "PRICE_TOUCH":
+                    candidate = _touch_step_candidate(trade, high, low)
+                    if _touch_step_is_intrabar_ambiguous(trade, high, low, candidate):
+                        return _closed_result(
+                            trade, candle, "AMBIGUOUS_INTRABAR", 0.0, resolved=False
+                        )
+                    if candidate is not None:
+                        trade.protected_sl = float(candidate)
+                else:
+                    # Close-triggered protection becomes active after this
+                    # closed candle, preserving the existing deterministic model.
+                    _update_step_protection_on_close(trade, _value(candle, "close"))
             return None
         return None
 
@@ -278,7 +304,16 @@ def resolve_virtual_trade(trade: VirtualTrade, candle) -> dict | None:
         total_r = trade.realized_r + trade.remaining_fraction * trade.r_at(trade.tp2)
         return _closed_result(trade, candle, "TP2", total_r, exit_price=trade.tp2)
     if trade.protection_mode == "TP2_STEPS":
-        _update_step_protection_on_close(trade, _value(candle, "close"))
+        if trade.protection_trigger_method == "PRICE_TOUCH":
+            candidate = _touch_step_candidate(trade, high, low)
+            if _touch_step_is_intrabar_ambiguous(trade, high, low, candidate):
+                return _closed_result(
+                    trade, candle, "AMBIGUOUS_INTRABAR", 0.0, resolved=False
+                )
+            if candidate is not None:
+                trade.protected_sl = float(candidate)
+        else:
+            _update_step_protection_on_close(trade, _value(candle, "close"))
     return None
 
 
@@ -474,6 +509,9 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
                 protection_r=float(tp1.get("protection_r") or 0.0) if tp1["enabled"] else 0.0,
                 protection_basis=str(tp1.get("target_basis") or "SL_DISTANCE"),
                 protection_mode=str(tp1.get("protection_mode") or "FIXED"),
+                protection_trigger_method=str(
+                    tp1.get("protection_trigger_method") or "CANDLE_CLOSE"
+                ),
                 protection_steps=list(tp1.get("protection_steps") or []),
             )
         if include_replay:
