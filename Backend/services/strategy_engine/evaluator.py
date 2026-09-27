@@ -13,7 +13,7 @@ from services.strategy_studio_schema import normalize_definition
 
 PIP_SIZE = {"EURUSD": 0.0001, "XAUUSD": 0.01}
 STEP_ORDER = [
-    "trend", "structure", "break_validation", "confirmation", "session", "entry",
+    "trend", "structure", "break_validation", "confirmation", "session", "seasonal", "entry",
     "stop_loss", "tp1", "tp2", "risk",
 ]
 
@@ -227,6 +227,39 @@ def _session_entry_allowed(definition: dict, timestamp) -> tuple[bool, dict]:
     }
 
 
+def _month_day(value: str) -> tuple[int, int]:
+    month, day = str(value).split("-", 1)
+    return int(month), int(day)
+
+
+def _seasonal_entry_allowed(definition: dict, timestamp) -> tuple[bool, dict]:
+    seasonal_filter = definition.get("seasonal_filter") or {}
+    if not seasonal_filter.get("enabled"):
+        return True, {"enabled": False}
+
+    stamp = pd.Timestamp(timestamp)
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize("UTC")
+    else:
+        stamp = stamp.tz_convert("UTC")
+
+    current = (stamp.month, stamp.day)
+    start = _month_day(seasonal_filter["blocked_start"])
+    end = _month_day(seasonal_filter["blocked_end"])
+    if start <= end:
+        blocked = start <= current <= end
+    else:
+        blocked = current >= start or current <= end
+
+    return (not blocked), {
+        "enabled": True,
+        "timezone": "UTC",
+        "blocked_start": seasonal_filter["blocked_start"],
+        "blocked_end": seasonal_filter["blocked_end"],
+        "entry_date": stamp.strftime("%m-%d"),
+    }
+
+
 def _entry_price(definition: dict, candle, setup: dict) -> float | None:
     method = definition["entry"]["method"]
     if method == "BOS_CHOCH_CLOSE":
@@ -419,6 +452,22 @@ def evaluate_strategy_normalized(value: dict, timeline, timestamp, prior_state: 
     else:
         steps["session"] = _step("NOT_APPLICABLE")
     if not session_allowed:
+        return _result(
+            steps,
+            setup_id=setup_id,
+            state=EvaluationState("BLOCKED", None),
+        )
+
+    seasonal_allowed, seasonal_detail = _seasonal_entry_allowed(value, stamp)
+    if seasonal_detail.get("enabled"):
+        steps["seasonal"] = _step(
+            "PASSED" if seasonal_allowed else "BLOCKED",
+            None if seasonal_allowed else "ENTRY_SEASONAL_BLOCKED",
+            **seasonal_detail,
+        )
+    else:
+        steps["seasonal"] = _step("NOT_APPLICABLE")
+    if not seasonal_allowed:
         return _result(
             steps,
             setup_id=setup_id,
