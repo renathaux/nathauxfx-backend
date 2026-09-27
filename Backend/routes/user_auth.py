@@ -224,9 +224,13 @@ def session(request: Request):
 
 @router.post("/logout")
 def logout(request: Request, response: Response):
-    current_user_with_csrf(request)
+    # Logging out is intentionally idempotent and does not require CSRF.
+    # A stale/missing CSRF value must never prevent the browser from clearing
+    # its secure session cookie. If a valid session token is present, revoke it;
+    # regardless, always expire both login cookies on the response.
     token, _source = request_session_token(request)
-    revoke_session(token)
+    if token:
+        revoke_session(token)
     _clear_login_cookies(response)
     return {"ok": True, "authenticated": False}
 
