@@ -278,7 +278,7 @@ def start_background_task():
                 "SELECT strategy_id, owner_id, name, created_at, updated_at "
                 "FROM saved_strategies ORDER BY updated_at DESC"
             )).mappings().all()
-        print("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC =", {
+        diag_payload = {
             "count": len(rows),
             "rows": [
                 {
@@ -290,12 +290,19 @@ def start_background_task():
                 }
                 for row in rows
             ],
-        })
+        }
+        print("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC =", diag_payload, flush=True)
+        os.write(
+            2,
+            ("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC_STDERR = " + json.dumps(diag_payload) + "\n").encode("utf-8"),
+        )
     except Exception as exc:
-        print("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC_ERROR =", {
-            "type": type(exc).__name__,
-            "error": str(exc),
-        })
+        error_payload = {"type": type(exc).__name__, "error": str(exc)}
+        print("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC_ERROR =", error_payload, flush=True)
+        os.write(
+            2,
+            ("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC_ERROR_STDERR = " + json.dumps(error_payload) + "\n").encode("utf-8"),
+        )
     try:
         from services.deriv_binary_settlement_recovery import start_settlement_recovery_worker
         start_settlement_recovery_worker()
