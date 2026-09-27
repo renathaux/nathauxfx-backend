@@ -267,7 +267,13 @@ def _evaluate_live_handoff_readiness(owner: str) -> dict:
 def strategies_list(request: Request):
     owner = owner_key(_actor(request))
     try:
-        return {"ok": True, "strategies": list_strategies(owner)}
+        strategies = list_strategies(owner)
+        print("STRATEGY_STUDIO_LIST_DIAGNOSTIC =", {
+            "owner": owner,
+            "count": len(strategies),
+            "names": [str(item.get("name") or "") for item in strategies],
+        }, flush=True)
+        return {"ok": True, "strategies": strategies}
     except Exception as exc:
         raise _service_http_error(exc) from exc
 
