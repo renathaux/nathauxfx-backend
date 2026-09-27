@@ -13,7 +13,7 @@ from services.strategy_studio_schema import normalize_definition
 
 PIP_SIZE = {"EURUSD": 0.0001, "XAUUSD": 0.01}
 STEP_ORDER = [
-    "trend", "structure", "break_validation", "confirmation", "entry",
+    "trend", "structure", "break_validation", "confirmation", "session", "entry",
     "stop_loss", "tp1", "tp2", "risk",
 ]
 
@@ -194,6 +194,39 @@ def _remembered_bos_confirmation(definition: dict, candle, setup: dict) -> tuple
     return "PASSED", "REMEMBER_BOS_REBREAK_PASSED"
 
 
+def _minutes_from_hhmm(value: str) -> int:
+    hour, minute = str(value).split(":", 1)
+    return int(hour) * 60 + int(minute)
+
+
+def _session_entry_allowed(definition: dict, timestamp) -> tuple[bool, dict]:
+    session_filter = definition.get("session_filter") or {}
+    if not session_filter.get("enabled"):
+        return True, {"enabled": False}
+
+    stamp = pd.Timestamp(timestamp)
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize("UTC")
+    else:
+        stamp = stamp.tz_convert("UTC")
+
+    current = stamp.hour * 60 + stamp.minute
+    start = _minutes_from_hhmm(session_filter["blocked_start"])
+    end = _minutes_from_hhmm(session_filter["blocked_end"])
+    if start < end:
+        blocked = start <= current < end
+    else:
+        blocked = current >= start or current < end
+
+    return (not blocked), {
+        "enabled": True,
+        "timezone": "UTC",
+        "blocked_start": session_filter["blocked_start"],
+        "blocked_end": session_filter["blocked_end"],
+        "entry_time": stamp.strftime("%H:%M"),
+    }
+
+
 def _entry_price(definition: dict, candle, setup: dict) -> float | None:
     method = definition["entry"]["method"]
     if method == "BOS_CHOCH_CLOSE":
@@ -370,6 +403,22 @@ def evaluate_strategy_normalized(value: dict, timeline, timestamp, prior_state: 
                 setup_id=setup_id,
                 state=EvaluationState("WAITING", remembered),
             )
+        return _result(
+            steps,
+            setup_id=setup_id,
+            state=EvaluationState("BLOCKED", None),
+        )
+
+    session_allowed, session_detail = _session_entry_allowed(value, stamp)
+    if session_detail.get("enabled"):
+        steps["session"] = _step(
+            "PASSED" if session_allowed else "BLOCKED",
+            None if session_allowed else "ENTRY_SESSION_BLOCKED",
+            **session_detail,
+        )
+    else:
+        steps["session"] = _step("NOT_APPLICABLE")
+    if not session_allowed:
         return _result(
             steps,
             setup_id=setup_id,
