@@ -159,6 +159,43 @@ def test_session_filter_rejects_equal_or_invalid_times():
     assert "session_filter.blocked_end" in validation_errors(payload)
 
 
+def test_legacy_definition_defaults_seasonal_filter_off():
+    result = normalize_definition(valid_definition())
+    assert result["seasonal_filter"] == {
+        "enabled": False,
+        "timezone": "UTC",
+        "blocked_start": "12-01",
+        "blocked_end": "12-15",
+    }
+
+
+def test_seasonal_filter_is_valid_and_readable():
+    payload = valid_definition()
+    payload["seasonal_filter"] = {
+        "enabled": True,
+        "timezone": "UTC",
+        "blocked_start": "12-01",
+        "blocked_end": "12-15",
+    }
+    assert validation_errors(payload) == {}
+    result = normalize_definition(payload)
+    assert result["seasonal_filter"]["enabled"] is True
+    assert "block dates 12-01–12-15 UTC" in strategy_summary(result)
+
+
+def test_seasonal_filter_rejects_equal_or_invalid_dates():
+    payload = valid_definition()
+    payload["seasonal_filter"] = {
+        "enabled": True,
+        "timezone": "UTC",
+        "blocked_start": "12-01",
+        "blocked_end": "12-01",
+    }
+    assert "seasonal_filter.blocked_end" in validation_errors(payload)
+    payload["seasonal_filter"]["blocked_end"] = "02-31"
+    assert "seasonal_filter.blocked_end" in validation_errors(payload)
+
+
 def test_tp2_based_tp1_and_step_protection_are_valid():
     payload = valid_definition()
     payload["tp1"] = {
