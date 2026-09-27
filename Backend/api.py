@@ -464,6 +464,88 @@ SIGNAL_EMAIL_LOCK = threading.Lock()
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 VISITS_FILE = os.path.join(DATA_DIR, "visits.json")
 SESSIONS = {}
+OWNER_SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+
+
+def _owner_session_hash(token: str) -> str:
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def persist_owner_session(token: str) -> None:
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(seconds=OWNER_SESSION_TTL_SECONDS)
+    token_hash = _owner_session_hash(token)
+    with database_engine.begin() as conn:
+        conn.execute(
+            sql_text("DELETE FROM flowsignal_owner_sessions WHERE token_hash = :token_hash"),
+            {"token_hash": token_hash},
+        )
+        conn.execute(
+            sql_text(
+                "INSERT INTO flowsignal_owner_sessions "
+                "(token_hash, created_at, last_seen_at, expires_at) "
+                "VALUES (:token_hash, :created_at, :last_seen_at, :expires_at)"
+            ),
+            {
+                "token_hash": token_hash,
+                "created_at": now,
+                "last_seen_at": now,
+                "expires_at": expires,
+            },
+        )
+
+
+def resolve_owner_session(token: str):
+    token = str(token or "").strip()
+    if not token:
+        return None
+
+    session = SESSIONS.get(token)
+    if isinstance(session, dict) and str(session.get("role") or "").lower() == "admin":
+        return session
+
+    now = datetime.now(timezone.utc)
+    token_hash = _owner_session_hash(token)
+    try:
+        with database_engine.begin() as conn:
+            row = conn.execute(
+                sql_text(
+                    "SELECT expires_at FROM flowsignal_owner_sessions "
+                    "WHERE token_hash = :token_hash"
+                ),
+                {"token_hash": token_hash},
+            ).mappings().first()
+            if not row:
+                return None
+            expires_at = row["expires_at"]
+            if expires_at is None or expires_at <= now:
+                conn.execute(
+                    sql_text(
+                        "DELETE FROM flowsignal_owner_sessions "
+                        "WHERE token_hash = :token_hash"
+                    ),
+                    {"token_hash": token_hash},
+                )
+                return None
+            conn.execute(
+                sql_text(
+                    "UPDATE flowsignal_owner_sessions "
+                    "SET last_seen_at = :last_seen_at "
+                    "WHERE token_hash = :token_hash"
+                ),
+                {"last_seen_at": now, "token_hash": token_hash},
+            )
+    except Exception as exc:
+        print("OWNER_SESSION_RESOLVE_ERROR =", type(exc).__name__)
+        return None
+
+    restored = {
+        "email": "flowsignal.contact@gmail.com",
+        "role": "admin",
+        "auth_method": "persistent_owner_session",
+    }
+    SESSIONS[token] = restored
+    return restored
 NEWS_MODE_CHANGE_LOCK = threading.RLock()
 
 def load_users():
@@ -2844,6 +2926,7 @@ def login(request: LoginRequest):
             "email": email,
             "role": "admin"
         }
+        persist_owner_session(token)
 
         return {
             "ok": True,
@@ -2890,6 +2973,8 @@ def _authenticated_settings_user(request: Request):
     token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
     token = token or str(request.headers.get("x-session-token") or "").strip()
     session = SESSIONS.get(token)
+    if not session and token:
+        session = resolve_owner_session(token)
     if not session or session.get("role") not in {"user", "admin", "owner"}:
         raise HTTPException(status_code=401, detail="Authentication required.")
     return session
