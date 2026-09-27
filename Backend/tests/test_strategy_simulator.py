@@ -18,7 +18,8 @@ def bar(timestamp, open_, high, low, close):
 
 
 def trade(*, tp1=None, tp2=120.0, close_fraction=0.0, protection_r=0.0,
-          protection_basis="SL_DISTANCE", protection_mode="FIXED", protection_steps=None):
+          protection_basis="SL_DISTANCE", protection_mode="FIXED",
+          protection_trigger_method="CANDLE_CLOSE", protection_steps=None):
     return VirtualTrade(
         trade_id="trade_1",
         entry_time=pd.Timestamp("2026-09-17T10:00:00Z"),
@@ -32,6 +33,7 @@ def trade(*, tp1=None, tp2=120.0, close_fraction=0.0, protection_r=0.0,
         protection_r=protection_r,
         protection_basis=protection_basis,
         protection_mode=protection_mode,
+        protection_trigger_method=protection_trigger_method,
         protection_steps=list(protection_steps or []),
     )
 
@@ -123,6 +125,72 @@ def test_step_protection_follows_tp2_progress_after_tp1():
     assert closed["outcome"] == "PROTECTED_SL"
     assert closed["exit_price"] == pytest.approx(114.0)
     assert closed["r"] == pytest.approx(1.4)
+
+
+def test_price_touch_step_protection_arms_without_waiting_for_close():
+    steps = [
+        {"trigger_percent": 70, "secure_percent": 50},
+        {"trigger_percent": 80, "secure_percent": 60},
+        {"trigger_percent": 90, "secure_percent": 70},
+    ]
+    value = trade(
+        tp1=114.0, tp2=120.0, close_fraction=0.1,
+        protection_mode="TP2_STEPS",
+        protection_trigger_method="PRICE_TOUCH",
+        protection_steps=steps,
+    )
+
+    result = resolve_virtual_trade(
+        value, bar("2026-09-17T10:05:00Z", 100, 115, 111, 112)
+    )
+    assert result is None
+    assert value.tp1_hit is True
+    assert value.protected_sl == pytest.approx(110.0)
+
+
+def test_price_touch_new_protected_stop_same_candle_is_ambiguous():
+    steps = [
+        {"trigger_percent": 70, "secure_percent": 50},
+        {"trigger_percent": 80, "secure_percent": 60},
+        {"trigger_percent": 90, "secure_percent": 70},
+    ]
+    value = trade(
+        tp1=114.0, tp2=120.0, close_fraction=0.1,
+        protection_mode="TP2_STEPS",
+        protection_trigger_method="PRICE_TOUCH",
+        protection_steps=steps,
+    )
+
+    result = resolve_virtual_trade(
+        value, bar("2026-09-17T10:05:00Z", 100, 115, 109.5, 112)
+    )
+    assert result["outcome"] == "AMBIGUOUS_INTRABAR"
+    assert result["resolved"] is False
+
+
+def test_price_touch_later_step_can_advance_on_favorable_extreme():
+    steps = [
+        {"trigger_percent": 70, "secure_percent": 50},
+        {"trigger_percent": 80, "secure_percent": 60},
+        {"trigger_percent": 90, "secure_percent": 70},
+    ]
+    value = trade(
+        tp1=114.0, tp2=120.0, close_fraction=0.1,
+        protection_mode="TP2_STEPS",
+        protection_trigger_method="PRICE_TOUCH",
+        protection_steps=steps,
+    )
+    first = resolve_virtual_trade(
+        value, bar("2026-09-17T10:05:00Z", 100, 115, 111, 112)
+    )
+    assert first is None
+    assert value.protected_sl == pytest.approx(110.0)
+
+    second = resolve_virtual_trade(
+        value, bar("2026-09-17T10:10:00Z", 112, 117, 113, 114)
+    )
+    assert second is None
+    assert value.protected_sl == pytest.approx(112.0)
 
 
 def test_pre_tp1_sl_and_tp1_same_candle_is_ambiguous():
