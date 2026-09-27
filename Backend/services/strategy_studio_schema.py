@@ -94,6 +94,13 @@ class FundamentalDefinition(_StrictModel):
     mode: Literal["BLOCK_OPPOSITE", "REQUIRE_ALIGNMENT"] = "BLOCK_OPPOSITE"
 
 
+class SessionFilterDefinition(_StrictModel):
+    enabled: bool = False
+    timezone: Literal["UTC"] = "UTC"
+    blocked_start: str = "17:00"
+    blocked_end: str = "20:00"
+
+
 class StrategyDefinition(_StrictModel):
     schema_version: Literal[1]
     symbols: list[Literal["EURUSD", "XAUUSD"]]
@@ -108,6 +115,7 @@ class StrategyDefinition(_StrictModel):
     tp2: TP2Definition
     risk: RiskDefinition
     fundamentals: FundamentalDefinition = Field(default_factory=FundamentalDefinition)
+    session_filter: SessionFilterDefinition = Field(default_factory=SessionFilterDefinition)
 
     @model_validator(mode="after")
     def validate_cross_fields(self):
@@ -151,6 +159,21 @@ def _cross_field_errors(value: StrategyDefinition) -> dict[str, str]:
     structure_tf = value.structure_timeframe or value.trading_timeframe
     if TIMEFRAME_RANK.get(structure_tf, 0) < TIMEFRAME_RANK.get(value.trading_timeframe, 0):
         errors["structure_timeframe"] = "Structure timeframe must be equal to or higher than trading timeframe"
+
+    session_filter = value.session_filter
+    if session_filter.enabled:
+        time_pattern = r"^(?:[01]\d|2[0-3]):[0-5]\d$"
+        import re
+        if not re.fullmatch(time_pattern, str(session_filter.blocked_start or "")):
+            errors["session_filter.blocked_start"] = "Use UTC time in HH:MM format"
+        if not re.fullmatch(time_pattern, str(session_filter.blocked_end or "")):
+            errors["session_filter.blocked_end"] = "Use UTC time in HH:MM format"
+        if (
+            "session_filter.blocked_start" not in errors
+            and "session_filter.blocked_end" not in errors
+            and session_filter.blocked_start == session_filter.blocked_end
+        ):
+            errors["session_filter.blocked_end"] = "Blocked start and end times must be different"
 
     distance_filter = value.stop_loss.distance_filter
     if distance_filter.enabled:
@@ -355,6 +378,14 @@ def _parse_without_cross_validation(payload: dict) -> StrategyDefinition:
         "fundamentals": FundamentalDefinition.model_validate(
             payload.get("fundamentals") or {"mode": "BLOCK_OPPOSITE"}
         ),
+        "session_filter": SessionFilterDefinition.model_validate(
+            payload.get("session_filter") or {
+                "enabled": False,
+                "timezone": "UTC",
+                "blocked_start": "17:00",
+                "blocked_end": "20:00",
+            }
+        ),
     }
     # model_construct bypasses validators but keeps typed nested objects.
     return StrategyDefinition.model_construct(**data)
@@ -423,6 +454,13 @@ def strategy_summary(definition: dict) -> str:
 
     if confirmation["max_setup_age_bars"] is not None:
         parts.append(f"setup valid {confirmation['max_setup_age_bars']} {tf} bars from original event")
+
+    session_filter = value["session_filter"]
+    if session_filter["enabled"]:
+        parts.append(
+            f"block entries {session_filter['blocked_start']}–"
+            f"{session_filter['blocked_end']} UTC"
+        )
 
     entry_labels = {
         "BOS_CHOCH_CLOSE": "BOS/CHOCH close",
