@@ -17,7 +17,7 @@ from services.strategy_studio_schema import normalize_definition
 
 
 DIAGNOSTIC_STAGE_ORDER = [
-    "trend", "structure", "break_validation", "confirmation", "entry",
+    "trend", "structure", "break_validation", "confirmation", "session", "seasonal", "entry",
     "stop_loss", "tp1", "tp2", "risk",
 ]
 
