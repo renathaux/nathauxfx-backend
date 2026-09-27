@@ -124,7 +124,7 @@ def test_bos_close_entry_builds_sl_tp_and_risk_budget():
     assert result.tp1 is None
     assert result.risk_budget["dollars"] == pytest.approx(100.0)
     assert list(result.steps) == [
-        "trend", "structure", "break_validation", "confirmation", "session", "entry",
+        "trend", "structure", "break_validation", "confirmation", "session", "seasonal", "entry",
         "stop_loss", "tp1", "tp2", "risk",
     ]
 
@@ -169,6 +169,68 @@ def test_session_filter_allows_entry_outside_utc_window():
     )
     assert result.signal == "BUY"
     assert result.steps["session"]["state"] == "PASSED"
+
+
+def test_seasonal_filter_blocks_new_entry_inside_inclusive_utc_date_window():
+    value = definition()
+    value["seasonal_filter"] = {
+        "enabled": True,
+        "timezone": "UTC",
+        "blocked_start": "09-17",
+        "blocked_end": "09-20",
+    }
+    timeline = FakeTimeline(
+        candles={T0: candle(T0, 1.099, 1.102, 1.098, 1.101)},
+        events={T0: event()},
+    )
+    result = evaluate_strategy(
+        value, timeline, T0, EvaluationState(),
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert result.signal == "WAIT"
+    assert result.steps["seasonal"]["state"] == "BLOCKED"
+    assert result.steps["seasonal"]["reason"] == "ENTRY_SEASONAL_BLOCKED"
+
+
+def test_seasonal_filter_allows_entry_outside_utc_date_window():
+    value = definition()
+    value["seasonal_filter"] = {
+        "enabled": True,
+        "timezone": "UTC",
+        "blocked_start": "12-01",
+        "blocked_end": "12-15",
+    }
+    timeline = FakeTimeline(
+        candles={T0: candle(T0, 1.099, 1.102, 1.098, 1.101)},
+        events={T0: event()},
+    )
+    result = evaluate_strategy(
+        value, timeline, T0, EvaluationState(),
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert result.signal == "BUY"
+    assert result.steps["seasonal"]["state"] == "PASSED"
+
+
+def test_seasonal_filter_supports_window_crossing_new_year():
+    value = definition()
+    value["seasonal_filter"] = {
+        "enabled": True,
+        "timezone": "UTC",
+        "blocked_start": "12-20",
+        "blocked_end": "01-10",
+    }
+    winter = pd.Timestamp("2026-01-05T10:00:00Z")
+    timeline = FakeTimeline(
+        candles={winter: candle(winter, 1.099, 1.102, 1.098, 1.101)},
+        events={winter: event(timestamp=winter)},
+    )
+    result = evaluate_strategy(
+        value, timeline, winter, EvaluationState(),
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert result.signal == "WAIT"
+    assert result.steps["seasonal"]["reason"] == "ENTRY_SEASONAL_BLOCKED"
 
 
 def test_tp1_can_be_percentage_of_entry_to_tp2_distance():
