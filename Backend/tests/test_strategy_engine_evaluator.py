@@ -124,9 +124,51 @@ def test_bos_close_entry_builds_sl_tp_and_risk_budget():
     assert result.tp1 is None
     assert result.risk_budget["dollars"] == pytest.approx(100.0)
     assert list(result.steps) == [
-        "trend", "structure", "break_validation", "confirmation", "entry",
+        "trend", "structure", "break_validation", "confirmation", "session", "entry",
         "stop_loss", "tp1", "tp2", "risk",
     ]
+
+
+def test_session_filter_blocks_new_entry_inside_utc_window():
+    value = definition()
+    value["session_filter"] = {
+        "enabled": True,
+        "timezone": "UTC",
+        "blocked_start": "09:00",
+        "blocked_end": "11:00",
+    }
+    timeline = FakeTimeline(
+        candles={T0: candle(T0, 1.099, 1.102, 1.098, 1.101)},
+        events={T0: event()},
+    )
+    result = evaluate_strategy(
+        value, timeline, T0, EvaluationState(),
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert result.signal == "WAIT"
+    assert result.steps["session"]["state"] == "BLOCKED"
+    assert result.steps["session"]["reason"] == "ENTRY_SESSION_BLOCKED"
+    assert result.next_state.pending_setup is None
+
+
+def test_session_filter_allows_entry_outside_utc_window():
+    value = definition()
+    value["session_filter"] = {
+        "enabled": True,
+        "timezone": "UTC",
+        "blocked_start": "17:00",
+        "blocked_end": "20:00",
+    }
+    timeline = FakeTimeline(
+        candles={T0: candle(T0, 1.099, 1.102, 1.098, 1.101)},
+        events={T0: event()},
+    )
+    result = evaluate_strategy(
+        value, timeline, T0, EvaluationState(),
+        symbol="EURUSD", account_balance=10000,
+    )
+    assert result.signal == "BUY"
+    assert result.steps["session"]["state"] == "PASSED"
 
 
 def test_tp1_can_be_percentage_of_entry_to_tp2_distance():
