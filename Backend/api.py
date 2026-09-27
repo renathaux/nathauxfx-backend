@@ -250,6 +250,31 @@ def stop_fast_backtest_manager():
 def start_background_task():
     global BACKGROUND_THREAD
     print("Startup OK - warming panel cache")
+    # TEMPORARY READ-ONLY DIAGNOSTIC: inspect Strategy Studio persistence.
+    try:
+        with database_engine.connect() as conn:
+            rows = conn.execute(sql_text(
+                "SELECT strategy_id, owner_id, name, created_at, updated_at "
+                "FROM saved_strategies ORDER BY updated_at DESC"
+            )).mappings().all()
+        print("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC =", {
+            "count": len(rows),
+            "rows": [
+                {
+                    "strategy_id": str(row["strategy_id"]),
+                    "owner_id": str(row["owner_id"]),
+                    "name": str(row["name"]),
+                    "created_at": str(row["created_at"]),
+                    "updated_at": str(row["updated_at"]),
+                }
+                for row in rows
+            ],
+        })
+    except Exception as exc:
+        print("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC_ERROR =", {
+            "type": type(exc).__name__,
+            "error": str(exc),
+        })
     try:
         from services.deriv_binary_settlement_recovery import start_settlement_recovery_worker
         start_settlement_recovery_worker()
