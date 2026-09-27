@@ -101,6 +101,13 @@ class SessionFilterDefinition(_StrictModel):
     blocked_end: str = "20:00"
 
 
+class SeasonalFilterDefinition(_StrictModel):
+    enabled: bool = False
+    timezone: Literal["UTC"] = "UTC"
+    blocked_start: str = "12-01"
+    blocked_end: str = "12-15"
+
+
 class StrategyDefinition(_StrictModel):
     schema_version: Literal[1]
     symbols: list[Literal["EURUSD", "XAUUSD"]]
@@ -116,6 +123,7 @@ class StrategyDefinition(_StrictModel):
     risk: RiskDefinition
     fundamentals: FundamentalDefinition = Field(default_factory=FundamentalDefinition)
     session_filter: SessionFilterDefinition = Field(default_factory=SessionFilterDefinition)
+    seasonal_filter: SeasonalFilterDefinition = Field(default_factory=SeasonalFilterDefinition)
 
     @model_validator(mode="after")
     def validate_cross_fields(self):
@@ -174,6 +182,31 @@ def _cross_field_errors(value: StrategyDefinition) -> dict[str, str]:
             and session_filter.blocked_start == session_filter.blocked_end
         ):
             errors["session_filter.blocked_end"] = "Blocked start and end times must be different"
+
+    seasonal_filter = value.seasonal_filter
+    if seasonal_filter.enabled:
+        import re
+        from datetime import datetime as _datetime
+        date_pattern = r"^(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$"
+        for field, raw in (
+            ("blocked_start", seasonal_filter.blocked_start),
+            ("blocked_end", seasonal_filter.blocked_end),
+        ):
+            path = f"seasonal_filter.{field}"
+            text = str(raw or "")
+            if not re.fullmatch(date_pattern, text):
+                errors[path] = "Use UTC month-day in MM-DD format"
+                continue
+            try:
+                _datetime.strptime(f"2000-{text}", "%Y-%m-%d")
+            except ValueError:
+                errors[path] = "Use a valid calendar month and day"
+        if (
+            "seasonal_filter.blocked_start" not in errors
+            and "seasonal_filter.blocked_end" not in errors
+            and seasonal_filter.blocked_start == seasonal_filter.blocked_end
+        ):
+            errors["seasonal_filter.blocked_end"] = "Blocked start and end dates must be different"
 
     distance_filter = value.stop_loss.distance_filter
     if distance_filter.enabled:
@@ -386,6 +419,14 @@ def _parse_without_cross_validation(payload: dict) -> StrategyDefinition:
                 "blocked_end": "20:00",
             }
         ),
+        "seasonal_filter": SeasonalFilterDefinition.model_validate(
+            payload.get("seasonal_filter") or {
+                "enabled": False,
+                "timezone": "UTC",
+                "blocked_start": "12-01",
+                "blocked_end": "12-15",
+            }
+        ),
     }
     # model_construct bypasses validators but keeps typed nested objects.
     return StrategyDefinition.model_construct(**data)
@@ -460,6 +501,13 @@ def strategy_summary(definition: dict) -> str:
         parts.append(
             f"block entries {session_filter['blocked_start']}–"
             f"{session_filter['blocked_end']} UTC"
+        )
+
+    seasonal_filter = value["seasonal_filter"]
+    if seasonal_filter["enabled"]:
+        parts.append(
+            f"block dates {seasonal_filter['blocked_start']}–"
+            f"{seasonal_filter['blocked_end']} UTC"
         )
 
     entry_labels = {
