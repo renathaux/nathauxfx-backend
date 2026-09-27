@@ -2179,6 +2179,34 @@ def background_fetch():
 
 @app.get("/")
 def root():
+    try:
+        with database_engine.connect() as conn:
+            rows = conn.execute(sql_text(
+                "SELECT strategy_id, owner_id, name, created_at, updated_at "
+                "FROM saved_strategies ORDER BY updated_at DESC"
+            )).mappings().all()
+        payload = {
+            "count": len(rows),
+            "rows": [
+                {
+                    "strategy_id": str(row["strategy_id"]),
+                    "owner_id": str(row["owner_id"]),
+                    "name": str(row["name"]),
+                    "created_at": str(row["created_at"]),
+                    "updated_at": str(row["updated_at"]),
+                }
+                for row in rows
+            ],
+        }
+        os.write(2, ("STRATEGY_DIAG_ROOT = " + json.dumps(payload) + "\n").encode("utf-8"))
+    except Exception as exc:
+        os.write(
+            2,
+            ("STRATEGY_DIAG_ROOT_ERROR = " + json.dumps({
+                "type": type(exc).__name__,
+                "error": str(exc),
+            }) + "\n").encode("utf-8"),
+        )
     return {"message": "NathauxFX backend is running"}
 
 @app.get("/news-impact")
