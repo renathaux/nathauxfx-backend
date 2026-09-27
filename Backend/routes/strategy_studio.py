@@ -97,14 +97,15 @@ def _legacy_actor(request: Request, *, mutation: bool = False):
 
 
 def _actor(request: Request, *, mutation: bool = False):
+    # A valid legacy-owner Bearer token is explicit and must win over any
+    # customer cookie that may also exist in the browser. Otherwise an admin
+    # tab can be incorrectly scoped to a customer user and see an empty library.
+    legacy = _legacy_actor(request, mutation=mutation)
+    if legacy is not None:
+        return legacy
+
     resolver = current_user_with_csrf if mutation else current_user
-    try:
-        return resolver(request)
-    except HTTPException as auth_error:
-        legacy = _legacy_actor(request, mutation=mutation)
-        if legacy is not None:
-            return legacy
-        raise auth_error
+    return resolver(request)
 
 
 def _service_http_error(exc: Exception) -> HTTPException:
