@@ -2126,6 +2126,31 @@ def refresh_live_panel_meta(panel_data):
 
 
 def background_fetch():
+    try:
+        with database_engine.connect() as conn:
+            rows = conn.execute(sql_text(
+                "SELECT strategy_id, owner_id, name, created_at, updated_at "
+                "FROM saved_strategies ORDER BY updated_at DESC"
+            )).mappings().all()
+        print("STRATEGY_STUDIO_BACKGROUND_DIAGNOSTIC =", {
+            "count": len(rows),
+            "rows": [
+                {
+                    "strategy_id": str(row["strategy_id"]),
+                    "owner_id": str(row["owner_id"]),
+                    "name": str(row["name"]),
+                    "created_at": str(row["created_at"]),
+                    "updated_at": str(row["updated_at"]),
+                }
+                for row in rows
+            ],
+        }, flush=True)
+    except Exception as exc:
+        print("STRATEGY_STUDIO_BACKGROUND_DIAGNOSTIC_ERROR =", {
+            "type": type(exc).__name__,
+            "error": str(exc),
+        }, flush=True)
+
     while True:
         ENGINE_RUNTIME_STATE["last_loop_started"] = time.time()
         ENGINE_RUNTIME_STATE["loop_iterations"] += 1
