@@ -77,6 +77,7 @@ class TP1Definition(_StrictModel):
     close_percent: float | None = None
     protection_r: float | None = None
     protection_mode: Literal["FIXED", "TP2_STEPS"] = "FIXED"
+    protection_trigger_method: Literal["CANDLE_CLOSE", "PRICE_TOUCH"] = "CANDLE_CLOSE"
     protection_steps: list[TP1ProtectionStep] = Field(default_factory=list)
 
 
@@ -341,6 +342,7 @@ def _normalize_tp1(payload: dict) -> dict:
     value = dict(tp1)
     value.setdefault("target_basis", "SL_DISTANCE")
     value.setdefault("protection_mode", "FIXED")
+    value.setdefault("protection_trigger_method", "CANDLE_CLOSE")
     value.setdefault("protection_steps", [])
 
     if value.get("enabled") is False:
@@ -350,11 +352,13 @@ def _normalize_tp1(payload: dict) -> dict:
             "protection_r": None,
             "target_basis": "SL_DISTANCE",
             "protection_mode": "FIXED",
+            "protection_trigger_method": "CANDLE_CLOSE",
             "protection_steps": [],
         })
     elif value.get("protection_mode") == "TP2_STEPS":
         value["protection_r"] = None
     else:
+        value["protection_trigger_method"] = "CANDLE_CLOSE"
         value["protection_steps"] = []
 
     normalized["tp1"] = value
@@ -542,7 +546,12 @@ def strategy_summary(definition: dict) -> str:
                 f"{_fmt(step['trigger_percent'])}%→secure {_fmt(step['secure_percent'])}%"
                 for step in tp1["protection_steps"]
             )
-            protect = f"step protect {step_text}"
+            trigger_label = (
+                "price touch"
+                if tp1.get("protection_trigger_method") == "PRICE_TOUCH"
+                else "candle close"
+            )
+            protect = f"step protect on {trigger_label} {step_text}"
         else:
             protection_percent = float(tp1["protection_r"]) * 100.0
             protect_basis = "TP2" if tp1["target_basis"] == "TP2_DISTANCE" else "SL"
