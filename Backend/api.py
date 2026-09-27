@@ -219,26 +219,6 @@ app.include_router(ctrader_router)
 app.include_router(trading_router)
 app.include_router(diagnostics_router)
 
-@app.get("/__strategy_saved_rows_diag_927")
-def _temporary_strategy_saved_rows_diag():
-    with database_engine.connect() as conn:
-        rows = conn.execute(sql_text(
-            "SELECT strategy_id, owner_id, name, created_at, updated_at "
-            "FROM saved_strategies ORDER BY updated_at DESC"
-        )).mappings().all()
-    return {
-        "count": len(rows),
-        "rows": [
-            {
-                "strategy_id": str(row["strategy_id"]),
-                "owner_id": str(row["owner_id"]),
-                "name": str(row["name"]),
-                "created_at": str(row["created_at"]),
-                "updated_at": str(row["updated_at"]),
-            }
-            for row in rows
-        ],
-    }
 app.include_router(shadow_router)
 app.include_router(strategy_lab_router)
 app.include_router(admin_access_router)
@@ -261,24 +241,14 @@ async def log_unhandled_api_errors(request: Request, call_next):
         traceback.print_exc()
         raise
 
-@app.on_event("shutdown")
-def stop_fast_backtest_manager():
-    from services.strategy_fast_jobs import shutdown_manager
-    shutdown_manager()
-
-
-@app.on_event("startup")
-def start_background_task():
-    global BACKGROUND_THREAD
-    print("Startup OK - warming panel cache")
-    # TEMPORARY READ-ONLY DIAGNOSTIC: inspect Strategy Studio persistence.
+def _emit_strategy_saved_rows_diagnostic_once():
     try:
         with database_engine.connect() as conn:
             rows = conn.execute(sql_text(
                 "SELECT strategy_id, owner_id, name, created_at, updated_at "
                 "FROM saved_strategies ORDER BY updated_at DESC"
             )).mappings().all()
-        diag_payload = {
+        payload = {
             "count": len(rows),
             "rows": [
                 {
@@ -291,18 +261,33 @@ def start_background_task():
                 for row in rows
             ],
         }
-        print("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC =", diag_payload, flush=True)
         os.write(
             2,
-            ("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC_STDERR = " + json.dumps(diag_payload) + "\n").encode("utf-8"),
+            ("STRATEGY_STUDIO_ONE_SHOT_DIAGNOSTIC = " + json.dumps(payload) + "\n").encode("utf-8"),
         )
     except Exception as exc:
-        error_payload = {"type": type(exc).__name__, "error": str(exc)}
-        print("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC_ERROR =", error_payload, flush=True)
         os.write(
             2,
-            ("STRATEGY_STUDIO_SAVED_ROWS_DIAGNOSTIC_ERROR_STDERR = " + json.dumps(error_payload) + "\n").encode("utf-8"),
+            ("STRATEGY_STUDIO_ONE_SHOT_DIAGNOSTIC_ERROR = " + json.dumps({
+                "type": type(exc).__name__,
+                "error": str(exc),
+            }) + "\n").encode("utf-8"),
         )
+
+
+@app.on_event("shutdown")
+def stop_fast_backtest_manager():
+    from services.strategy_fast_jobs import shutdown_manager
+    shutdown_manager()
+
+
+@app.on_event("startup")
+def start_background_task():
+    global BACKGROUND_THREAD
+    print("Startup OK - warming panel cache")
+    timer = threading.Timer(5.0, _emit_strategy_saved_rows_diagnostic_once)
+    timer.daemon = True
+    timer.start()
     try:
         from services.deriv_binary_settlement_recovery import start_settlement_recovery_worker
         start_settlement_recovery_worker()
@@ -2179,34 +2164,6 @@ def background_fetch():
 
 @app.get("/")
 def root():
-    try:
-        with database_engine.connect() as conn:
-            rows = conn.execute(sql_text(
-                "SELECT strategy_id, owner_id, name, created_at, updated_at "
-                "FROM saved_strategies ORDER BY updated_at DESC"
-            )).mappings().all()
-        payload = {
-            "count": len(rows),
-            "rows": [
-                {
-                    "strategy_id": str(row["strategy_id"]),
-                    "owner_id": str(row["owner_id"]),
-                    "name": str(row["name"]),
-                    "created_at": str(row["created_at"]),
-                    "updated_at": str(row["updated_at"]),
-                }
-                for row in rows
-            ],
-        }
-        os.write(2, ("STRATEGY_DIAG_ROOT = " + json.dumps(payload) + "\n").encode("utf-8"))
-    except Exception as exc:
-        os.write(
-            2,
-            ("STRATEGY_DIAG_ROOT_ERROR = " + json.dumps({
-                "type": type(exc).__name__,
-                "error": str(exc),
-            }) + "\n").encode("utf-8"),
-        )
     return {"message": "NathauxFX backend is running"}
 
 @app.get("/news-impact")
