@@ -218,6 +218,27 @@ app.include_router(performance_router)
 app.include_router(ctrader_router)
 app.include_router(trading_router)
 app.include_router(diagnostics_router)
+
+@app.get("/__strategy_saved_rows_diag_927")
+def _temporary_strategy_saved_rows_diag():
+    with database_engine.connect() as conn:
+        rows = conn.execute(sql_text(
+            "SELECT strategy_id, owner_id, name, created_at, updated_at "
+            "FROM saved_strategies ORDER BY updated_at DESC"
+        )).mappings().all()
+    return {
+        "count": len(rows),
+        "rows": [
+            {
+                "strategy_id": str(row["strategy_id"]),
+                "owner_id": str(row["owner_id"]),
+                "name": str(row["name"]),
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+            }
+            for row in rows
+        ],
+    }
 app.include_router(shadow_router)
 app.include_router(strategy_lab_router)
 app.include_router(admin_access_router)
