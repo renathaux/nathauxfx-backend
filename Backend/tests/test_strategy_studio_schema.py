@@ -70,6 +70,7 @@ def test_disabled_tp1_normalizes_values_to_none():
         "close_percent": None,
         "protection_r": None,
         "protection_mode": "FIXED",
+        "protection_trigger_method": "CANDLE_CLOSE",
         "protection_steps": [],
     }
 
@@ -205,6 +206,7 @@ def test_tp2_based_tp1_and_step_protection_are_valid():
         "close_percent": 40,
         "protection_r": None,
         "protection_mode": "TP2_STEPS",
+        "protection_trigger_method": "CANDLE_CLOSE",
         "protection_steps": [
             {"trigger_percent": 70, "secure_percent": 50},
             {"trigger_percent": 80, "secure_percent": 60},
@@ -223,6 +225,28 @@ def test_tp2_based_tp1_and_step_protection_are_valid():
     assert "TP1 70% of TP2 distance" in summary
     assert "70%→secure 50%" in summary
     assert "90%→secure 70%" in summary
+
+
+def test_price_touch_step_protection_is_valid_and_readable():
+    payload = valid_definition()
+    payload["tp1"] = {
+        "enabled": True,
+        "target_r": 0.70,
+        "target_basis": "TP2_DISTANCE",
+        "close_percent": 10,
+        "protection_r": None,
+        "protection_mode": "TP2_STEPS",
+        "protection_trigger_method": "PRICE_TOUCH",
+        "protection_steps": [
+            {"trigger_percent": 70, "secure_percent": 40},
+            {"trigger_percent": 75, "secure_percent": 50},
+            {"trigger_percent": 80, "secure_percent": 65},
+        ],
+    }
+    assert validation_errors(payload) == {}
+    normalized = normalize_definition(payload)
+    assert normalized["tp1"]["protection_trigger_method"] == "PRICE_TOUCH"
+    assert "step protect on price touch" in strategy_summary(payload)
 
 
 def test_tp2_based_tp1_cannot_be_beyond_tp2():
