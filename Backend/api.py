@@ -6159,7 +6159,7 @@ def load_live_backup():
 load_live_backup()
 
 @account_state_operation
-def sync_ctrader_account_state(force=False):
+def _sync_ctrader_account_state_once(force=False):
     connector_state = get_connection_state(force=force)
     assert_current_selection()
 
@@ -6195,6 +6195,24 @@ def sync_ctrader_account_state(force=False):
     )
 
     return LIVE_ACCOUNT_STATE
+
+
+def sync_ctrader_account_state(force=False):
+    """Publish cTrader state, retrying once if validation clears a stale selection."""
+    try:
+        return _sync_ctrader_account_state_once(force=force)
+    except AccountSelectionChanged as exc:
+        refreshed_identity = selected_identity()
+        print("CTRADER_ACCOUNT_STATE_SYNC_RETRY =", {
+            "reason": str(exc),
+            "selected_account_id": (
+                refreshed_identity.account_id if refreshed_identity else None
+            ),
+            "selected_environment": (
+                refreshed_identity.environment if refreshed_identity else None
+            ),
+        })
+        return _sync_ctrader_account_state_once(force=True)
 
 def get_signal_trade_plan(symbol):
     cached_data = PANEL_CACHE.get("data")
@@ -9990,6 +10008,63 @@ def get_frontend_redirect_url(status):
     return redirect_url
 
 
+def reconcile_ctrader_oauth_accounts(accounts_result):
+    """Make a newly authorized sole account usable immediately after OAuth."""
+    if not isinstance(accounts_result, dict):
+        return {
+            "ok": False,
+            "reason": "cTrader account refresh returned an invalid response",
+        }
+
+    if accounts_result.get("ok") is False:
+        return accounts_result
+
+    authorized_account_ids = []
+    for account_id in accounts_result.get("authorized_account_ids") or []:
+        account_id_text = str(account_id or "").strip()
+        if account_id_text and account_id_text not in authorized_account_ids:
+            authorized_account_ids.append(account_id_text)
+
+    active_account_id = str(
+        accounts_result.get("active_account_id") or ""
+    ).strip()
+
+    if active_account_id and active_account_id in authorized_account_ids:
+        return accounts_result
+
+    # A fresh OAuth grant can replace the token that authorized the previous
+    # selection. If the new grant exposes exactly one account, selecting it is
+    # deterministic and prevents the callback from leaving the app with no
+    # usable broker account.
+    if len(authorized_account_ids) != 1:
+        return accounts_result
+
+    selected_account_id = authorized_account_ids[0]
+    selection_result = set_active_ctrader_account(selected_account_id)
+    if not selection_result.get("ok"):
+        return {
+            **accounts_result,
+            "ok": False,
+            "reason": (
+                selection_result.get("reason")
+                or f"Could not activate cTrader account {selected_account_id}"
+            ),
+        }
+
+    refreshed = fetch_ctrader_accounts(refresh=False)
+    result = {
+        **accounts_result,
+        **refreshed,
+        "authorized_account_ids": authorized_account_ids,
+        "oauth_auto_selected_account_id": selected_account_id,
+    }
+    print("CTRADER_OAUTH_AUTO_SELECTED_ACCOUNT =", {
+        "account_id": selected_account_id,
+        "authorized_account_ids": authorized_account_ids,
+    })
+    return result
+
+
 @app.get("/ctrader/callback")
 def ctrader_oauth_callback(request: Request):
     code = request.query_params.get("code")
@@ -10043,12 +10118,43 @@ def ctrader_oauth_callback(request: Request):
     token_result = exchange_ctrader_authorization_code(code)
 
     if token_result.get("ok"):
-        accounts_result = fetch_ctrader_accounts(refresh=True)
-        sync_ctrader_account_state(force=True)
-        oauth_result = {
-            "ok": accounts_result.get("ok", True),
-            "reason": accounts_result.get("reason"),
-        }
+        try:
+            accounts_result = reconcile_ctrader_oauth_accounts(
+                fetch_ctrader_accounts(refresh=True)
+            )
+            if accounts_result.get("ok") is False:
+                oauth_result = {
+                    "ok": False,
+                    "reason": accounts_result.get("reason"),
+                }
+            else:
+                sync_ctrader_account_state(force=True)
+                final_accounts = fetch_ctrader_accounts(refresh=False)
+                oauth_result = {
+                    "ok": True,
+                    "reason": None,
+                    "active_account_id": final_accounts.get("active_account_id"),
+                    "authorized_account_ids": accounts_result.get(
+                        "authorized_account_ids", []
+                    ),
+                    "oauth_auto_selected_account_id": accounts_result.get(
+                        "oauth_auto_selected_account_id"
+                    ),
+                }
+        except Exception as exc:
+            reason = (
+                "cTrader authorization succeeded but account synchronization "
+                f"failed: {exc}"
+            )
+            oauth_result = {
+                "ok": False,
+                "reason": reason,
+            }
+            print("CTRADER_CALLBACK_ERROR_DEBUG =", {
+                "reason": reason,
+                "error_type": type(exc).__name__,
+                "redirect_uri": get_ctrader_redirect_uri_debug(),
+            })
     else:
         oauth_result = token_result
         print("CTRADER_CALLBACK_ERROR_DEBUG =", {
