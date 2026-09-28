@@ -244,6 +244,39 @@ def _rows_for_owner(session, owner_id):
     ).all()
 
 
+def managed_owner_for_account(account_identity, open_positions, *, session_factory=None) -> str | None:
+    """Resolve the unique Studio owner of an existing open broker position.
+
+    This is intentionally independent of the LIVE handoff gate so turning off
+    future Studio entries cannot abandon management of an already-open Studio
+    position.
+    """
+    factory = _factory(session_factory)
+    scope = _scope(account_identity)
+    account_id = _account_id(account_identity)
+    positions = _position_map(open_positions)
+    if not positions:
+        return None
+
+    with factory() as session:
+        rows = session.query(StrategySetupLifecycle).filter(
+            StrategySetupLifecycle.account_id == account_id,
+            StrategySetupLifecycle.account_scope == scope,
+            StrategySetupLifecycle.status.in_(_OPEN_STATUSES),
+            StrategySetupLifecycle.broker_position_id.is_not(None),
+        ).all()
+        owners = {
+            str(row.owner_id)
+            for row in rows
+            if str(row.broker_position_id) in positions
+        }
+    if not owners:
+        return None
+    if len(owners) != 1:
+        raise RuntimeError("STRATEGY_STUDIO_MANAGEMENT_OWNER_AMBIGUOUS")
+    return next(iter(owners))
+
+
 def account_has_managed_position(owner_id, account_identity, open_positions, *, session_factory=None) -> bool:
     """Return True only for an open broker position owned by this Studio/account scope."""
     factory = _factory(session_factory)
