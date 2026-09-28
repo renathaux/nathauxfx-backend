@@ -45,6 +45,10 @@ class SimulationRequest(BaseModel):
     end: datetime
     mode: Literal["FAST", "REPLAY"] = "FAST"
     risk_override: RiskOverride | None = None
+    max_concurrent_positions: int = 1
+    max_combined_open_risk_percent: float | None = None
+    max_concurrent_positions: int = 1
+    max_combined_open_risk_percent: float | None = None
     candles_5m: list[SimulationCandle]
     continuation: dict | None = None
     finalize: bool = True
@@ -142,6 +146,19 @@ def strategy_simulation_run(payload: SimulationRequest, request: Request):
         )
 
     override = _risk_override(payload.risk_override)
+    if payload.max_concurrent_positions < 1 or payload.max_concurrent_positions > 3:
+        raise HTTPException(
+            status_code=400,
+            detail="Max concurrent positions must be between 1 and 3",
+        )
+    if (
+        payload.max_combined_open_risk_percent is not None
+        and not 0 < float(payload.max_combined_open_risk_percent) <= 10
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Max combined open risk must be greater than 0% and no more than 10%",
+        )
 
     try:
         with pinned_account() as identity:
@@ -175,6 +192,8 @@ def strategy_simulation_run(payload: SimulationRequest, request: Request):
                 evaluation_end=payload.end,
                 continuation=payload.continuation,
                 finalize_open_trade=payload.finalize,
+                max_concurrent_positions=payload.max_concurrent_positions,
+                max_combined_open_risk_percent=payload.max_combined_open_risk_percent,
             )
     except HTTPException:
         raise
@@ -203,6 +222,8 @@ def strategy_simulation_run(payload: SimulationRequest, request: Request):
             "slippage": False,
             "ambiguous_intrabar_excluded": True,
             "live_trading_enabled": False,
+            "max_concurrent_positions": payload.max_concurrent_positions,
+            "max_combined_open_risk_percent": payload.max_combined_open_risk_percent,
         },
         **result,
     }
@@ -231,6 +252,8 @@ class FastJobRequest(BaseModel):
     start: datetime
     end: datetime
     risk_override: RiskOverride | None = None
+    max_concurrent_positions: int = 1
+    max_combined_open_risk_percent: float | None = None
 
 
 def _fast_jobs():
