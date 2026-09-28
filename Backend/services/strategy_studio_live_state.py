@@ -143,8 +143,8 @@ def studio_live_enabled(owner_id, session_factory=None) -> bool:
 def get_enabled_studio_live_owner(session_factory=None) -> str | None:
     """Return the sole enabled owner; reject ambiguous enabled state.
 
-    Zero enabled owners means the Studio gate is OFF and V3B remains the LIVE
-    authority. More than one enabled owner is an invalid durable state and must
+    Zero enabled owners means no Studio authority. Entry remains blocked unless
+    a symbol has an explicit legacy authority assignment. More than one enabled owner is an invalid durable state and must
     fail closed rather than silently falling back to another candidate source.
     """
     factory = session_factory or SessionLocal

@@ -63,7 +63,7 @@ def _require_api_contract(name):
     return value
 
 
-def test_gate_off_keeps_existing_v3b_candidate_unchanged(monkeypatch):
+def test_gate_off_has_no_implicit_v3b_candidate(monkeypatch):
     selector = _require_api_contract("select_auto_execution_candidate")
     monkeypatch.setattr(api, "get_enabled_studio_live_owner", lambda *args, **kwargs: None)
     studio_builder = MagicMock()
@@ -72,15 +72,16 @@ def test_gate_off_keeps_existing_v3b_candidate_unchanged(monkeypatch):
     panel = _v3b_panel("SELL")
     selected = selector(panel, "EURUSD")
 
-    assert selected["source"] == "V3B"
-    assert selected["plan"] is panel["EURUSD"]
-    assert selected["plan"]["signal"] == "SELL"
+    assert selected["source"] == "NONE"
+    assert selected["plan"]["reason"] == "NO_LIVE_STRATEGY_FOR_SYMBOL"
+    assert selected["plan"]["signal"] == "WAIT"
     studio_builder.assert_not_called()
 
 
 def test_gate_on_uses_studio_candidate_and_never_falls_back_to_v3b(monkeypatch):
     selector = _require_api_contract("select_auto_execution_candidate")
     monkeypatch.setattr(api, "get_enabled_studio_live_owner", lambda *args, **kwargs: "user:1")
+    monkeypatch.setattr(api, "get_studio_live_display_profile", lambda owner: {"enabled": True, "strategy_id": "strat-1", "enabled_strategy_id": "strat-1", "symbols": ["EURUSD"]})
     monkeypatch.setattr(api, "current_identity", lambda: AccountIdentity("acct-1", "demo"))
     monkeypatch.setattr(
         api,
@@ -110,6 +111,7 @@ def test_gate_on_uses_studio_candidate_and_never_falls_back_to_v3b(monkeypatch):
 def test_gate_on_wait_does_not_fall_back_to_v3b(monkeypatch):
     selector = _require_api_contract("select_auto_execution_candidate")
     monkeypatch.setattr(api, "get_enabled_studio_live_owner", lambda *args, **kwargs: "user:1")
+    monkeypatch.setattr(api, "get_studio_live_display_profile", lambda owner: {"enabled": True, "strategy_id": "strat-1", "enabled_strategy_id": "strat-1", "symbols": ["EURUSD"]})
     monkeypatch.setattr(api, "current_identity", lambda: AccountIdentity("acct-1", "demo"))
     monkeypatch.setattr(api, "get_ctrader_account_snapshot", lambda: {"balance": 10000.0, "equity": 10000.0})
     monkeypatch.setattr(

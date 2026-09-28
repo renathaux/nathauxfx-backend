@@ -193,7 +193,8 @@ def test_resume_beyond_tp1_closes_partial_once_without_retroactive_protection(db
     assert protected == []
     with db_session_factory() as session:
         row = session.get(StrategySetupLifecycle, "setup-1")
-        assert row.tp1_completed_at is not None
+        assert row.tp1_completed_at is None
+        assert row.management_state["tp1_state"] == "PENDING"
         assert row.protection_applied_at is None
         assert row.management_suspended_at is None
 
@@ -221,24 +222,22 @@ def test_resume_below_tp1_does_nothing_and_clears_suspension(db_session_factory,
 
 def test_continuous_tp1_hit_closes_partial_then_applies_configured_protection(db_session_factory, monkeypatch):
     from services import strategy_studio_position_manager as manager
-
     seed_lifecycle(db_session_factory)
     sequence = []
-    monkeypatch.setattr(manager, "close_position", lambda position_id, volume=None: sequence.append(("close", position_id, volume)) or {"ok": True})
-    monkeypatch.setattr(manager, "modify_position_stop_loss", lambda position_id, stop_loss, take_profit_price=None: sequence.append(("protect", position_id, stop_loss, take_profit_price)) or {"ok": True})
-
-    result = manager.manage_selected_account_positions(
-        "owner-1", AccountIdentity("acct-a", "demo"), [open_position(price=1.1060)],
-        prices(bid=1.1060), session_factory=db_session_factory,
-    )
-    assert [item[0] for item in sequence] == ["close", "protect"]
-    assert sequence[0] == ("close", "pos-1", 5000)
-    assert sequence[1][2] == pytest.approx(1.1025)
-    assert result["actions"][0]["action"] == "TP1_PARTIAL_CLOSE_AND_PROTECT"
+    monkeypatch.setattr(manager, "close_position", lambda *a, **k: sequence.append("close") or {"ok": True})
+    monkeypatch.setattr(manager, "modify_position_stop_loss", lambda *a, **k: sequence.append("protect") or {"ok": True})
+    identity = AccountIdentity("acct-a", "demo")
+    manager.manage_selected_account_positions("owner-1", identity, [open_position()], prices(), session_factory=db_session_factory)
+    assert sequence == ["close"]
+    manager.manage_selected_account_positions("owner-1", identity, [open_position(volume=5000)], prices(), session_factory=db_session_factory)
+    assert sequence == ["close", "protect"]
     with db_session_factory() as session:
         row = session.get(StrategySetupLifecycle, "setup-1")
         assert row.tp1_completed_at is not None
-        assert row.protection_applied_at is not None
+        assert row.protection_applied_at is None
+    manager.manage_selected_account_positions("owner-1", identity, [open_position(volume=5000, sl=1.1025)], prices(), session_factory=db_session_factory)
+    with db_session_factory() as session:
+        assert session.get(StrategySetupLifecycle, "setup-1").protection_applied_at is not None
 
 
 def test_tp2_based_tp1_waits_for_percentage_of_tp2_path(db_session_factory, monkeypatch):
@@ -276,6 +275,10 @@ def test_tp2_based_tp1_waits_for_percentage_of_tp2_path(db_session_factory, monk
         prices(bid=1.1070), session_factory=db_session_factory,
     )
     assert closed == [("pos-1", 4000)]
+    hit = manager.manage_selected_account_positions(
+        "owner-1", AccountIdentity("acct-a", "demo"), [open_position(price=1.1070, volume=6000)],
+        prices(bid=1.1070), session_factory=db_session_factory,
+    )
     assert protected[0][0][1] == pytest.approx(1.1050)
     assert hit["actions"][0]["protected_sl"] == pytest.approx(1.1050)
 
@@ -315,6 +318,10 @@ def test_step_protection_advances_70_50_80_60_90_70(db_session_factory, monkeypa
         prices(bid=1.1070), session_factory=db_session_factory,
     )
     assert closed == [("pos-1", 4000)]
+    first = manager.manage_selected_account_positions(
+        "owner-1", AccountIdentity("acct-a", "demo"), [open_position(price=1.1070, volume=6000)],
+        prices(bid=1.1070), session_factory=db_session_factory,
+    )
     assert protected[-1][1] == pytest.approx(1.1050)
     assert first["actions"][0]["trigger_percent"] == 70
     assert first["actions"][0]["secure_percent"] == 50
@@ -417,7 +424,7 @@ def test_candle_close_step_protection_waits_for_closed_5m_confirmation(db_sessio
     second = manager.manage_selected_account_positions(
         "owner-1",
         AccountIdentity("acct-a", "demo"),
-        [open_position(price=1.1080, entry=1.1000, sl=1.0950, tp2=1.1100)],
+        [open_position(volume=5000, price=1.1080, entry=1.1000, sl=1.0950, tp2=1.1100)],
         prices(bid=1.1080),
         closed_prices={"EURUSD": {"close": 1.1069, "closed_at": "2099-01-01T00:00:00+00:00"}},
         session_factory=db_session_factory,
@@ -429,7 +436,7 @@ def test_candle_close_step_protection_waits_for_closed_5m_confirmation(db_sessio
     third = manager.manage_selected_account_positions(
         "owner-1",
         AccountIdentity("acct-a", "demo"),
-        [open_position(price=1.1072, entry=1.1000, sl=1.0950, tp2=1.1100)],
+        [open_position(volume=5000, price=1.1072, entry=1.1000, sl=1.0950, tp2=1.1100)],
         prices(bid=1.1072),
         closed_prices={"EURUSD": {"close": 1.1070, "closed_at": "2099-01-01T00:00:00+00:00"}},
         session_factory=db_session_factory,
@@ -446,7 +453,7 @@ def test_tp1_completed_prevents_duplicate_partial_close(db_session_factory, monk
     monkeypatch.setattr(manager, "close_position", lambda *a, **k: pytest.fail("TP1 already completed"))
     monkeypatch.setattr(manager, "modify_position_stop_loss", lambda *a, **k: pytest.fail("no duplicate protection action"))
     result = manager.manage_selected_account_positions(
-        "owner-1", AccountIdentity("acct-a", "demo"), [open_position(price=1.1080)],
+        "owner-1", AccountIdentity("acct-a", "demo"), [open_position(price=1.1080, sl=1.1025)],
         prices(bid=1.1080), session_factory=db_session_factory,
     )
     assert result["actions"] == []
@@ -526,3 +533,160 @@ def test_live_active_strategy_is_locked_while_selected_account_position_is_open(
         studio.deactivate_strategy("owner-1", "strat-live", True, db_session_factory)
     clone = studio.clone_strategy("owner-1", "strat-live", "Clone", db_session_factory)
     assert clone["locked"] is False
+
+
+def test_uncertain_partial_never_repeated_on_next_poll(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+    seed_lifecycle(db_session_factory)
+    calls = []
+    monkeypatch.setattr(manager, "close_position", lambda *a, **k: calls.append(k) or {"ok": False, "reason": "timeout"})
+    for _ in range(2):
+        manager.manage_selected_account_positions("owner-1", AccountIdentity("acct-a", "demo"), [open_position()], prices(), session_factory=db_session_factory)
+    assert len(calls) == 1
+
+
+def test_partial_intent_is_committed_before_broker_call(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+    seed_lifecycle(db_session_factory)
+    def crash(*a, **k):
+        with db_session_factory() as session:
+            row = session.get(StrategySetupLifecycle, "setup-1")
+            assert (getattr(row, "management_state", None) or {}).get("tp1_partial_close_requested") is True
+        raise RuntimeError("process died")
+    monkeypatch.setattr(manager, "close_position", crash)
+    manager.manage_selected_account_positions("owner-1", AccountIdentity("acct-a", "demo"), [open_position()], prices(), session_factory=db_session_factory)
+
+
+def test_broker_ack_is_not_stop_confirmation(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+    seed_lifecycle(db_session_factory, tp1_done=True, strategy_definition=definition(protection_mode="TP2_STEPS", protection_trigger_method="PRICE_TOUCH", protection_steps=[{"trigger_percent": 50, "secure_percent": 30}]))
+    monkeypatch.setattr(manager, "modify_position_stop_loss", lambda *a, **k: {"ok": True})
+    manager.manage_selected_account_positions("owner-1", AccountIdentity("acct-a", "demo"), [open_position()], prices(), session_factory=db_session_factory)
+    with db_session_factory() as session:
+        row = session.get(StrategySetupLifecycle, "setup-1")
+        assert row.protection_applied_at is None
+        assert row.management_state["protection_state"] == "PENDING"
+
+
+def test_snapshot_levels_survive_broker_stop_and_strategy_change(db_session_factory):
+    from services import strategy_studio_position_manager as manager
+    seed_lifecycle(db_session_factory)
+    with db_session_factory() as session:
+        row = session.get(StrategySetupLifecycle, "setup-1")
+        row.execution_snapshot = {"entry": 1.1, "initial_sl": 1.095, "tp2": 1.11, "strategy_name": "Original"}
+        session.commit()
+    states = manager.managed_position_states("owner-1", AccountIdentity("acct-a", "demo"), [open_position(sl=1.108, tp2=1.2)], session_factory=db_session_factory)
+    assert states["pos-1"]["tp1"] == pytest.approx(1.105)
+    assert states["pos-1"]["tp2"] == 1.11
+    assert states["pos-1"]["strategy_name"] == "Original"
+    assert states["pos-1"]["broker_sl"] == 1.108
+    assert manager.managed_position_states("owner-1", AccountIdentity("acct-a", "demo"), [open_position(position_id="manual")], session_factory=db_session_factory) == {}
+
+
+def test_partial_close_claim_is_unique_across_concurrent_workers(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from services import strategy_studio_position_manager as manager
+    engine = create_engine(f"sqlite:///{tmp_path / 'management.db'}", connect_args={"check_same_thread": False, "timeout": 10})
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    seed_lifecycle(factory)
+    from threading import Barrier
+    barrier = Barrier(2)
+    original_hit = manager._target_hit
+    def simultaneous_hit(*args):
+        barrier.wait(timeout=5)
+        return original_hit(*args)
+    monkeypatch.setattr(manager, "_target_hit", simultaneous_hit)
+    calls = []
+    monkeypatch.setattr(manager, "close_position", lambda *a, **k: calls.append(k) or {"ok": True})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda _: manager.manage_selected_account_positions("owner-1", AccountIdentity("acct-a", "demo"), [open_position()], prices(), session_factory=factory), range(2)))
+    assert len(calls) == 1
+
+
+def test_protection_rejection_is_visible_and_never_moves_target_backward(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+    seed_lifecycle(db_session_factory, tp1_done=True, strategy_definition=definition(protection_mode="TP2_STEPS", protection_trigger_method="PRICE_TOUCH", protection_steps=[{"trigger_percent": 50, "secure_percent": 30}, {"trigger_percent": 80, "secure_percent": 60}]))
+    calls = []
+    monkeypatch.setattr(manager, "modify_position_stop_loss", lambda *a, **k: calls.append(a) or {"ok": False, "reason": "broker rejected"})
+    identity = AccountIdentity("acct-a", "demo")
+    manager.manage_selected_account_positions("owner-1", identity, [open_position(price=1.109)], prices(bid=1.109), session_factory=db_session_factory)
+    manager.manage_selected_account_positions("owner-1", identity, [open_position(price=1.106)], prices(), session_factory=db_session_factory)
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    state = manager.managed_position_states("owner-1", identity, [open_position()], session_factory=db_session_factory)["pos-1"]
+    assert state["protection_state"] == "FAILED"
+    assert state["protection_step_index"] == 1
+    assert state["target_protected_sl"] == pytest.approx(1.106)
+    assert state["broker_confirmed_sl"] is None
+    assert state["management_error"] == "broker rejected"
+
+
+def test_restart_observation_confirms_partial_without_resending(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+    seed_lifecycle(db_session_factory)
+    calls = []
+    monkeypatch.setattr(manager, "close_position", lambda *a, **k: calls.append(a) or {"ok": False, "reason": "timeout"})
+    monkeypatch.setattr(manager, "modify_position_stop_loss", lambda *a, **k: {"ok": True})
+    identity = AccountIdentity("acct-a", "demo")
+    manager.manage_selected_account_positions("owner-1", identity, [open_position()], prices(), session_factory=db_session_factory)
+    manager.manage_selected_account_positions("owner-1", identity, [open_position(volume=5000)], prices(), session_factory=db_session_factory)
+    state = manager.managed_position_states("owner-1", identity, [open_position(volume=5000)], session_factory=db_session_factory)["pos-1"]
+    assert len(calls) == 1
+    assert state["tp1_state"] == "PARTIAL_CLOSED"
+    assert state["tp1_partial_close_confirmed"] is True
+    assert state["tp1_closed_volume"] == 5000
+
+
+def test_read_only_state_never_reports_protection_confirmed_against_lower_broker_stop(db_session_factory):
+    from services import strategy_studio_position_manager as manager
+    seed_lifecycle(db_session_factory, tp1_done=True)
+    with db_session_factory() as session:
+        row = session.get(StrategySetupLifecycle, "setup-1")
+        row.execution_snapshot = {"entry": 1.1, "initial_sl": 1.095, "tp2": 1.11}
+        row.management_state = {"target_protected_sl": 1.105, "broker_confirmed_sl": 1.105, "protection_state": "CONFIRMED"}
+        session.commit()
+    state = manager.managed_position_states("owner-1", AccountIdentity("acct-a", "demo"), [open_position(sl=1.095)], session_factory=db_session_factory)["pos-1"]
+    assert state["protection_state"] != "CONFIRMED"
+    assert state["broker_confirmed_sl"] is None
+
+
+def test_pending_stop_recovers_after_crash_even_if_price_retreats(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+    seed_lifecycle(db_session_factory, tp1_done=True, strategy_definition=definition(protection_mode="TP2_STEPS", protection_trigger_method="PRICE_TOUCH", protection_steps=[{"trigger_percent": 50, "secure_percent": 30}, {"trigger_percent": 80, "secure_percent": 60}]))
+    with db_session_factory() as session:
+        row = session.get(StrategySetupLifecycle, "setup-1")
+        row.execution_snapshot = {"entry": 1.1, "initial_sl": 1.095, "tp2": 1.11}
+        row.management_state = {"protection_state": "PENDING", "target_protected_sl": 1.106, "protection_step_index": 1, "protection_trigger_percent": 80, "protection_secure_percent": 60}
+        session.commit()
+    calls = []
+    monkeypatch.setattr(manager, "modify_position_stop_loss", lambda *a, **k: calls.append(a) or {"ok": True})
+    identity = AccountIdentity("acct-a", "demo")
+    manager.manage_selected_account_positions("owner-1", identity, [open_position(price=1.107)], prices(bid=1.107), session_factory=db_session_factory)
+    assert calls == [("pos-1", 1.106)]
+    state = manager.managed_position_states("owner-1", identity, [open_position(sl=1.095)], session_factory=db_session_factory)["pos-1"]
+    assert state["protection_step_index"] == 1
+    manager.manage_selected_account_positions("owner-1", identity, [open_position(sl=1.106)], prices(), session_factory=db_session_factory)
+    assert len(calls) == 1
+    state = manager.managed_position_states("owner-1", identity, [open_position(sl=1.106)], session_factory=db_session_factory)["pos-1"]
+    assert state["protection_state"] == "CONFIRMED"
+
+
+def test_confirmed_stop_regression_retries_saved_target_after_price_retreat(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+    seed_lifecycle(db_session_factory, tp1_done=True, strategy_definition=definition(protection_mode="TP2_STEPS", protection_trigger_method="PRICE_TOUCH", protection_steps=[{"trigger_percent": 80, "secure_percent": 60}]))
+    with db_session_factory() as session:
+        row = session.get(StrategySetupLifecycle, "setup-1")
+        row.execution_snapshot = {"entry": 1.1, "initial_sl": 1.095, "tp2": 1.11}
+        row.management_state = {"protection_state": "CONFIRMED", "target_protected_sl": 1.106, "broker_confirmed_sl": 1.106, "protection_step_index": 0, "protection_trigger_percent": 80, "protection_secure_percent": 60}
+        session.commit()
+    calls = []
+    monkeypatch.setattr(manager, "modify_position_stop_loss", lambda *a, **k: calls.append(a) or {"ok": True})
+    identity = AccountIdentity("acct-a", "demo")
+    manager.manage_selected_account_positions("owner-1", identity, [open_position(price=1.107, sl=1.095)], prices(bid=1.107), session_factory=db_session_factory)
+    assert calls == [("pos-1", 1.106)]
+    with db_session_factory() as session:
+        state = session.get(StrategySetupLifecycle, "setup-1").management_state
+        assert state["protection_state"] == "PENDING"
+        assert state["broker_confirmed_sl"] is None
+        assert state["last_confirmed_sl"] == 1.106

@@ -78,10 +78,11 @@ def _current_price(symbol, side, position, prices):
 def _levels(row, position):
     definition = row.definition_snapshot if isinstance(row.definition_snapshot, dict) else {}
     tp1 = definition.get("tp1") if isinstance(definition.get("tp1"), dict) else {}
-    side = _side(row, position)
-    entry = _float((position or {}).get("entry"), (position or {}).get("entry_price"), (position or {}).get("openPrice"))
-    stop = _float((position or {}).get("sl"), (position or {}).get("stop_loss"), (position or {}).get("stopLoss"))
-    tp2 = _float((position or {}).get("tp2"), (position or {}).get("take_profit"), (position or {}).get("takeProfit"))
+    snapshot = row.execution_snapshot or {}
+    side = str(row.direction).upper()
+    entry = _float(snapshot.get("entry"))
+    stop = _float(snapshot.get("initial_sl"))
+    tp2 = _float(snapshot.get("tp2"))
     try:
         target_r = float(tp1.get("target_r"))
     except (TypeError, ValueError):
@@ -255,7 +256,7 @@ def _partial_volume(row, position, close_percent):
     )
 
     if step is not None and step > 0:
-        units = int(round(target / step) * step)
+        units = int(math.floor(target / step) * step)
     else:
         units = int(round(target))
 
@@ -380,222 +381,158 @@ def _terminalize_missing(rows, positions, now):
     return count
 
 
-def _partial_close(row, position, levels, price, now, *, catchup):
-    volume = _partial_volume(row, position, levels["close_percent"])
-    if volume is None:
-        return {"action": "TP1_PARTIAL_CLOSE", "status": "BLOCKED", "reason": "INVALID_PARTIAL_CLOSE_VOLUME"}
-    result = close_position(str(row.broker_position_id), volume=volume)
-    if not isinstance(result, dict) or not result.get("ok"):
-        if _is_ambiguous(result):
-            row.status = "RECONCILIATION_REQUIRED"
-            row.updated_at = now
-            return {
-                "action": "TP1_CATCHUP_PARTIAL_CLOSE" if catchup else "TP1_PARTIAL_CLOSE_AND_PROTECT",
-                "status": "RECONCILIATION_REQUIRED",
-                "broker_result": result,
-            }
-        return {
-            "action": "TP1_CATCHUP_PARTIAL_CLOSE" if catchup else "TP1_PARTIAL_CLOSE_AND_PROTECT",
-            "status": "FAILED",
-            "broker_result": result,
-        }
-
-    row.tp1_completed_at = now
-    row.updated_at = now
-    if catchup:
-        return {"action": "TP1_CATCHUP_PARTIAL_CLOSE", "status": "COMPLETED", "volume": volume}
-
-    step = None
-    if levels.get("protection_mode") == "TP2_STEPS":
-        if levels.get("protection_trigger_method") == "CANDLE_CLOSE":
-            # v18 behavior: TP1 partial close is touch-based, but the step
-            # ladder waits for a closed 5m candle before moving broker SL.
-            return {
-                "action": "TP1_PARTIAL_CLOSE",
-                "status": "COMPLETED",
-                "volume": volume,
-                "protection_deferred": True,
-                "protection_trigger_method": "CANDLE_CLOSE",
-            }
-        step = _step_for_price(levels, price)
-        protected = step.get("protected") if step else None
-    else:
-        protected = levels.get("protected")
-
-    if protected is None:
-        return {
-            "action": "TP1_PARTIAL_CLOSE_AND_PROTECT",
-            "status": "PROTECTION_FAILED",
-            "volume": volume,
-            "reason": "PROTECTION_LEVEL_UNAVAILABLE",
-        }
-    protection = modify_position_stop_loss(
-        str(row.broker_position_id),
-        protected,
-        take_profit_price=levels.get("tp2"),
-    )
-    if not isinstance(protection, dict) or not protection.get("ok"):
-        if _is_ambiguous(protection):
-            row.status = "RECONCILIATION_REQUIRED"
-            row.updated_at = now
-            return {
-                "action": "TP1_PARTIAL_CLOSE_AND_PROTECT",
-                "status": "RECONCILIATION_REQUIRED",
-                "volume": volume,
-                "broker_result": protection,
-            }
-        return {
-            "action": "TP1_PARTIAL_CLOSE_AND_PROTECT",
-            "status": "PROTECTION_FAILED",
-            "volume": volume,
-            "broker_result": protection,
-        }
-    row.protection_applied_at = now
-    row.updated_at = now
-    return {
-        "action": "TP1_PARTIAL_CLOSE_AND_PROTECT",
-        "status": "COMPLETED",
-        "volume": volume,
-        "protected_sl": protected,
-        "trigger_percent": step.get("trigger_percent") if step else None,
-        "secure_percent": step.get("secure_percent") if step else None,
-    }
+def _state(row, **updates):
+    row.management_state = {**(row.management_state or {}), **updates}
+    return row.management_state
 
 
-def _advance_step_protection(row, position, levels, price, now):
-    step = _step_for_price(levels, price)
-    if step is None:
-        return None
-    desired = _float(step.get("protected"))
-    current_sl = _float(
-        (position or {}).get("sl"),
-        (position or {}).get("stop_loss"),
-        (position or {}).get("stopLoss"),
-    )
-    if not _is_more_protective(levels.get("side"), current_sl, desired):
-        return None
-
-    result = modify_position_stop_loss(
-        str(row.broker_position_id),
-        desired,
-        take_profit_price=levels.get("tp2"),
-    )
-    if not isinstance(result, dict) or not result.get("ok"):
-        if _is_ambiguous(result):
-            row.status = "RECONCILIATION_REQUIRED"
-            row.updated_at = now
-            return {
-                "action": "TP2_STEP_PROTECTION",
-                "status": "RECONCILIATION_REQUIRED",
-                "trigger_percent": step.get("trigger_percent"),
-                "secure_percent": step.get("secure_percent"),
-                "broker_result": result,
-            }
-        return {
-            "action": "TP2_STEP_PROTECTION",
-            "status": "FAILED",
-            "trigger_percent": step.get("trigger_percent"),
-            "secure_percent": step.get("secure_percent"),
-            "broker_result": result,
-        }
-
-    row.protection_applied_at = now
-    row.updated_at = now
-    return {
-        "action": "TP2_STEP_PROTECTION",
-        "status": "COMPLETED",
-        "trigger_percent": step.get("trigger_percent"),
-        "secure_percent": step.get("secure_percent"),
-        "protected_sl": desired,
-    }
+def _confirm_observation(row, position, now):
+    state = row.management_state or {}
+    current_sl = _float(position.get("sl"), position.get("stop_loss"), position.get("stopLoss"))
+    target = _float(state.get("target_protected_sl"))
+    if target is not None and current_sl is not None and not _is_more_protective(row.direction, current_sl, target):
+        _state(row, protection_state="CONFIRMED", broker_confirmed_sl=current_sl, last_confirmed_sl=current_sl)
+        row.protection_applied_at = now
+    elif target is not None and state.get("protection_state") == "CONFIRMED":
+        _state(row, protection_state="PENDING", last_confirmed_sl=state.get("broker_confirmed_sl"), broker_confirmed_sl=None, management_error="BROKER_STOP_BELOW_TARGET")
+        row.protection_applied_at = None
+    remaining = _float(position.get("volume_units"), position.get("volume"))
+    before = _float(state.get("tp1_volume_before"))
+    requested = _float(state.get("tp1_requested_volume"))
+    if state.get("tp1_partial_close_requested") and not state.get("tp1_partial_close_confirmed"):
+        if remaining is not None and before is not None and requested is not None and remaining <= before - requested:
+            row.tp1_completed_at = now
+            _state(row, tp1_partial_close_confirmed=True, tp1_closed_volume=before - remaining, tp1_state="PARTIAL_CLOSED", management_error=None)
+            if row.status == "RECONCILIATION_REQUIRED":
+                row.status = "CONSUMED"
 
 
 def _manage(owner_id, account_identity, open_positions, prices, *, resume, closed_prices=None, session_factory=None):
     factory = _factory(session_factory)
-    scope = _scope(account_identity)
-    account_id = _account_id(account_identity)
+    scope, account_id = _scope(account_identity), _account_id(account_identity)
     positions = _position_map(open_positions)
     now = datetime.now(timezone.utc)
-    actions = []
-    terminalized = 0
-
+    actions, terminalized = [], 0
     with factory() as session:
-        all_owner_rows = _rows_for_owner(session, owner_id)
-        rows = [
-            row for row in all_owner_rows
-            if str(row.account_id) == account_id and str(row.account_scope) == scope
-        ]
-        if not rows and all_owner_rows:
-            session.rollback()
-            return {
-                "owner_id": str(owner_id),
-                "account_scope": scope,
-                "status": "INACTIVE_ACCOUNT_NOT_MANAGED",
-                "actions": [],
-                "terminalized": 0,
-            }
-
-        terminalized = _terminalize_missing(rows, positions, now)
-        for row in rows:
+        all_rows = _rows_for_owner(session, owner_id)
+        ids = [row.setup_id for row in all_rows if str(row.account_id) == account_id and row.account_scope == scope]
+        if not ids and all_rows:
+            return {"owner_id": str(owner_id), "account_scope": scope, "status": "INACTIVE_ACCOUNT_NOT_MANAGED", "actions": [], "terminalized": 0}
+        for setup_id in ids:
+            # Re-read under a database lock, including after an earlier row committed.
+            row = session.query(StrategySetupLifecycle).filter_by(setup_id=setup_id).populate_existing().with_for_update().one()
             position = positions.get(str(row.broker_position_id))
-            if position is None or str(row.status).upper() not in _OPEN_STATUSES:
+            if position is None:
+                terminalized += _terminalize_missing([row], positions, now)
+                session.commit()
                 continue
-
             was_suspended = row.management_suspended_at is not None
             if resume:
                 row.management_suspended_at = None
-                row.updated_at = now
             elif was_suspended:
+                session.rollback()
                 continue
-
-            definition = row.definition_snapshot if isinstance(row.definition_snapshot, dict) else {}
-            tp1_definition = definition.get("tp1") if isinstance(definition.get("tp1"), dict) else {}
-            if not tp1_definition.get("enabled"):
-                continue
-
+            # Legacy lifecycle proof permits freezing its first observed levels, never
+            # attaching an unowned broker trade to a currently selected strategy.
+            if row.execution_snapshot is None:
+                row.execution_snapshot = {"entry": _float(position.get("entry"), position.get("entry_price")), "initial_sl": _float(position.get("sl"), position.get("stop_loss")), "tp2": _float(position.get("tp2"), position.get("take_profit")), "strategy_id": row.strategy_id, "strategy_name": row.strategy_id, "legacy_snapshot": True}
+            if row.initial_volume_units is None:
+                row.initial_volume_units = _float(position.get("volume_units"), position.get("volume"))
+            _confirm_observation(row, position, now)
+            _state(row, last_management_timestamp=now.isoformat())
+            row.updated_at = now
             levels = _levels(row, position)
-            price = _current_price(str(row.symbol), levels["side"], position, prices)
-
-            if row.tp1_completed_at is None:
-                if not _target_hit(
-                    levels["side"], price, levels["target"], position
-                ):
-                    continue
-                action = _partial_close(
-                    row, position, levels, price, now,
-                    catchup=bool(resume and was_suspended),
-                )
-                actions.append(action)
+            if not levels["enabled"]:
+                session.commit()
                 continue
-
-            if levels.get("protection_mode") == "TP2_STEPS":
-                protection_price = (
-                    _closed_price(
-                        str(row.symbol),
-                        closed_prices,
-                        after=row.tp1_completed_at,
-                    )
-                    if levels.get("protection_trigger_method") == "CANDLE_CLOSE"
-                    else price
-                )
-                action = _advance_step_protection(
-                    row, position, levels, protection_price, now
-                )
-                if action is not None:
-                    action["protection_trigger_method"] = levels.get(
-                        "protection_trigger_method"
-                    )
-                    actions.append(action)
-
-        session.commit()
-
-    return {
-        "owner_id": str(owner_id),
-        "account_scope": scope,
-        "status": "OK",
-        "actions": actions,
-        "terminalized": terminalized,
-    }
+            state = row.management_state or {}
+            price = _current_price(row.symbol, levels["side"], position, prices)
+            if row.tp1_completed_at is None:
+                if state.get("tp1_partial_close_requested") or row.tp1_requested_at is not None or row.status == "RECONCILIATION_REQUIRED":
+                    session.commit()
+                    continue
+                if not _target_hit(levels["side"], price, levels["target"], position):
+                    session.commit()
+                    continue
+                volume = _partial_volume(row, position, levels["close_percent"])
+                if volume is None:
+                    _state(row, management_error="INVALID_PARTIAL_CLOSE_VOLUME")
+                    session.commit()
+                    actions.append({"action": "TP1_PARTIAL_CLOSE", "status": "BLOCKED", "reason": "INVALID_PARTIAL_CLOSE_VOLUME"})
+                    continue
+                claimed = session.query(StrategySetupLifecycle).filter(
+                    StrategySetupLifecycle.setup_id == setup_id,
+                    StrategySetupLifecycle.tp1_requested_at.is_(None),
+                ).update({StrategySetupLifecycle.tp1_requested_at: now}, synchronize_session=False)
+                if claimed != 1:
+                    session.rollback()
+                    continue
+                _state(row, tp1_triggered=True, tp1_partial_close_requested=True, tp1_requested_volume=volume, tp1_volume_before=_float(position.get("volume_units"), position.get("volume")), tp1_state="PENDING")
+                # Commit before sending: crashes/timeouts must never repeat a close.
+                session.commit()
+                try:
+                    result = close_position(str(row.broker_position_id), volume=volume)
+                except Exception as exc:
+                    result = {"ok": False, "reason": str(exc)}
+                row = session.query(StrategySetupLifecycle).filter_by(setup_id=setup_id).populate_existing().with_for_update().one()
+                if not isinstance(result, dict) or not result.get("ok"):
+                    row.status = "RECONCILIATION_REQUIRED"
+                    _state(row, tp1_state="RECONCILIATION_REQUIRED", management_error=(result or {}).get("reason") or "PARTIAL_CLOSE_UNCONFIRMED")
+                    actions.append({"action": "TP1_PARTIAL_CLOSE", "status": "RECONCILIATION_REQUIRED"})
+                else:
+                    # Broker ACK is persisted; next position sync confirms actual volume.
+                    actions.append({"action": "TP1_CATCHUP_PARTIAL_CLOSE" if resume and was_suspended else "TP1_PARTIAL_CLOSE", "status": "PENDING", "volume": volume, "protection_deferred": True})
+                session.commit()
+                continue
+            _state(row, tp1_state="PARTIAL_CLOSED", tp1_partial_close_confirmed=True)
+            state = row.management_state or {}
+            step = None
+            if state.get("protection_state") in {"PENDING", "FAILED"}:
+                # A crash after the durable intent may precede the broker call.
+                # Reconcile against this poll's broker SL, then retry precisely
+                # the durable target; price retreat cannot weaken that target.
+                desired = _float(state.get("target_protected_sl"))
+                index = state.get("protection_step_index", 0)
+                if levels["protection_mode"] == "TP2_STEPS":
+                    step = {"trigger_percent": state.get("protection_trigger_percent"), "secure_percent": state.get("protection_secure_percent")}
+            elif levels["protection_mode"] == "TP2_STEPS":
+                protection_price = _closed_price(row.symbol, closed_prices, after=row.tp1_completed_at) if levels["protection_trigger_method"] == "CANDLE_CLOSE" else price
+                step = _step_for_price(levels, protection_price)
+                desired = step.get("protected") if step else None
+                index = levels["step_levels"].index(step) if step else None
+                if index is not None and index < state.get("protection_step_index", -1):
+                    desired = None
+            else:
+                desired, index = levels["protected"], 0
+            current_sl = _float(position.get("sl"), position.get("stop_loss"))
+            previous_target = _float(state.get("target_protected_sl"))
+            if desired is None or not _is_more_protective(row.direction, current_sl, desired) or (previous_target is not None and desired != previous_target and not _is_more_protective(row.direction, previous_target, desired)):
+                session.commit()
+                continue
+            _state(row, protection_state="PENDING", protection_requested=True, protection_step_index=index, protection_trigger_percent=step.get("trigger_percent") if step else None, protection_secure_percent=step.get("secure_percent") if step else None, target_protected_sl=desired, management_error=None)
+            session.commit()
+            # Serialize the complete broker amend, not just its durable intent.
+            # A waiting worker must never submit an older target after another
+            # worker has advanced the ladder while our intent was committed.
+            row = session.query(StrategySetupLifecycle).filter_by(setup_id=setup_id).populate_existing().with_for_update().one()
+            if (str(row.status) not in _OPEN_STATUSES or row.account_scope != scope
+                    or str(row.account_id) != account_id or row.management_suspended_at is not None
+                    or _float((row.management_state or {}).get("target_protected_sl")) != desired
+                    or (row.management_state or {}).get("protection_state") == "CONFIRMED"):
+                session.rollback()
+                continue
+            try:
+                result = modify_position_stop_loss(str(row.broker_position_id), desired, take_profit_price=levels["tp2"])
+            except Exception as exc:
+                result = {"ok": False, "reason": str(exc)}
+            row = session.query(StrategySetupLifecycle).filter_by(setup_id=setup_id).populate_existing().with_for_update().one()
+            if isinstance(result, dict) and result.get("confirmed_by_readback"):
+                _confirm_observation(row, {"sl": result.get("stop_loss")}, now)
+            elif not isinstance(result, dict) or not result.get("ok"):
+                _state(row, protection_state="FAILED", management_error=(result or {}).get("reason") or "STOP_AMEND_UNCONFIRMED")
+            actions.append({"action": "TP2_STEP_PROTECTION", "status": (row.management_state or {}).get("protection_state"), "protected_sl": desired, "trigger_percent": step.get("trigger_percent") if step else None, "secure_percent": step.get("secure_percent") if step else None, "protection_trigger_method": levels["protection_trigger_method"]})
+            session.commit()
+    return {"owner_id": str(owner_id), "account_scope": scope, "status": "OK", "actions": actions, "terminalized": terminalized}
 
 
 def resume_account_management(owner_id, account_identity, open_positions, prices, *, closed_prices=None, session_factory=None) -> dict:
@@ -633,3 +570,49 @@ def managed_position_ids(owner_id, account_identity, open_positions, *, session_
             for row in rows
             if str(row.broker_position_id) in positions
         }
+
+
+def managed_position_states(owner_id, account_identity, open_positions, *, session_factory=None):
+    """Read-only presentation from durable ownership; never adopts manual trades."""
+    positions, result = _position_map(open_positions), {}
+    with _factory(session_factory)() as session:
+        rows = session.query(StrategySetupLifecycle).filter(
+            StrategySetupLifecycle.owner_id == str(owner_id),
+            StrategySetupLifecycle.account_id == _account_id(account_identity),
+            StrategySetupLifecycle.account_scope == _scope(account_identity),
+            StrategySetupLifecycle.status.in_(_OPEN_STATUSES),
+        ).all()
+        for row in rows:
+            pid = str(row.broker_position_id)
+            if pid not in positions:
+                continue
+            position, snapshot, state = positions[pid], row.execution_snapshot or {}, row.management_state or {}
+            actual_sl = _float(position.get("sl"), position.get("stop_loss"))
+            target = _float(state.get("target_protected_sl"))
+            if target is not None and actual_sl is not None and not _is_more_protective(row.direction, actual_sl, target):
+                state = {**state, "protection_state": "CONFIRMED", "broker_confirmed_sl": actual_sl}
+            elif state.get("protection_state") == "CONFIRMED" and (actual_sl is None or _is_more_protective(row.direction, actual_sl, target)):
+                state = {**state, "protection_state": "PENDING", "last_confirmed_sl": state.get("broker_confirmed_sl"), "broker_confirmed_sl": None, "management_error": "BROKER_STOP_BELOW_TARGET"}
+            levels = _levels(row, position)
+            index, steps = state.get("protection_step_index", -1), levels["step_levels"]
+            next_step = steps[index + 1] if index + 1 < len(steps) else None
+            result[pid] = {
+                **state, "execution_source": "STRATEGY_STUDIO", "management_mode": "STUDIO_MANAGED",
+                "strategy_id": row.strategy_id, "strategy_name": snapshot.get("strategy_name") or row.strategy_id,
+                "execution_snapshot": snapshot, "entry": levels["entry"], "initial_sl": snapshot.get("initial_sl"),
+                "tp1": levels["target"], "tp2": levels["tp2"],
+                "tp1_trigger_percent": ((row.definition_snapshot or {}).get("tp1", {}).get("target_r") or 0) * 100 if levels["target_basis"] == "TP2_DISTANCE" else None,
+                "tp1_partial_close_percent": levels["close_percent"],
+                "tp1_partial_close_requested": bool(state.get("tp1_partial_close_requested")),
+                "tp1_partial_close_confirmed": bool(state.get("tp1_partial_close_confirmed") or row.tp1_completed_at),
+                "protection_requested": bool(state.get("protection_requested")), "tp1_definition": (row.definition_snapshot or {}).get("tp1"),
+                "tp1_state": state.get("tp1_state") or ("PARTIAL_CLOSED" if row.tp1_completed_at else "NOT_HIT"),
+                "protection_state": state.get("protection_state", "NOT_REQUESTED"),
+                **{key: state.get(key) for key in ("protection_step_index", "protection_trigger_percent", "protection_secure_percent", "target_protected_sl", "broker_confirmed_sl", "management_error")},
+                "broker_sl": _float(position.get("sl"), position.get("stop_loss")),
+                "next_protection_trigger": next_step.get("trigger") if next_step else None,
+                "management_status": "SUSPENDED" if row.management_suspended_at else row.status,
+                "protection_trigger_method": levels["protection_trigger_method"],
+                "protection_method": levels["protection_mode"], "protection_ladder": steps,
+            }
+    return result

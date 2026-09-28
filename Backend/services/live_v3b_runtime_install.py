@@ -354,6 +354,14 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
         if not live_v3b_enabled():
             return original_auto_cycle(panel_data)
 
+        resolver = getattr(api_module, "get_execution_authority", None)
+        legacy_symbols = [symbol for symbol in ("EURUSD", "XAUUSD")
+                          if resolver and resolver(symbol).get("source") == "V3B"]
+        if not legacy_symbols:
+            return original_auto_cycle(panel_data)
+        other_symbols = [symbol for symbol in ("EURUSD", "XAUUSD") if symbol not in legacy_symbols]
+        authority_results = original_auto_cycle(panel_data, symbols=other_symbols) if other_symbols else []
+
         api_module.refresh_auto_trade_state_from_persistence("v3b_execution_cycle")
         api_module.sync_ctrader_account_state()
         live_auto_on = bool(api_module.LIVE_AUTO_TRADE_ENABLED.get("enabled"))
@@ -361,9 +369,9 @@ def install_live_v3b_runtime(api_module, *, strict_trader_module=None):
             api_module.LIVE_ACCOUNT_STATE.get("connected")
             and api_module.LIVE_ACCOUNT_STATE.get("execution_ready")
         )
-        results = []
+        results = list(authority_results)
 
-        for symbol in ("EURUSD", "XAUUSD"):
+        for symbol in legacy_symbols:
             history_scope = None
             try:
                 data_5m = api_module.get_ctrader_market_data(

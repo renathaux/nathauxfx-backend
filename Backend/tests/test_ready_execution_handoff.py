@@ -117,6 +117,9 @@ class ReadyExecutionHandoffTests(unittest.TestCase):
         # external settings boundaries, not a dependency on a developer database.
         studio_owner = patch.object(api, "get_enabled_studio_live_owner", return_value=None)
         studio_owner.start()
+        authority = patch.object(api, "get_execution_authority", return_value={"source": "V3B", "reason": "EXPLICIT_LEGACY_AUTHORITY"})
+        authority.start()
+        self.addCleanup(authority.stop)
         self.addCleanup(studio_owner.stop)
         rr_window = patch.object(api, "get_configured_rr_window", return_value=(1.0, 3.0))
         rr_window.start()
