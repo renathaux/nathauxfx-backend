@@ -377,7 +377,7 @@ def test_candle_close_step_protection_waits_for_closed_5m_confirmation(db_sessio
         AccountIdentity("acct-a", "demo"),
         [open_position(price=1.1070, entry=1.1000, sl=1.0950, tp2=1.1100)],
         prices(bid=1.1070),
-        closed_prices={"EURUSD": {"close": 1.1065}},
+        closed_prices={"EURUSD": {"close": 1.1065, "closed_at": "2099-01-01T00:00:00+00:00"}},
         session_factory=db_session_factory,
     )
     assert first["actions"][0]["action"] == "TP1_PARTIAL_CLOSE"
@@ -391,7 +391,7 @@ def test_candle_close_step_protection_waits_for_closed_5m_confirmation(db_sessio
         AccountIdentity("acct-a", "demo"),
         [open_position(price=1.1080, entry=1.1000, sl=1.0950, tp2=1.1100)],
         prices(bid=1.1080),
-        closed_prices={"EURUSD": {"close": 1.1069}},
+        closed_prices={"EURUSD": {"close": 1.1069, "closed_at": "2099-01-01T00:00:00+00:00"}},
         session_factory=db_session_factory,
     )
     assert second["actions"] == []
@@ -403,7 +403,7 @@ def test_candle_close_step_protection_waits_for_closed_5m_confirmation(db_sessio
         AccountIdentity("acct-a", "demo"),
         [open_position(price=1.1072, entry=1.1000, sl=1.0950, tp2=1.1100)],
         prices(bid=1.1072),
-        closed_prices={"EURUSD": {"close": 1.1070}},
+        closed_prices={"EURUSD": {"close": 1.1070, "closed_at": "2099-01-01T00:00:00+00:00"}},
         session_factory=db_session_factory,
     )
     assert third["actions"][0]["action"] == "TP2_STEP_PROTECTION"
