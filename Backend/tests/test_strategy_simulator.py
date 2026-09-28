@@ -478,3 +478,194 @@ def test_simulation_continuation_carries_open_trade_across_chunks(monkeypatch):
     assert second["continuation"]["balance"] == pytest.approx(10200.0)
     assert second["continuation"]["active_trade"] is None
     assert second["continuation"]["ordinal"] == 1
+
+
+def _concurrency_bundle():
+    index = pd.date_range("2026-09-17T10:00:00Z", periods=4, freq="5min")
+    frame = pd.DataFrame({
+        "Open": [100.0, 100.0, 100.0, 100.0],
+        "High": [101.0, 105.0, 121.0, 121.0],
+        "Low": [99.0, 99.0, 99.0, 99.0],
+        "Close": [100.0, 102.0, 119.0, 119.0],
+        "Volume": [0.0, 0.0, 0.0, 0.0],
+    }, index=index)
+    return frame, {"5m": frame, "15m": frame.iloc[:0], "1h": frame.iloc[:0], "4h": frame.iloc[:0]}
+
+
+def _install_concurrency_fakes(monkeypatch, simulator):
+    frame, bundle = _concurrency_bundle()
+
+    class Timeline:
+        def timestamps(self):
+            return list(frame.index)
+
+        def candle(self, timestamp):
+            row = frame.loc[pd.Timestamp(timestamp)]
+            return type("Candle", (), {
+                "timestamp": pd.Timestamp(timestamp),
+                "open": row.Open,
+                "high": row.High,
+                "low": row.Low,
+                "close": row.Close,
+            })()
+
+    monkeypatch.setattr(simulator, "build_market_facts", lambda *args, **kwargs: Timeline())
+
+    def fake_evaluate(definition, timeline, timestamp, prior_state, *, symbol, account_balance, risk_override=None):
+        stamp = pd.Timestamp(timestamp)
+        if stamp in {frame.index[0], frame.index[1]}:
+            suffix = "1" if stamp == frame.index[0] else "2"
+            return EvaluationResult(
+                signal="BUY",
+                steps={},
+                setup_id=f"setup_concurrent_{suffix}",
+                entry=100.0,
+                sl=90.0,
+                tp1=None,
+                tp2=120.0,
+                risk_budget={
+                    "method": "PERCENT_BALANCE",
+                    "value": 1.0,
+                    "dollars": account_balance * 0.01,
+                },
+                next_state=EvaluationState("READY", None),
+            )
+        return EvaluationResult(
+            "WAIT", {}, None, None, None, None, None, None,
+            EvaluationState("WAITING", None),
+        )
+
+    monkeypatch.setattr(simulator, "evaluate_strategy", fake_evaluate)
+    return bundle
+
+
+def test_default_simulator_still_allows_only_one_position(monkeypatch):
+    import services.strategy_simulator as simulator
+
+    bundle = _install_concurrency_fakes(monkeypatch, simulator)
+    result = run_simulation(_definition(), bundle, "EURUSD", 10000.0)
+
+    resolved = [item for item in result["trades"] if item.get("resolved") is True]
+    assert len(resolved) == 1
+    assert result["diagnostics"]["trades_opened"] == 1
+    assert result["diagnostics"]["max_simultaneous_positions"] == 1
+    assert result["metrics"]["ending_balance"] == pytest.approx(10200.0)
+    assert result["execution_options"]["max_concurrent_positions"] == 1
+
+
+def test_simulator_can_open_two_independent_concurrent_positions(monkeypatch):
+    import services.strategy_simulator as simulator
+
+    bundle = _install_concurrency_fakes(monkeypatch, simulator)
+    result = run_simulation(
+        _definition(),
+        bundle,
+        "EURUSD",
+        10000.0,
+        max_concurrent_positions=2,
+        max_combined_open_risk_percent=2.0,
+    )
+
+    resolved = [item for item in result["trades"] if item.get("resolved") is True]
+    assert len(resolved) == 2
+    assert len({item["trade_id"] for item in resolved}) == 2
+    assert all(item["outcome"] == "TP2" for item in resolved)
+    assert result["diagnostics"]["trades_opened"] == 2
+    assert result["diagnostics"]["signals_emitted"] == 2
+    assert result["diagnostics"]["max_simultaneous_positions"] == 2
+    assert result["diagnostics"]["max_open_risk_dollars"] == pytest.approx(200.0)
+    assert result["metrics"]["ending_balance"] == pytest.approx(10400.0)
+    assert result["execution_options"] == {
+        "max_concurrent_positions": 2,
+        "max_combined_open_risk_percent": 2.0,
+    }
+
+
+def test_combined_open_risk_cap_blocks_second_position(monkeypatch):
+    import services.strategy_simulator as simulator
+
+    bundle = _install_concurrency_fakes(monkeypatch, simulator)
+    result = run_simulation(
+        _definition(),
+        bundle,
+        "EURUSD",
+        10000.0,
+        max_concurrent_positions=2,
+        max_combined_open_risk_percent=1.5,
+    )
+
+    resolved = [item for item in result["trades"] if item.get("resolved") is True]
+    assert len(resolved) == 1
+    assert result["diagnostics"]["signals_emitted"] == 2
+    assert result["diagnostics"]["trades_opened"] == 1
+    assert result["diagnostics"]["combined_risk_blocked_signals"] == 1
+    assert result["diagnostics"]["max_simultaneous_positions"] == 1
+    assert result["metrics"]["ending_balance"] == pytest.approx(10200.0)
+
+
+def test_multiple_open_positions_survive_chunk_continuation(monkeypatch):
+    import services.strategy_simulator as simulator
+
+    frame, bundle = _concurrency_bundle()
+
+    class Timeline:
+        def __init__(self, data):
+            self.data = data
+        def timestamps(self):
+            return list(self.data.index)
+        def candle(self, timestamp):
+            row = self.data.loc[pd.Timestamp(timestamp)]
+            return type("Candle", (), {
+                "timestamp": pd.Timestamp(timestamp),
+                "open": row.Open,
+                "high": row.High,
+                "low": row.Low,
+                "close": row.Close,
+            })()
+
+    monkeypatch.setattr(
+        simulator,
+        "build_market_facts",
+        lambda market_bundle, *args, **kwargs: Timeline(market_bundle["5m"]),
+    )
+
+    emitted = set()
+    def fake_evaluate(definition, timeline, timestamp, prior_state, *, symbol, account_balance, risk_override=None):
+        stamp = pd.Timestamp(timestamp)
+        if stamp.minute in {0, 5} and stamp not in emitted:
+            emitted.add(stamp)
+            return EvaluationResult(
+                "BUY", {}, f"setup_{stamp.minute}", 100.0, 90.0, None, 120.0,
+                {"method": "PERCENT_BALANCE", "value": 1.0, "dollars": account_balance * 0.01},
+                EvaluationState("READY", None),
+            )
+        return EvaluationResult(
+            "WAIT", {}, None, None, None, None, None, None,
+            EvaluationState("WAITING", None),
+        )
+
+    monkeypatch.setattr(simulator, "evaluate_strategy", fake_evaluate)
+
+    first_frame = frame.iloc[:2]
+    first_bundle = {"5m": first_frame, "15m": first_frame.iloc[:0], "1h": first_frame.iloc[:0], "4h": first_frame.iloc[:0]}
+    first = run_simulation(
+        _definition(), first_bundle, "EURUSD", 10000.0,
+        max_concurrent_positions=2,
+        max_combined_open_risk_percent=2.0,
+        finalize_open_trade=False,
+    )
+    assert len(first["continuation"]["active_trades"]) == 2
+    assert first["continuation"]["active_trade"] is None
+
+    second_frame = frame.iloc[2:]
+    second_bundle = {"5m": second_frame, "15m": second_frame.iloc[:0], "1h": second_frame.iloc[:0], "4h": second_frame.iloc[:0]}
+    second = run_simulation(
+        _definition(), second_bundle, "EURUSD", 10000.0,
+        max_concurrent_positions=2,
+        max_combined_open_risk_percent=2.0,
+        continuation=first["continuation"],
+        finalize_open_trade=True,
+    )
+    assert len([item for item in second["trades"] if item.get("resolved") is True]) == 2
+    assert second["continuation"]["active_trades"] == []
+    assert second["continuation"]["balance"] == pytest.approx(10400.0)
