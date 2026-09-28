@@ -13,7 +13,8 @@ from pydantic import BaseModel
 
 from ctrader_account_context import selected_identity
 from services.customer_forex_guard import _bearer
-from services.strategy_simulator_data_source import load_simulation_5m
+from services.strategy_simulator import run_simulation
+from services.strategy_simulator_data_source import load_market_bundle, load_simulation_5m
 from services.strategy_studio_live_state import (
     get_studio_live_state,
     has_unresolved_studio_reconciliation,
@@ -153,6 +154,9 @@ def _parity_summary(report: dict) -> dict:
 def _unavailable_readiness(reason: str) -> dict:
     return {
         "ready": False,
+        "readiness_verified": False,
+        "readiness_status": "REQUIRES_VERIFICATION",
+        # Legacy aliases kept temporarily for older frontends.
         "parity_verified": False,
         "parity_status": "REQUIRES_VERIFICATION",
         "active_strategy_id": None,
@@ -161,6 +165,8 @@ def _unavailable_readiness(reason: str) -> dict:
         "unresolved_reconciliation": False,
         "reports": {},
         "reason": reason,
+        "validation_kind": "ACTIVE_STRATEGY_EXECUTABILITY",
+        "v3b_parity_required": False,
     }
 
 
@@ -176,11 +182,11 @@ def evaluate_live_handoff_readiness(owner: str) -> dict:
 
 
 def _evaluate_live_handoff_readiness(owner: str) -> dict:
-    """Recompute entry parity from durable selected-account candles.
+    """Verify the active Strategy Studio definition against selected-account data.
 
-    Readiness is deliberately not persisted: every status read and every enable
-    request recomputes against the currently selected account, preventing stale
-    parity evidence from authorizing a different account or later data state.
+    Strategy Studio is an independent executable strategy surface.  V3B parity
+    remains available as a diagnostic endpoint, but it must not gate a strategy
+    whose rules intentionally differ from V3B.
     """
     active = _active_strategy(owner)
     if not active:
@@ -189,55 +195,91 @@ def _evaluate_live_handoff_readiness(owner: str) -> dict:
             "unresolved_reconciliation": has_unresolved_studio_reconciliation(owner),
         }
 
-    definition = active.get("definition") or {}
+    try:
+        definition = normalize_definition(active.get("definition") or {})
+    except Exception as exc:
+        result = _unavailable_readiness("STRATEGY_STUDIO_DEFINITION_INVALID")
+        result.update({
+            "active_strategy_id": active.get("strategy_id"),
+            "reports": {"definition": {"executable": False, "error": str(exc)}},
+        })
+        return result
+
+    errors = validation_errors(definition)
     symbols = [
         str(symbol).upper().replace("/", "")
         for symbol in (definition.get("symbols") or [])
         if str(symbol or "").strip()
     ]
-    identity = selected_identity()
     unresolved = has_unresolved_studio_reconciliation(owner)
-    if identity is None:
+
+    if errors:
         return {
-            "ready": False,
-            "parity_verified": False,
-            "parity_status": "REQUIRES_VERIFICATION",
+            **_unavailable_readiness("STRATEGY_STUDIO_DEFINITION_INVALID"),
             "active_strategy_id": active.get("strategy_id"),
             "configured_symbols": symbols,
-            "account_scope": None,
             "unresolved_reconciliation": unresolved,
-            "reports": {},
-            "reason": "CTRADER_ACCOUNT_NOT_SELECTED",
+            "reports": {"definition": {"executable": False, "errors": errors}},
+        }
+
+    identity = selected_identity()
+    if identity is None:
+        return {
+            **_unavailable_readiness("CTRADER_ACCOUNT_NOT_SELECTED"),
+            "active_strategy_id": active.get("strategy_id"),
+            "configured_symbols": symbols,
+            "unresolved_reconciliation": unresolved,
         }
 
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=PARITY_LOOKBACK_DAYS)
     reports = {}
-    parity_verified = bool(symbols)
-    parity_error = None
+    readiness_verified = bool(symbols)
+    execution_error = None
+
     for symbol in symbols:
         try:
-            frame = load_simulation_5m(
+            bundle = load_market_bundle(
                 symbol,
                 start,
                 end,
                 stream_scope=identity.scope,
             )
-            report = compare_v3b_entry_decisions(
+            frame_5m = bundle.get("5m")
+            if frame_5m is None or frame_5m.empty:
+                raise ValueError("STRATEGY_STUDIO_HISTORY_UNAVAILABLE")
+
+            result = run_simulation(
+                definition,
+                bundle,
                 symbol,
-                frame,
-                account_scope=identity.scope,
+                10000.0,
+                include_replay=False,
+                evaluation_start=start,
+                evaluation_end=end,
+                finalize_open_trade=False,
             )
-            reports[symbol] = _parity_summary(report)
-            parity_verified = parity_verified and bool(report.get("match"))
-        except Exception as exc:
-            parity_verified = False
-            parity_error = str(exc)
+            diagnostics = result.get("diagnostics") or {}
+            candles = int(diagnostics.get("candles_analyzed") or 0)
+            executable = candles > 0
+            readiness_verified = readiness_verified and executable
             reports[symbol] = {
-                "match": False,
-                "compared_setups": 0,
-                "mismatch_count": 0,
-                "mismatches": [],
+                "executable": executable,
+                "candles_analyzed": candles,
+                "evaluations": int(diagnostics.get("evaluations") or 0),
+                "signals_emitted": int(diagnostics.get("signals_emitted") or 0),
+                "account_scope": identity.scope,
+                "trading_timeframe": definition.get("trading_timeframe"),
+                "structure_timeframe": definition.get("structure_timeframe"),
+            }
+        except Exception as exc:
+            readiness_verified = False
+            execution_error = str(exc)
+            reports[symbol] = {
+                "executable": False,
+                "candles_analyzed": 0,
+                "evaluations": 0,
+                "signals_emitted": 0,
                 "account_scope": identity.scope,
                 "error": str(exc),
             }
@@ -245,26 +287,32 @@ def _evaluate_live_handoff_readiness(owner: str) -> dict:
     reason = None
     if unresolved:
         reason = "STRATEGY_STUDIO_RECONCILIATION_UNRESOLVED"
-    elif not parity_verified:
+    elif not readiness_verified:
         reason = (
-            "STRATEGY_STUDIO_PARITY_UNAVAILABLE"
-            if parity_error
-            else "STRATEGY_STUDIO_PARITY_NOT_VERIFIED"
+            "STRATEGY_STUDIO_EXECUTABILITY_UNAVAILABLE"
+            if execution_error
+            else "STRATEGY_STUDIO_EXECUTABILITY_NOT_VERIFIED"
         )
 
+    status_value = "VERIFIED" if readiness_verified else (
+        "ERROR" if execution_error else "REQUIRES_VERIFICATION"
+    )
     return {
-        "ready": bool(parity_verified and not unresolved),
-        "parity_verified": bool(parity_verified),
-        "parity_status": "VERIFIED" if parity_verified else (
-            "ERROR" if parity_error else "MISMATCH"
-        ),
+        "ready": bool(readiness_verified and not unresolved),
+        "readiness_verified": bool(readiness_verified),
+        "readiness_status": status_value,
+        # Legacy aliases kept temporarily for already-deployed clients.
+        "parity_verified": bool(readiness_verified),
+        "parity_status": status_value,
         "active_strategy_id": active.get("strategy_id"),
         "configured_symbols": symbols,
         "account_scope": identity.scope,
         "unresolved_reconciliation": bool(unresolved),
         "reports": reports,
         "reason": reason,
-        "parity_window": {
+        "validation_kind": "ACTIVE_STRATEGY_EXECUTABILITY",
+        "v3b_parity_required": False,
+        "validation_window": {
             "start": start.isoformat(),
             "end": end.isoformat(),
             "lookback_days": PARITY_LOOKBACK_DAYS,
@@ -423,8 +471,10 @@ def strategy_live_status(request: Request):
         "ok": True,
         **state,
         **readiness,
-        "entry_parity_only": True,
+        "entry_parity_only": False,
         "post_entry_management_compared": False,
+        "v3b_parity_required": False,
+        "readiness_validation": "ACTIVE_STRATEGY_EXECUTABILITY",
     }
 
 
@@ -474,10 +524,10 @@ def strategy_live_handoff(payload: LiveHandoffRequest, request: Request):
             status_code=409,
             detail="STRATEGY_STUDIO_RECONCILIATION_UNRESOLVED",
         )
-    if not readiness.get("parity_verified"):
+    if not readiness.get("readiness_verified", readiness.get("parity_verified")):
         raise HTTPException(
             status_code=409,
-            detail=readiness.get("reason") or "STRATEGY_STUDIO_PARITY_NOT_VERIFIED",
+            detail=readiness.get("reason") or "STRATEGY_STUDIO_EXECUTABILITY_NOT_VERIFIED",
         )
     if not readiness.get("ready"):
         raise HTTPException(
