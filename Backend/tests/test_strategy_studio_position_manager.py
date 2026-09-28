@@ -648,3 +648,24 @@ def test_read_only_state_never_reports_protection_confirmed_against_lower_broker
     state = manager.managed_position_states("owner-1", AccountIdentity("acct-a", "demo"), [open_position(sl=1.095)], session_factory=db_session_factory)["pos-1"]
     assert state["protection_state"] != "CONFIRMED"
     assert state["broker_confirmed_sl"] is None
+
+
+def test_pending_stop_recovers_after_crash_even_if_price_retreats(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+    seed_lifecycle(db_session_factory, tp1_done=True, strategy_definition=definition(protection_mode="TP2_STEPS", protection_trigger_method="PRICE_TOUCH", protection_steps=[{"trigger_percent": 50, "secure_percent": 30}, {"trigger_percent": 80, "secure_percent": 60}]))
+    with db_session_factory() as session:
+        row = session.get(StrategySetupLifecycle, "setup-1")
+        row.execution_snapshot = {"entry": 1.1, "initial_sl": 1.095, "tp2": 1.11}
+        row.management_state = {"protection_state": "PENDING", "target_protected_sl": 1.106, "protection_step_index": 1, "protection_trigger_percent": 80, "protection_secure_percent": 60}
+        session.commit()
+    calls = []
+    monkeypatch.setattr(manager, "modify_position_stop_loss", lambda *a, **k: calls.append(a) or {"ok": True})
+    identity = AccountIdentity("acct-a", "demo")
+    manager.manage_selected_account_positions("owner-1", identity, [open_position(price=1.107)], prices(bid=1.107), session_factory=db_session_factory)
+    assert calls == [("pos-1", 1.106)]
+    state = manager.managed_position_states("owner-1", identity, [open_position(sl=1.095)], session_factory=db_session_factory)["pos-1"]
+    assert state["protection_step_index"] == 1
+    manager.manage_selected_account_positions("owner-1", identity, [open_position(sl=1.106)], prices(), session_factory=db_session_factory)
+    assert len(calls) == 1
+    state = manager.managed_position_states("owner-1", identity, [open_position(sl=1.106)], session_factory=db_session_factory)["pos-1"]
+    assert state["protection_state"] == "CONFIRMED"

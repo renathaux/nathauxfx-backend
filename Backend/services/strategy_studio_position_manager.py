@@ -483,11 +483,16 @@ def _manage(owner_id, account_identity, open_positions, prices, *, resume, close
                 continue
             _state(row, tp1_state="PARTIAL_CLOSED", tp1_partial_close_confirmed=True)
             state = row.management_state or {}
-            if state.get("protection_state") == "PENDING":
-                session.commit()
-                continue
             step = None
-            if levels["protection_mode"] == "TP2_STEPS":
+            if state.get("protection_state") == "PENDING":
+                # A crash after the durable intent may precede the broker call.
+                # Reconcile against this poll's broker SL, then retry precisely
+                # the durable target; price retreat cannot weaken that target.
+                desired = _float(state.get("target_protected_sl"))
+                index = state.get("protection_step_index", 0)
+                if levels["protection_mode"] == "TP2_STEPS":
+                    step = {"trigger_percent": state.get("protection_trigger_percent"), "secure_percent": state.get("protection_secure_percent")}
+            elif levels["protection_mode"] == "TP2_STEPS":
                 protection_price = _closed_price(row.symbol, closed_prices, after=row.tp1_completed_at) if levels["protection_trigger_method"] == "CANDLE_CLOSE" else price
                 step = _step_for_price(levels, protection_price)
                 desired = step.get("protected") if step else None
@@ -503,6 +508,16 @@ def _manage(owner_id, account_identity, open_positions, prices, *, resume, close
                 continue
             _state(row, protection_state="PENDING", protection_requested=True, protection_step_index=index, protection_trigger_percent=step.get("trigger_percent") if step else None, protection_secure_percent=step.get("secure_percent") if step else None, target_protected_sl=desired, management_error=None)
             session.commit()
+            # Serialize the complete broker amend, not just its durable intent.
+            # A waiting worker must never submit an older target after another
+            # worker has advanced the ladder while our intent was committed.
+            row = session.query(StrategySetupLifecycle).filter_by(setup_id=setup_id).populate_existing().with_for_update().one()
+            if (str(row.status) not in _OPEN_STATUSES or row.account_scope != scope
+                    or str(row.account_id) != account_id or row.management_suspended_at is not None
+                    or _float((row.management_state or {}).get("target_protected_sl")) != desired
+                    or (row.management_state or {}).get("protection_state") == "CONFIRMED"):
+                session.rollback()
+                continue
             try:
                 result = modify_position_stop_loss(str(row.broker_position_id), desired, take_profit_price=levels["tp2"])
             except Exception as exc:
