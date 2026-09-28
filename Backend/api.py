@@ -138,6 +138,8 @@ from services.strategy_studio_live_state import get_enabled_studio_live_owner
 from services.strategy_studio_live_candidate import build_studio_candidate
 from services.strategy_studio_position_manager import (
     account_has_managed_position as studio_account_has_managed_position,
+    managed_position_ids as studio_managed_position_ids,
+    manage_selected_account_positions as manage_studio_account_positions,
     suspend_account_management as suspend_studio_account_management,
     resume_account_management as resume_studio_account_management,
 )
@@ -2039,6 +2041,36 @@ def overlay_live_forming_candles(panel_data, live_price_status, now=None):
     return panel_data
 
 
+def get_strategy_studio_closed_5m_prices(panel_data):
+    """Return latest completed 5m closes from the same panel candle stream."""
+    result = {}
+    bucket_time = int(time.time() // 300) * 300
+    candles_by_symbol = (panel_data or {}).get("candles") or {}
+    for symbol in ["EURUSD", "XAUUSD"]:
+        symbol_frames = candles_by_symbol.get(symbol)
+        if not isinstance(symbol_frames, dict):
+            continue
+        candles = symbol_frames.get("5m")
+        if not isinstance(candles, list):
+            continue
+        for candle in reversed(candles):
+            try:
+                candle_time = int(float(candle.get("time")))
+                close = float(candle.get("close"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if candle_time >= bucket_time or not math.isfinite(close):
+                continue
+            result[symbol] = {
+                "close": close,
+                "timestamp": datetime.fromtimestamp(
+                    candle_time, tz=timezone.utc
+                ).isoformat(),
+            }
+            break
+    return result
+
+
 @account_state_operation
 def refresh_live_panel_meta(panel_data):
     identity = current_identity()
@@ -2061,6 +2093,29 @@ def refresh_live_panel_meta(panel_data):
             )
         print("LIVE_PANEL_META_CRITICAL_ERROR =", {
             "stage": "position_state_sync",
+            "error": str(exc),
+        })
+        return False
+
+    try:
+        studio_owner = get_enabled_studio_live_owner()
+        studio_identity = current_identity()
+        if studio_owner and studio_identity is not None:
+            live_prices = ((get_live_prices() or {}).get("live_prices") or {})
+            closed_5m_prices = get_strategy_studio_closed_5m_prices(panel_data)
+            studio_management = manage_studio_account_positions(
+                studio_owner,
+                studio_identity,
+                live_positions,
+                live_prices,
+                closed_prices=closed_5m_prices,
+            )
+            if studio_management.get("actions") or studio_management.get("terminalized"):
+                print("STRATEGY_STUDIO_LIVE_MANAGEMENT =", studio_management)
+    except Exception as exc:
+        LIVE_PANEL_META_CACHE["last_error"] = str(exc)
+        print("STRATEGY_STUDIO_LIVE_MANAGEMENT_ERROR =", {
+            "error_type": type(exc).__name__,
             "error": str(exc),
         })
         return False
@@ -8856,6 +8911,19 @@ def sync_live_positions(panel_data=None):
             LIVE_POSITION_SYNC_STATUS["last_success"] = time.time()
             LIVE_POSITION_SYNC_STATUS["last_error"] = None
 
+        studio_managed_ids = set()
+        try:
+            studio_owner = get_enabled_studio_live_owner()
+            studio_identity = current_identity()
+            if studio_owner and studio_identity is not None:
+                studio_managed_ids = studio_managed_position_ids(
+                    studio_owner,
+                    studio_identity,
+                    positions,
+                )
+        except Exception as exc:
+            print("STRATEGY_STUDIO_MANAGED_POSITION_LOOKUP_ERROR =", str(exc))
+
         previous_active_orders = {
             symbol: trade
             for symbol, trade in LIVE_ACTIVE_ORDERS.items()
@@ -8931,6 +8999,7 @@ def sync_live_positions(panel_data=None):
                 or position.get("id")
                 or f"broker-{symbol}"
             )
+            studio_managed_position = str(position_id) in studio_managed_ids
             side = normalize_live_trade_side(
                 position.get("side")
                 or position.get("tradeSide")
@@ -9555,7 +9624,11 @@ def sync_live_positions(panel_data=None):
                 "raw": position.get("raw", position),
             }
             restored_v3b = None
-            if not current_order and current_identity() is not None:
+            if studio_managed_position:
+                mirrored_order["execution_source"] = "STRATEGY_STUDIO"
+                mirrored_order["management_paused"] = False
+                mirrored_order["management_pause_reason"] = None
+            elif not current_order and current_identity() is not None:
                 from services.forex_observability_service import find_v3b_snapshot_for_position
                 restored_v3b = find_v3b_snapshot_for_position(
                     position,
@@ -9575,6 +9648,27 @@ def sync_live_positions(panel_data=None):
                     mirrored_order["management_pause_reason"] = "EXACT_V3B_SNAPSHOT_UNAVAILABLE"
             ensure_executed_snapshot_for_active_trade(mirrored_order, signal_plan)
             ensure_live_trade_identity(mirrored_order, symbol)
+
+            if studio_managed_position:
+                studio_order = {
+                    **(current_order or {}),
+                    **mirrored_order,
+                    "execution_source": "STRATEGY_STUDIO",
+                    "management_paused": False,
+                    "management_pause_reason": None,
+                    "opened_at": (
+                        (current_order or {}).get("opened_at")
+                        or mirrored_order.get("opened_at")
+                    ),
+                }
+                rebuilt_active_orders[symbol] = studio_order
+                ensure_live_trade_identity(rebuilt_active_orders[symbol], symbol)
+                log_live_trade_audit(
+                    "strategy_studio_broker_position_synced",
+                    rebuilt_active_orders[symbol],
+                )
+                log_trade_visual_levels(rebuilt_active_orders[symbol])
+                continue
 
             if current_order and broker_position_matches_trade(position, current_order):
                 if current_order.get("management_paused"):
