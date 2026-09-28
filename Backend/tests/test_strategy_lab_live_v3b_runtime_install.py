@@ -81,6 +81,7 @@ def _fake_api():
         protect_live_trade_after_tp1=protect,
         execute_live_order_core=None,
         run_ctrader_auto_trade_checks=auto_cycle,
+        get_execution_authority=lambda symbol: {"source": "V3B", "reason": "EXPLICIT_LEGACY_AUTHORITY"},
         LIVE_ACTIVE_ORDERS={"EURUSD": None, "XAUUSD": None},
         LIVE_LAST_POSITION_CLOSED_AT={"EURUSD": 0, "XAUUSD": 0},
         LIVE_AUTO_TRADE_ENABLED={"enabled": False},

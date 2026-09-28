@@ -144,6 +144,7 @@ from services.strategy_studio_position_manager import (
     account_has_managed_position as studio_account_has_managed_position,
     managed_owner_for_account as studio_managed_owner_for_account,
     managed_position_ids as studio_managed_position_ids,
+    managed_position_states as studio_managed_position_states,
     manage_selected_account_positions as manage_studio_account_positions,
     suspend_account_management as suspend_studio_account_management,
     resume_account_management as resume_studio_account_management,
@@ -2139,92 +2140,41 @@ def _apply_studio_fundamental_display(display, definition):
 
 
 def refresh_live_strategy_display(panel_data):
-    """Refresh the dashboard's strategy-specific LIVE rule presentation.
-
-    This is read-only presentation state. It never claims a setup and never
-    places, changes, or closes a broker order.
-    """
-    try:
-        owner_id = get_enabled_studio_live_owner()
-    except Exception as exc:
-        reason = f"WAIT_STUDIO_OWNER_STATE: {exc}"
-        for symbol in LIVE_STRATEGY_DISPLAY_BY_SYMBOL:
-            LIVE_STRATEGY_DISPLAY_BY_SYMBOL[symbol] = _studio_display_failure(
-                symbol, reason
-            )
-        return LIVE_STRATEGY_DISPLAY_BY_SYMBOL
-
-    if not owner_id:
-        for symbol in LIVE_STRATEGY_DISPLAY_BY_SYMBOL:
-            LIVE_STRATEGY_DISPLAY_BY_SYMBOL[symbol] = None
-        return LIVE_STRATEGY_DISPLAY_BY_SYMBOL
-
-    try:
-        profile = get_studio_live_display_profile(owner_id)
-    except Exception as exc:
-        profile = {}
-        reason = f"WAIT_STUDIO_PROFILE_UNAVAILABLE: {exc}"
-        for symbol in LIVE_STRATEGY_DISPLAY_BY_SYMBOL:
-            LIVE_STRATEGY_DISPLAY_BY_SYMBOL[symbol] = _studio_display_failure(
-                symbol, reason, profile=profile
-            )
-        return LIVE_STRATEGY_DISPLAY_BY_SYMBOL
-
+    """Read-only presentation using the same authority as broker entry."""
     identity = current_identity() or selected_identity()
-    balance = 10000.0
-    if identity is not None:
-        try:
-            snapshot = get_ctrader_account_snapshot()
-            verified = validate_verified_account_snapshot(snapshot)
-            if verified.get("ok"):
-                balance = float(verified.get("balance"))
-        except Exception:
-            # Risk dollars are display-only here; execution performs its own
-            # authoritative account verification.
-            pass
-
-    definition = profile.get("definition") or {}
-    configured = {
-        normalize_symbol(value)
-        for value in (profile.get("symbols") or [])
-        if value
-    }
-
     for symbol in ("EURUSD", "XAUUSD"):
-        try:
-            bundle = {}
-            if identity is not None and symbol in configured:
-                bundle = load_strategy_studio_market_bundle(
-                    symbol,
-                    identity.scope,
-                )
-            display = build_studio_live_display(
-                owner_id,
-                identity,
-                symbol,
-                bundle,
-                account_balance=balance,
-                prior_state=None,
-            )
-            display = _apply_studio_fundamental_display(display, definition)
-            LIVE_STRATEGY_DISPLAY_BY_SYMBOL[symbol] = display
-        except Exception as exc:
-            LIVE_STRATEGY_DISPLAY_BY_SYMBOL[symbol] = _studio_display_failure(
-                symbol,
-                f"WAIT_STUDIO_DISPLAY_ERROR: {exc}",
-                profile=profile,
-            )
-
-    print("STRATEGY_LIVE_DISPLAY =", {
-        symbol: {
-            "strategy_name": (display or {}).get("strategy_name"),
-            "signal": (display or {}).get("signal"),
-            "reason": (display or {}).get("reason"),
-            "progress": (display or {}).get("progress"),
-            "enabled_for_symbol": (display or {}).get("enabled_for_symbol"),
+        authority = get_execution_authority(symbol)
+        display = {
+            "symbol": symbol, "execution_source": authority["source"],
+            "strategy_id": authority.get("strategy_id"), "strategy_name": authority.get("strategy_name"),
+            "owner_id": authority.get("owner_id"), "signal": "WAIT", "reason": authority["reason"],
+            "conditions": [], "live_handoff_enabled": authority["source"] == "STRATEGY_STUDIO",
+            "enabled_for_symbol": authority["source"] != "NONE", "checked_at": datetime.now(timezone.utc).isoformat(),
         }
-        for symbol, display in LIVE_STRATEGY_DISPLAY_BY_SYMBOL.items()
-    })
+        if authority["source"] == "STRATEGY_STUDIO":
+            profile = {}
+            try:
+                profile = get_studio_live_display_profile(authority["owner_id"])
+                balance = 10000.0
+                if identity is not None:
+                    verified = validate_verified_account_snapshot(get_ctrader_account_snapshot())
+                    if verified.get("ok"):
+                        balance = float(verified["balance"])
+                bundle = load_strategy_studio_market_bundle(symbol, identity.scope) if identity else {}
+                display = build_studio_live_display(authority["owner_id"], identity, symbol, bundle, account_balance=balance, prior_state=None)
+                display = _apply_studio_fundamental_display(display, profile.get("definition") or {})
+            except Exception:
+                display = _studio_display_failure(symbol, "WAIT_STUDIO_DISPLAY_ERROR", profile=profile)
+            # A concurrent selection change cannot make presentation advertise
+            # a different strategy under the already resolved authority.
+            if display.get("strategy_id") != authority.get("strategy_id"):
+                display = _studio_display_failure(symbol, "LIVE_AUTHORITY_CHANGED", profile={"strategy_id": authority.get("strategy_id"), "strategy_name": authority.get("strategy_name")})
+        elif authority["source"] == "NONE":
+            display["conditions"] = [{"key": "execution_authority", "label": "Live strategy assignment", "state": "BLOCKED", "reason": authority["reason"], "details": {}}]
+        display["execution_authority"] = authority
+        display["execution_source"] = authority["source"]
+        display["evaluation"] = {key: copy.deepcopy(display.get(key)) for key in ("signal", "reason", "checked_at", "conditions")}
+        LIVE_STRATEGY_DISPLAY_BY_SYMBOL[symbol] = display
     return LIVE_STRATEGY_DISPLAY_BY_SYMBOL
 
 
@@ -2314,6 +2264,19 @@ def refresh_live_panel_meta(panel_data):
                 live_prices,
                 closed_prices=closed_5m_prices,
             )
+            management_states = studio_managed_position_states(studio_owner, studio_identity, studio_positions)
+            for trade in studio_positions:
+                management = management_states.get(str(trade.get("position_id") or trade.get("broker_position_id")))
+                if management:
+                    trade["trade_management"] = management
+                    trade["protection_confirmed"] = management.get("protection_state") == "CONFIRMED"
+                    trade["protected_sl_price"] = management.get("target_protected_sl")
+                    trade["hit_tp1"] = bool(management.get("tp1_triggered"))
+                    print("POSITION_MANAGEMENT =", {"broker_position_id": trade.get("position_id"), "symbol": trade.get("symbol"),
+                        "source": "STRATEGY_STUDIO", "strategy_id": management.get("strategy_id"),
+                        "tp1_state": management.get("tp1_state"), "protection_step": management.get("protection_step_index"),
+                        "target_sl": management.get("target_protected_sl"), "broker_sl": management.get("broker_sl"),
+                        "status": management.get("protection_state")})
             if studio_management.get("actions") or studio_management.get("terminalized"):
                 print("STRATEGY_STUDIO_LIVE_MANAGEMENT =", studio_management)
     except Exception as exc:
@@ -7645,20 +7608,36 @@ def studio_candidate_execution_plan(candidate, *, account_balance, owner_id):
     }
 
 
-def select_auto_execution_candidate(panel_data, symbol):
-    v3b_plan = get_panel_trade_plan(panel_data, symbol) or {}
+def get_execution_authority(symbol):
+    """Shared by the installed scheduler, candidate selector and final handoff."""
+    from services.execution_authority import resolve_execution_authority
+    identity = current_identity() or selected_identity()
+    scope = identity.scope if identity is not None else None
     try:
         owner_id = get_enabled_studio_live_owner()
-    except Exception as exc:
-        return {
-            "source": "STRATEGY_STUDIO",
-            "plan": _studio_wait_execution_plan(
-                symbol,
-                f"WAIT_STUDIO_OWNER_STATE: {exc}",
-            ),
-        }
-    if not owner_id:
-        return {"source": "V3B", "plan": v3b_plan}
+        profile = get_studio_live_display_profile(owner_id) if owner_id else None
+        authority = resolve_execution_authority(
+            normalize_symbol(symbol), owner_id=owner_id, profile=profile, account_scope=scope,
+            legacy_symbols={value.strip().upper() for value in os.getenv("LIVE_LEGACY_AUTHORITY_SYMBOLS", "").split(",") if value.strip()},
+        )
+    except Exception:
+        authority = resolve_execution_authority(symbol, account_scope=scope)
+        authority["reason"] = "LIVE_AUTHORITY_UNAVAILABLE"
+    print("EXECUTION_AUTHORITY =", authority)
+    return authority
+
+
+def select_auto_execution_candidate(panel_data, symbol):
+    authority = get_execution_authority(symbol)
+    if authority["source"] == "V3B":
+        return {"source": "V3B", "authority": authority, "plan": get_panel_trade_plan(panel_data, symbol) or {}}
+    if authority["source"] == "NONE":
+        return {"source": "NONE", "authority": authority, "plan": {
+            "symbol": symbol, "signal": "WAIT", "execution_source": "NONE",
+            "plan_reason": authority["reason"], "reason": authority["reason"],
+            "execution_authority": authority,
+        }}
+    owner_id = authority["owner_id"]
 
     try:
         from ctrader_account_context import selected_identity
@@ -8111,7 +8090,7 @@ def log_live_xauusd_execution_debug(
     print("LIVE_XAUUSD_EXECUTION_DEBUG =", debug)
     return debug
 
-def run_ctrader_auto_trade_checks(panel_data):
+def run_ctrader_auto_trade_checks(panel_data, *, symbols=None):
     if not isinstance(panel_data, dict):
         return []
 
@@ -8125,7 +8104,7 @@ def run_ctrader_auto_trade_checks(panel_data):
     )
 
     if not LIVE_AUTO_TRADE_ENABLED["enabled"]:
-        for symbol in ["EURUSD", "XAUUSD"]:
+        for symbol in (symbols if symbols is not None else ["EURUSD", "XAUUSD"]):
             plan = get_panel_trade_plan(panel_data, symbol) or {}
             if str(plan.get("signal") or "WAIT").upper() in ["BUY", "SELL"]:
                 handoff_ok, handoff_reason, handoff_details = (
@@ -8154,9 +8133,17 @@ def run_ctrader_auto_trade_checks(panel_data):
     results = []
     actionable_seen = False
 
-    for symbol in ["EURUSD", "XAUUSD"]:
+    for symbol in (symbols if symbols is not None else ["EURUSD", "XAUUSD"]):
         execution_selection = select_auto_execution_candidate(panel_data, symbol)
         plan = execution_selection.get("plan") or {}
+        print("STRATEGY_CANDIDATE =", {"symbol": symbol, "source": execution_selection.get("source"),
+            "strategy_id": plan.get("studio_strategy_id"), "signal": plan.get("signal"),
+            "reason": plan.get("plan_reason"), "setup_id": plan.get("studio_setup_id")})
+        if execution_selection.get("source") == "NONE":
+            reason = plan.get("plan_reason") or "NO_LIVE_STRATEGY_FOR_SYMBOL"
+            set_auto_trade_status(symbol=symbol, signal="WAIT", action=None, status="BLOCKED", reason=reason)
+            results.append({"ok": False, "symbol": symbol, "reason": reason, "order_sent": False})
+            continue
         initial_plan = plan
         initial_signal = str(plan.get("signal") or "WAIT").upper()
         if initial_signal in ["BUY", "SELL"]:
@@ -8176,7 +8163,7 @@ def run_ctrader_auto_trade_checks(panel_data):
             symbol,
             audit=True,
         )
-        if news_state.get("allow_news_entry"):
+        if execution_selection.get("source") == "V3B" and news_state.get("allow_news_entry"):
             expected_side = news_state.get("expected_symbol_direction")
             news_state = evaluate_news_entry_state(
                 panel_data,
@@ -8184,7 +8171,7 @@ def run_ctrader_auto_trade_checks(panel_data):
                 side=expected_side,
                 audit=True,
             )
-            if news_state.get("allow_news_entry"):
+            if execution_selection.get("source") == "V3B" and news_state.get("allow_news_entry"):
                 plan = news_state.get("news_plan") or plan
                 if plan is not initial_plan:
                     news_signal = str(plan.get("signal") or "WAIT").upper()
@@ -9152,6 +9139,7 @@ def sync_live_positions(panel_data=None):
             LIVE_POSITION_SYNC_STATUS["last_error"] = None
 
         studio_managed_ids = set()
+        studio_position_states = {}
         try:
             studio_identity = current_identity()
             studio_owner = get_enabled_studio_live_owner()
@@ -9169,6 +9157,7 @@ def sync_live_positions(panel_data=None):
                     studio_identity,
                     positions,
                 )
+                studio_position_states = studio_managed_position_states(studio_owner, studio_identity, positions)
         except Exception as exc:
             print("STRATEGY_STUDIO_MANAGED_POSITION_LOOKUP_ERROR =", str(exc))
             raise
@@ -9435,7 +9424,7 @@ def sync_live_positions(panel_data=None):
                 and not live_prices_match(symbol, broker_synced_sl, saved_sl)
             )
 
-            if broker_manual_sl_adopted:
+            if not studio_managed_position and broker_manual_sl_adopted:
                 adopted_sl = float(broker_synced_sl)
                 saved_sl = adopted_sl
                 synced_sl = adopted_sl
@@ -9476,7 +9465,8 @@ def sync_live_positions(panel_data=None):
                 broker_tp_is_valid = False
 
             if (
-                broker_tp_is_valid
+                not studio_managed_position
+                and broker_tp_is_valid
                 and saved_tp2 is not None
                 and not live_prices_match(symbol, broker_synced_tp2, saved_tp2)
             ):
@@ -9546,7 +9536,7 @@ def sync_live_positions(panel_data=None):
                 stage="live_sync_compare",
             ))
 
-            if position_id and broker_sl_missing_or_mismatch:
+            if not studio_managed_position and position_id and broker_sl_missing_or_mismatch:
                 broker_sl_repair_result = modify_position_sltp(
                     position_id,
                     stop_loss_price=saved_sl,
@@ -9592,7 +9582,7 @@ def sync_live_positions(panel_data=None):
                             "repair_result": broker_sl_repair_result,
                         })
 
-            if position_id and broker_tp_missing_or_mismatch and not (
+            if not studio_managed_position and position_id and broker_tp_missing_or_mismatch and not (
                 broker_sl_repair_result and broker_sl_repair_result.get("ok")
             ):
                 broker_tp_repair_result = modify_position_sltp(
@@ -9622,7 +9612,7 @@ def sync_live_positions(panel_data=None):
                     broker_synced_tp2 = saved_tp2
                     synced_tp2 = saved_tp2
 
-            if broker_sl_missing_or_mismatch and not (
+            if not studio_managed_position and broker_sl_missing_or_mismatch and not (
                 broker_sl_repair_result and broker_sl_repair_result.get("ok")
             ):
                 synced_sl = saved_sl
@@ -9642,7 +9632,7 @@ def sync_live_positions(panel_data=None):
                     stage="live_sync_sl_repair_failed",
                 ))
 
-            if broker_tp_missing_or_mismatch and not (
+            if not studio_managed_position and broker_tp_missing_or_mismatch and not (
                 (broker_tp_repair_result and broker_tp_repair_result.get("ok"))
                 or (broker_sl_repair_result and broker_sl_repair_result.get("ok"))
             ):
@@ -9703,6 +9693,12 @@ def sync_live_positions(panel_data=None):
                 if numeric_observed_prices
                 else used_current_price
             )
+
+            if studio_managed_position:
+                synced_sl = broker_synced_sl
+                synced_tp2 = broker_synced_tp2
+                broker_sl_missing_or_mismatch = False
+                broker_tp_missing_or_mismatch = False
 
             broker_stop_loss_confirmed = not (
                 broker_sl_missing_or_mismatch
@@ -9875,6 +9871,16 @@ def sync_live_positions(panel_data=None):
             restored_v3b = None
             if studio_managed_position:
                 mirrored_order["execution_source"] = "STRATEGY_STUDIO"
+                management = studio_position_states.get(str(position_id)) or {}
+                mirrored_order["trade_management"] = management
+                mirrored_order["studio_strategy_id"] = management.get("strategy_id")
+                mirrored_order["strategy_name"] = management.get("strategy_name")
+                mirrored_order["tp1"] = management.get("tp1")
+                mirrored_order["tp2"] = management.get("tp2")
+                mirrored_order["initial_sl"] = management.get("initial_sl")
+                mirrored_order["hit_tp1"] = bool(management.get("tp1_triggered"))
+                mirrored_order["protection_confirmed"] = management.get("protection_state") == "CONFIRMED"
+                mirrored_order["protected_sl_price"] = management.get("target_protected_sl")
                 mirrored_order["management_paused"] = False
                 mirrored_order["management_pause_reason"] = None
             elif not current_order and current_identity() is not None:
@@ -11328,6 +11334,15 @@ def claim_execution_submission(trade_payload):
 def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guard=None):
     global LAST_EXECUTION_TIME
 
+    if source == "auto":
+        authority = get_execution_authority(payload.get("symbol"))
+        requested_source = str(payload.get("execution_source") or "V3B").upper()
+        matches = authority["source"] == requested_source and authority["source"] != "NONE"
+        if requested_source == "STRATEGY_STUDIO":
+            matches = matches and authority.get("strategy_id") == payload.get("studio_strategy_id") and authority.get("owner_id") == payload.get("studio_owner_id") and authority.get("account_scope") == payload.get("studio_account_scope")
+        if not matches:
+            return {"ok": False, "reason": authority.get("reason") if authority["source"] == "NONE" else "EXECUTION_AUTHORITY_CHANGED", "order_sent": False}
+
     trade_payload = prepare_ctrader_trade(payload)
 
     symbol = trade_payload.get("symbol")
@@ -12552,6 +12567,15 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
             "risk_recalculation_result": pre_submit_risk,
         },
     )
+    if source == "auto":
+        # Re-resolve after market/risk/fundamental work, immediately before the
+        # durable submission claim. A stale candidate is never another source.
+        authority = get_execution_authority(symbol)
+        valid_source = authority["source"] == ("STRATEGY_STUDIO" if studio_execution else "V3B")
+        valid_studio = not studio_execution or (authority.get("strategy_id") == trade_payload.get("studio_strategy_id") and authority.get("owner_id") == trade_payload.get("studio_owner_id") and authority.get("account_scope") == trade_payload.get("studio_account_scope"))
+        refresh_auto_trade_state_from_persistence("final_authority_gate")
+        if not valid_source or not valid_studio or not LIVE_AUTO_TRADE_ENABLED.get("enabled"):
+            return {"ok": False, "reason": "EXECUTION_AUTHORITY_CHANGED" if valid_source is False or valid_studio is False else "LIVE_AUTO_OFF", "order_sent": False}
     submission_key = None
     submission_claim = claim_execution_submission(trade_payload)
     if not submission_claim.get("ok"):
@@ -12571,6 +12595,9 @@ def _execute_live_order_core_impl(payload: dict, source="manual", _inflight_guar
             "durable broker request marker failed",
             "LIVE EXECUTION BLOCKED: durable broker request marker failed",
         )
+    print("BROKER_SUBMISSION =", {"symbol": symbol, "source": "STRATEGY_STUDIO" if studio_execution else "V3B" if source == "auto" else "MANUAL",
+        "strategy_id": trade_payload.get("studio_strategy_id"), "setup_id": trade_payload.get("studio_setup_id") or trade_payload.get("signal_setup_id"),
+        "client_order_id": submission_claim.get("broker_client_order_id")})
     try:
         result = place_market_order_with_inflight_cleanup(
             symbol,
