@@ -135,7 +135,11 @@ from services.trade_submission_service import (
     require_reconciliation,
 )
 from services.strategy_studio_live_state import get_enabled_studio_live_owner
-from services.strategy_studio_live_candidate import build_studio_candidate
+from services.strategy_studio_live_candidate import (
+    build_studio_candidate,
+    build_studio_live_display,
+    get_studio_live_display_profile,
+)
 from services.strategy_studio_position_manager import (
     account_has_managed_position as studio_account_has_managed_position,
     managed_owner_for_account as studio_managed_owner_for_account,
@@ -2042,6 +2046,188 @@ def overlay_live_forming_candles(panel_data, live_price_status, now=None):
     return panel_data
 
 
+def _studio_display_failure(symbol, reason, *, profile=None):
+    profile = profile if isinstance(profile, dict) else {}
+    return {
+        "execution_source": "STRATEGY_STUDIO",
+        "strategy_id": profile.get("strategy_id"),
+        "strategy_name": profile.get("strategy_name"),
+        "symbol": normalize_symbol(symbol),
+        "configured_symbols": list(profile.get("symbols") or []),
+        "live_handoff_enabled": bool(profile.get("enabled")),
+        "enabled_for_symbol": normalize_symbol(symbol) in set(profile.get("symbols") or []),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "signal": "WAIT",
+        "entry": None,
+        "sl": None,
+        "tp1": None,
+        "tp2": None,
+        "progress": 0,
+        "technical_ready": False,
+        "execution_ready": False,
+        "execution_block_reason": str(reason or "WAIT_STUDIO_DISPLAY_UNAVAILABLE"),
+        "reason": str(reason or "WAIT_STUDIO_DISPLAY_UNAVAILABLE"),
+        "conditions": [{
+            "key": "display",
+            "label": "Live strategy evaluation",
+            "state": "BLOCKED",
+            "reason": str(reason or "WAIT_STUDIO_DISPLAY_UNAVAILABLE"),
+            "details": {},
+        }],
+        "evaluator_steps": {},
+    }
+
+
+def _apply_studio_fundamental_display(display, definition):
+    if not isinstance(display, dict):
+        return display
+    signal = str(display.get("signal") or "WAIT").upper()
+    conditions = list(display.get("conditions") or [])
+    policy = str(
+        ((definition or {}).get("fundamentals") or {}).get("mode")
+        or "BLOCK_OPPOSITE"
+    ).upper()
+    if signal not in {"BUY", "SELL"}:
+        display["execution_ready"] = False
+        display["execution_block_reason"] = display.get("reason")
+        return display
+
+    try:
+        from services.fundamental_execution_guard import validate_fundamental_entry
+        gate = validate_fundamental_entry(
+            display.get("symbol"),
+            signal,
+            policy=policy,
+        )
+    except Exception as exc:
+        gate = {
+            "ok": False,
+            "reason": "WAIT_FUNDAMENTAL_STATUS_UNAVAILABLE",
+            "details": {"error": str(exc), "policy": policy},
+        }
+
+    replacement = {
+        "key": "fundamentals",
+        "label": (
+            "Fundamentals · require BUY/SELL alignment"
+            if policy == "REQUIRE_ALIGNMENT"
+            else "Fundamentals · block opposite bias"
+        ),
+        "state": "PASSED" if gate.get("ok") else "BLOCKED",
+        "reason": gate.get("reason"),
+        "details": copy.deepcopy(gate.get("details") or {}),
+    }
+    replaced = False
+    for index, item in enumerate(conditions):
+        if str((item or {}).get("key") or "") == "fundamentals":
+            conditions[index] = replacement
+            replaced = True
+            break
+    if not replaced:
+        conditions.append(replacement)
+
+    display["conditions"] = conditions
+    display["fundamental_policy"] = policy
+    display["fundamental_gate"] = copy.deepcopy(gate)
+    display["execution_ready"] = bool(gate.get("ok"))
+    display["execution_block_reason"] = (
+        None if gate.get("ok") else gate.get("reason")
+    )
+    if not gate.get("ok"):
+        display["reason"] = gate.get("reason") or display.get("reason")
+    return display
+
+
+def refresh_live_strategy_display(panel_data):
+    """Refresh the dashboard's strategy-specific LIVE rule presentation.
+
+    This is read-only presentation state. It never claims a setup and never
+    places, changes, or closes a broker order.
+    """
+    try:
+        owner_id = get_enabled_studio_live_owner()
+    except Exception as exc:
+        reason = f"WAIT_STUDIO_OWNER_STATE: {exc}"
+        for symbol in LIVE_STRATEGY_DISPLAY_BY_SYMBOL:
+            LIVE_STRATEGY_DISPLAY_BY_SYMBOL[symbol] = _studio_display_failure(
+                symbol, reason
+            )
+        return LIVE_STRATEGY_DISPLAY_BY_SYMBOL
+
+    if not owner_id:
+        for symbol in LIVE_STRATEGY_DISPLAY_BY_SYMBOL:
+            LIVE_STRATEGY_DISPLAY_BY_SYMBOL[symbol] = None
+        return LIVE_STRATEGY_DISPLAY_BY_SYMBOL
+
+    try:
+        profile = get_studio_live_display_profile(owner_id)
+    except Exception as exc:
+        profile = {}
+        reason = f"WAIT_STUDIO_PROFILE_UNAVAILABLE: {exc}"
+        for symbol in LIVE_STRATEGY_DISPLAY_BY_SYMBOL:
+            LIVE_STRATEGY_DISPLAY_BY_SYMBOL[symbol] = _studio_display_failure(
+                symbol, reason, profile=profile
+            )
+        return LIVE_STRATEGY_DISPLAY_BY_SYMBOL
+
+    identity = current_identity() or selected_identity()
+    balance = 10000.0
+    if identity is not None:
+        try:
+            snapshot = get_ctrader_account_snapshot()
+            verified = validate_verified_account_snapshot(snapshot)
+            if verified.get("ok"):
+                balance = float(verified.get("balance"))
+        except Exception:
+            # Risk dollars are display-only here; execution performs its own
+            # authoritative account verification.
+            pass
+
+    definition = profile.get("definition") or {}
+    configured = {
+        normalize_symbol(value)
+        for value in (profile.get("symbols") or [])
+        if value
+    }
+
+    for symbol in ("EURUSD", "XAUUSD"):
+        try:
+            bundle = {}
+            if identity is not None and symbol in configured:
+                bundle = load_strategy_studio_market_bundle(
+                    symbol,
+                    identity.scope,
+                )
+            display = build_studio_live_display(
+                owner_id,
+                identity,
+                symbol,
+                bundle,
+                account_balance=balance,
+                prior_state=None,
+            )
+            display = _apply_studio_fundamental_display(display, definition)
+            LIVE_STRATEGY_DISPLAY_BY_SYMBOL[symbol] = display
+        except Exception as exc:
+            LIVE_STRATEGY_DISPLAY_BY_SYMBOL[symbol] = _studio_display_failure(
+                symbol,
+                f"WAIT_STUDIO_DISPLAY_ERROR: {exc}",
+                profile=profile,
+            )
+
+    print("STRATEGY_LIVE_DISPLAY =", {
+        symbol: {
+            "strategy_name": (display or {}).get("strategy_name"),
+            "signal": (display or {}).get("signal"),
+            "reason": (display or {}).get("reason"),
+            "progress": (display or {}).get("progress"),
+            "enabled_for_symbol": (display or {}).get("enabled_for_symbol"),
+        }
+        for symbol, display in LIVE_STRATEGY_DISPLAY_BY_SYMBOL.items()
+    })
+    return LIVE_STRATEGY_DISPLAY_BY_SYMBOL
+
+
 def get_strategy_studio_closed_5m_prices(panel_data):
     """Return latest completed 5m closes from the same panel candle stream."""
     result = {}
@@ -2137,6 +2323,15 @@ def refresh_live_panel_meta(panel_data):
             "error": str(exc),
         })
         return False
+
+    try:
+        refresh_live_strategy_display(panel_data)
+    except Exception as exc:
+        # Strategy display must never block execution or position management.
+        print("STRATEGY_LIVE_DISPLAY_ERROR =", {
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        })
 
     try:
         apply_trade_signal_lifecycle(panel_data)
@@ -2574,6 +2769,7 @@ def auto_trade_status():
     return {
         **AUTO_TRADE_LAST_STATUS,
         "live_auto_status_by_symbol": LIVE_AUTO_STATUS_BY_SYMBOL,
+        "live_strategy_display_by_symbol": LIVE_STRATEGY_DISPLAY_BY_SYMBOL,
         "auto_trade": auto_trade_state_response(),
     }
 
@@ -2922,6 +3118,9 @@ def panel_data(force: int = 0):
 
         "live_auto_status_by_symbol":
             LIVE_AUTO_STATUS_BY_SYMBOL,
+
+        "live_strategy_display_by_symbol":
+            LIVE_STRATEGY_DISPLAY_BY_SYMBOL,
 
         "live_prices":
             live_price_status.get("live_prices", {}),
@@ -3697,6 +3896,11 @@ LIVE_AUTO_STATUS_BY_SYMBOL = {
         "active_trade": None,
     },
 }
+LIVE_STRATEGY_DISPLAY_BY_SYMBOL = {
+    "EURUSD": None,
+    "XAUUSD": None,
+}
+
 LIVE_BACKUP_FILE = os.path.join(
     DATA_DIR,
     "live_backup.json"
