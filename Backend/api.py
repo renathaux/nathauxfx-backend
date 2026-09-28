@@ -2066,6 +2066,9 @@ def get_strategy_studio_closed_5m_prices(panel_data):
                 "timestamp": datetime.fromtimestamp(
                     candle_time, tz=timezone.utc
                 ).isoformat(),
+                "closed_at": datetime.fromtimestamp(
+                    candle_time + 300, tz=timezone.utc
+                ).isoformat(),
             }
             break
     return result
