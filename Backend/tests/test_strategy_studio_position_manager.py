@@ -98,12 +98,28 @@ def open_position(*, price=1.1060, side="BUY", volume=10000, position_id="pos-1"
         "tp2": tp2,
         "volume": volume,
         "volume_units": volume,
+        "symbol_metadata": {"min_volume_units": 1, "volume_step_units": 1},
         "current_price": price,
     }
 
 
 def prices(*, bid=1.1060, ask=1.1062):
     return {"EURUSD": {"bid": bid, "ask": ask}}
+
+
+def test_partial_close_volume_respects_broker_step(db_session_factory):
+    from services import strategy_studio_position_manager as manager
+
+    class Row:
+        initial_volume_units = None
+        symbol = "EURUSD"
+
+    position = open_position(volume=1230)
+    position["symbol_metadata"] = {
+        "min_volume_units": 100,
+        "volume_step_units": 100,
+    }
+    assert manager._partial_volume(Row(), position, 10.0) == 100
 
 
 def test_open_studio_position_resolves_management_owner_even_without_live_gate(db_session_factory):
