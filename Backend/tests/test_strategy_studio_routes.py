@@ -88,7 +88,7 @@ def test_create_never_enables_live_handoff(monkeypatch):
 
 def test_owner_key_prefers_stable_user_id():
     assert route_module.owner_key(SimpleNamespace(id="42", email="x@example.com")) == "user:42"
-    assert route_module.owner_key({"email": "OWNER@EXAMPLE.COM"}) == "owner:owner@example.com"
+    assert route_module.owner_key({"role": "admin", "email": "OWNER@EXAMPLE.COM"}) == "owner:owner@example.com"
 
 
 def test_route_source_has_no_live_execution_imports():
