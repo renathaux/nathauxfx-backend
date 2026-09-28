@@ -387,6 +387,17 @@ def nonblocking_dashboard_feed(force: int = 0):
         if not isinstance(live_price_status, dict):
             live_price_status = {}
 
+        # Forward the engine's authoritative presentation without running any
+        # evaluator or broker operation on a dashboard request. Reject stale
+        # state from a previously selected account.
+        strategy_displays = clone_panel_for_transport(getattr(api, "LIVE_STRATEGY_DISPLAY_BY_SYMBOL", {}) or {})
+        strategy_displays = {
+            symbol: display for symbol, display in strategy_displays.items()
+            if isinstance(display, dict) and identity is not None
+            and (display.get("execution_authority") or {}).get("account_scope") == identity.scope
+        }
+        auto_statuses = clone_panel_for_transport(getattr(api, "LIVE_AUTO_STATUS_BY_SYMBOL", {}) or {}) if live_meta else {}
+
         data["_meta"] = {
             "account_scope": identity.scope if identity else None,
             "selection_revision": identity.selection_revision if identity else None,
@@ -415,6 +426,8 @@ def nonblocking_dashboard_feed(force: int = 0):
             },
             "live_account": live_account if isinstance(live_account, dict) else {},
             "live_active_orders": live_orders if isinstance(live_orders, dict) else {},
+            "live_strategy_display_by_symbol": strategy_displays,
+            "live_auto_status_by_symbol": auto_statuses,
             "broker_open_positions_count": len(live_positions),
             "live_trade_history": live_recent_history,
             "live_trade_stats": {

@@ -130,3 +130,22 @@ def test_ready_panel_does_not_load_display_fallback(monkeypatch):
     assert result["candles"] == panel["candles"]
     assert result["_meta"]["display_only_fallback"] is False
     assert result["_meta"]["analysis_available"] is True
+
+
+def test_cache_only_endpoint_preserves_account_scoped_live_authority(monkeypatch):
+    import time
+    from ctrader_account_context import AccountIdentity
+    identity = AccountIdentity('authority-test', 'demo')
+    monkeypatch.setattr(ctrader, 'current_identity', lambda: identity)
+    monkeypatch.setattr(api, 'PANEL_CACHE', {'data': {'_meta': {'account_scope': identity.scope}}, 'last_update': time.time()})
+    monkeypatch.setattr(api, 'LIVE_PANEL_META_CACHE', {'account_scope': identity.scope})
+    display = {'XAUUSD': {'execution_source': 'STRATEGY_STUDIO', 'execution_authority': {'source': 'STRATEGY_STUDIO', 'account_scope': identity.scope}, 'conditions': [{'key': 'confirmation', 'state': 'WAITING'}]}, 'EURUSD': {'execution_source': 'NONE', 'execution_authority': {'source': 'NONE', 'account_scope': identity.scope}, 'reason': 'NO_LIVE_STRATEGY_FOR_SYMBOL'}}
+    monkeypatch.setattr(api, 'LIVE_STRATEGY_DISPLAY_BY_SYMBOL', display)
+    monkeypatch.setattr(api, 'get_execution_authority', lambda *a: (_ for _ in ()).throw(AssertionError('endpoint must stay cache-only')))
+    result = ctrader.nonblocking_dashboard_feed.__wrapped__()
+    assert result['_meta']['live_strategy_display_by_symbol'] == display
+    identity2 = AccountIdentity('other-account', 'demo')
+    monkeypatch.setattr(ctrader, 'current_identity', lambda: identity2)
+    monkeypatch.setattr(ctrader, '_load_durable_dashboard_candles', lambda: {})
+    result = ctrader.nonblocking_dashboard_feed.__wrapped__()
+    assert not result['_meta']['live_strategy_display_by_symbol']
