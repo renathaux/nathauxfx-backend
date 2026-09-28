@@ -214,3 +214,18 @@ def test_stage3_migration_follows_0024_and_removes_submission_event_fk():
     assert 'down_revision = "20260917_0024"' in source
     assert "lifecycle_kind" in source
     assert "trade_submission_attempts_event_id_fkey" in source
+
+
+def test_studio_claim_preserves_immutable_execution_snapshot(tmp_path):
+    from models import StrategySetupLifecycle
+    factory = _factory(tmp_path)
+    _add_studio_lifecycle(factory)
+    claim = _studio_claim(factory)
+    assert claim["ok"]
+    with factory() as session:
+        row = session.get(StrategySetupLifecycle, "sts1_setup")
+        snapshot = row.execution_snapshot
+        assert snapshot["entry"] == 1.1
+        assert snapshot["client_order_id"] == claim["broker_client_order_id"]
+        assert snapshot["strategy_id"] == "strat_1"
+        assert len(snapshot["definition_hash"]) == 64

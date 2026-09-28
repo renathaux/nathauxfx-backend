@@ -137,6 +137,9 @@ def _transition_lifecycle_status(session, attempt, allowed, status, now, *, resu
             position_id = str((result or {}).get("position_id") or "") or None
             if position_id:
                 values[StrategySetupLifecycle.broker_position_id] = position_id
+            volume = (result or {}).get("volume_units")
+            if volume is not None:
+                values[StrategySetupLifecycle.initial_volume_units] = int(volume)
         return session.query(StrategySetupLifecycle).filter(
             StrategySetupLifecycle.setup_id == str(attempt.signal_setup_id),
             StrategySetupLifecycle.owner_id == str(attempt.owner_id),
@@ -314,6 +317,28 @@ def claim_strategy_submission(setup_id, account_id, symbol, direction, payload, 
                 "status": getattr(lifecycle, "status", None),
                 "idempotency_key": key,
             }
+
+        if lifecycle.execution_snapshot is None:
+            from services.strategy_studio_models import SavedStrategy
+            saved = session.get(SavedStrategy, strategy_id)
+            definition = lifecycle.definition_snapshot or {}
+            lifecycle.execution_snapshot = {
+                "execution_source": "STRATEGY_STUDIO", "owner_id": owner_id,
+                "account_scope": lifecycle.account_scope, "strategy_id": strategy_id,
+                "strategy_name": getattr(saved, "name", None) or payload.get("strategy_name") or strategy_id,
+                "schema_version": definition.get("schema_version"),
+                "definition_hash": hashlib.sha256(json.dumps(definition, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                "symbol": public_symbol, "direction": public_direction,
+                "setup_id": setup_id, "event_id": event_id,
+                "entry": payload.get("entry"), "initial_sl": payload.get("sl"),
+                "tp1": payload.get("tp1"), "tp2": payload.get("tp2"),
+                "risk": payload.get("risk_budget") or payload.get("risk") or {"risk_amount": payload.get("risk_amount"), "risk_percent": payload.get("risk_percent")},
+                "client_order_id": client_id, "created_at": now.isoformat(),
+            }
+            volume = payload.get("volume_units")
+            if volume is not None:
+                lifecycle.initial_volume_units = int(volume)
+            session.flush()
 
         changed = session.query(StrategySetupLifecycle).filter(
             StrategySetupLifecycle.setup_id == setup_id,
