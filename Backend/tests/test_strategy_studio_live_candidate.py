@@ -273,3 +273,117 @@ def test_candidate_source_has_no_broker_or_live_auto_mutation_imports():
     )
     for token in forbidden:
         assert token not in source
+
+
+def test_live_display_is_read_only_and_uses_strategy_evaluator_steps(tmp_path, monkeypatch):
+    factory = _factory(tmp_path)
+    _save_active(factory, symbols=["XAUUSD"])
+    _enable(factory)
+    monkeypatch.setattr(candidate, "build_market_facts", lambda *a, **k: _timeline())
+    monkeypatch.setattr(candidate, "evaluate_strategy", lambda *a, **k: EvaluationResult(
+        signal="WAIT",
+        steps={
+            "trend": {"state": "NOT_APPLICABLE"},
+            "structure": {"state": "PASSED", "direction": "SELL"},
+            "break_validation": {"state": "PASSED"},
+            "confirmation": {"state": "WAITING", "reason": "CONFIRMATION_PENDING"},
+            "session": {"state": "NOT_APPLICABLE"},
+            "seasonal": {"state": "NOT_APPLICABLE"},
+            "entry": {"state": "NOT_APPLICABLE"},
+            "stop_loss": {"state": "NOT_APPLICABLE"},
+            "tp1": {"state": "NOT_APPLICABLE"},
+            "tp2": {"state": "NOT_APPLICABLE"},
+            "risk": {"state": "NOT_APPLICABLE"},
+        },
+        setup_id="setup_display_wait",
+        entry=None,
+        sl=None,
+        tp1=None,
+        tp2=None,
+        risk_budget=None,
+        next_state=EvaluationState("WAITING", _pending_state().pending_setup),
+    ))
+
+    result = candidate.build_studio_live_display(
+        OWNER,
+        IDENTITY,
+        "XAUUSD",
+        {"5m": pd.DataFrame()},
+        account_balance=10000.0,
+        prior_state=_pending_state(),
+        session_factory=factory,
+    )
+
+    assert result["execution_source"] == "STRATEGY_STUDIO"
+    assert result["strategy_name"] == "Shadow candidate test"
+    assert result["signal"] == "WAIT"
+    assert result["reason"] == "CONFIRMATION_PENDING"
+    assert any(
+        item["key"] == "confirmation" and item["state"] == "WAITING"
+        for item in result["conditions"]
+    )
+    with factory() as session:
+        assert session.query(StrategySetupLifecycle).count() == 0
+
+
+def test_live_display_marks_symbol_not_configured_without_evaluating(tmp_path, monkeypatch):
+    factory = _factory(tmp_path)
+    _save_active(factory, symbols=["XAUUSD"])
+    _enable(factory)
+    monkeypatch.setattr(
+        candidate,
+        "build_market_facts",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("disabled display symbol must not evaluate")
+        ),
+    )
+
+    result = candidate.build_studio_live_display(
+        OWNER,
+        IDENTITY,
+        "EURUSD",
+        {},
+        account_balance=10000.0,
+        session_factory=factory,
+    )
+
+    assert result["enabled_for_symbol"] is False
+    assert result["reason"] == "WAIT_STUDIO_SYMBOL_DISABLED"
+    assert result["conditions"][0]["state"] == "BLOCKED"
+    assert "XAUUSD" in result["conditions"][0]["label"]
+
+
+def test_display_conditions_are_derived_from_saved_strategy_definition():
+    definition = candidate.normalize_definition({
+        **_definition(["XAUUSD"]),
+        "stop_loss": {
+            "method": "LAST_SWING",
+            "buffer_pips": 0.0,
+            "fixed_distance": None,
+            "distance_filter": {
+                "enabled": True,
+                "mode": "PERCENT_ENTRY",
+                "minimum": 0.40,
+                "maximum": 0.60,
+            },
+        },
+        "fundamentals": {"mode": "REQUIRE_ALIGNMENT"},
+    })
+    conditions = candidate._display_conditions(definition, {
+        "structure": {"state": "PASSED"},
+        "break_validation": {"state": "PASSED"},
+        "confirmation": {"state": "WAITING", "reason": "CONFIRMATION_PENDING"},
+        "entry": {"state": "NOT_APPLICABLE"},
+        "stop_loss": {"state": "NOT_APPLICABLE"},
+        "tp1": {"state": "NOT_APPLICABLE"},
+        "tp2": {"state": "NOT_APPLICABLE"},
+        "risk": {"state": "NOT_APPLICABLE"},
+        "session": {"state": "NOT_APPLICABLE"},
+        "seasonal": {"state": "NOT_APPLICABLE"},
+        "trend": {"state": "NOT_APPLICABLE"},
+    })
+
+    stop = next(item for item in conditions if item["key"] == "stop_loss")
+    fundamental = next(item for item in conditions if item["key"] == "fundamentals")
+    assert "0.4–0.6 % of entry" in stop["label"]
+    assert "require BUY/SELL alignment" in fundamental["label"]
