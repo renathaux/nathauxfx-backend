@@ -93,6 +93,9 @@ def _levels(row, position):
 
     target_basis = str(tp1.get("target_basis") or "SL_DISTANCE").upper()
     protection_mode = str(tp1.get("protection_mode") or "FIXED").upper()
+    protection_trigger_method = str(
+        tp1.get("protection_trigger_method") or "CANDLE_CLOSE"
+    ).upper()
     raw_steps = tp1.get("protection_steps") if isinstance(tp1.get("protection_steps"), list) else []
 
     target = protected = None
@@ -140,6 +143,7 @@ def _levels(row, position):
         "current_sl": stop,
         "target_basis": target_basis,
         "protection_mode": protection_mode,
+        "protection_trigger_method": protection_trigger_method,
         "step_levels": step_levels,
     }
 
@@ -148,6 +152,13 @@ def _target_hit(side, price, target):
     if price is None or target is None:
         return False
     return (side == "BUY" and price >= target) or (side == "SELL" and price <= target)
+
+
+def _closed_price(symbol, closed_prices):
+    payload = (closed_prices or {}).get(str(symbol)) or {}
+    if isinstance(payload, dict):
+        return _float(payload.get("close"), payload.get("price"))
+    return _float(payload)
 
 
 def _step_for_price(levels, price):
@@ -285,6 +296,16 @@ def _partial_close(row, position, levels, price, now, *, catchup):
 
     step = None
     if levels.get("protection_mode") == "TP2_STEPS":
+        if levels.get("protection_trigger_method") == "CANDLE_CLOSE":
+            # v18 behavior: TP1 partial close is touch-based, but the step
+            # ladder waits for a closed 5m candle before moving broker SL.
+            return {
+                "action": "TP1_PARTIAL_CLOSE",
+                "status": "COMPLETED",
+                "volume": volume,
+                "protection_deferred": True,
+                "protection_trigger_method": "CANDLE_CLOSE",
+            }
         step = _step_for_price(levels, price)
         protected = step.get("protected") if step else None
     else:
@@ -378,7 +399,7 @@ def _advance_step_protection(row, position, levels, price, now):
     }
 
 
-def _manage(owner_id, account_identity, open_positions, prices, *, resume, session_factory=None):
+def _manage(owner_id, account_identity, open_positions, prices, *, resume, closed_prices=None, session_factory=None):
     factory = _factory(session_factory)
     scope = _scope(account_identity)
     account_id = _account_id(account_identity)
@@ -435,10 +456,18 @@ def _manage(owner_id, account_identity, open_positions, prices, *, resume, sessi
                 continue
 
             if levels.get("protection_mode") == "TP2_STEPS":
+                protection_price = (
+                    _closed_price(str(row.symbol), closed_prices)
+                    if levels.get("protection_trigger_method") == "CANDLE_CLOSE"
+                    else price
+                )
                 action = _advance_step_protection(
-                    row, position, levels, price, now
+                    row, position, levels, protection_price, now
                 )
                 if action is not None:
+                    action["protection_trigger_method"] = levels.get(
+                        "protection_trigger_method"
+                    )
                     actions.append(action)
 
         session.commit()
@@ -452,15 +481,38 @@ def _manage(owner_id, account_identity, open_positions, prices, *, resume, sessi
     }
 
 
-def resume_account_management(owner_id, account_identity, open_positions, prices, *, session_factory=None) -> dict:
+def resume_account_management(owner_id, account_identity, open_positions, prices, *, closed_prices=None, session_factory=None) -> dict:
     return _manage(
         owner_id, account_identity, open_positions, prices,
-        resume=True, session_factory=session_factory,
+        resume=True, closed_prices=closed_prices, session_factory=session_factory,
     )
 
 
-def manage_selected_account_positions(owner_id, account_identity, open_positions, prices, *, session_factory=None) -> dict:
+def manage_selected_account_positions(owner_id, account_identity, open_positions, prices, *, closed_prices=None, session_factory=None) -> dict:
     return _manage(
         owner_id, account_identity, open_positions, prices,
-        resume=False, session_factory=session_factory,
+        resume=False, closed_prices=closed_prices, session_factory=session_factory,
     )
+
+
+def managed_position_ids(owner_id, account_identity, open_positions, *, session_factory=None) -> set[str]:
+    """Return open broker position ids owned by Strategy Studio in this account scope."""
+    factory = _factory(session_factory)
+    scope = _scope(account_identity)
+    account_id = _account_id(account_identity)
+    positions = _position_map(open_positions)
+    if not positions:
+        return set()
+    with factory() as session:
+        rows = session.query(StrategySetupLifecycle).filter(
+            StrategySetupLifecycle.owner_id == str(owner_id),
+            StrategySetupLifecycle.account_id == account_id,
+            StrategySetupLifecycle.account_scope == scope,
+            StrategySetupLifecycle.status.in_(_OPEN_STATUSES),
+            StrategySetupLifecycle.broker_position_id.is_not(None),
+        ).all()
+        return {
+            str(row.broker_position_id)
+            for row in rows
+            if str(row.broker_position_id) in positions
+        }
