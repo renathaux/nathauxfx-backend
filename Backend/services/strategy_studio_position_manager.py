@@ -391,8 +391,11 @@ def _confirm_observation(row, position, now):
     current_sl = _float(position.get("sl"), position.get("stop_loss"), position.get("stopLoss"))
     target = _float(state.get("target_protected_sl"))
     if target is not None and current_sl is not None and not _is_more_protective(row.direction, current_sl, target):
-        _state(row, protection_state="CONFIRMED", broker_confirmed_sl=current_sl)
+        _state(row, protection_state="CONFIRMED", broker_confirmed_sl=current_sl, last_confirmed_sl=current_sl)
         row.protection_applied_at = now
+    elif target is not None and state.get("protection_state") == "CONFIRMED":
+        _state(row, protection_state="PENDING", last_confirmed_sl=state.get("broker_confirmed_sl"), broker_confirmed_sl=None, management_error="BROKER_STOP_BELOW_TARGET")
+        row.protection_applied_at = None
     remaining = _float(position.get("volume_units"), position.get("volume"))
     before = _float(state.get("tp1_volume_before"))
     requested = _float(state.get("tp1_requested_volume"))
@@ -484,7 +487,7 @@ def _manage(owner_id, account_identity, open_positions, prices, *, resume, close
             _state(row, tp1_state="PARTIAL_CLOSED", tp1_partial_close_confirmed=True)
             state = row.management_state or {}
             step = None
-            if state.get("protection_state") == "PENDING":
+            if state.get("protection_state") in {"PENDING", "FAILED"}:
                 # A crash after the durable intent may precede the broker call.
                 # Reconcile against this poll's broker SL, then retry precisely
                 # the durable target; price retreat cannot weaken that target.
@@ -586,8 +589,10 @@ def managed_position_states(owner_id, account_identity, open_positions, *, sessi
             position, snapshot, state = positions[pid], row.execution_snapshot or {}, row.management_state or {}
             actual_sl = _float(position.get("sl"), position.get("stop_loss"))
             target = _float(state.get("target_protected_sl"))
-            if state.get("protection_state") == "CONFIRMED" and (actual_sl is None or _is_more_protective(row.direction, actual_sl, target)):
-                state = {**state, "protection_state": "FAILED", "broker_confirmed_sl": None, "management_error": "BROKER_STOP_BELOW_TARGET"}
+            if target is not None and actual_sl is not None and not _is_more_protective(row.direction, actual_sl, target):
+                state = {**state, "protection_state": "CONFIRMED", "broker_confirmed_sl": actual_sl}
+            elif state.get("protection_state") == "CONFIRMED" and (actual_sl is None or _is_more_protective(row.direction, actual_sl, target)):
+                state = {**state, "protection_state": "PENDING", "last_confirmed_sl": state.get("broker_confirmed_sl"), "broker_confirmed_sl": None, "management_error": "BROKER_STOP_BELOW_TARGET"}
             levels = _levels(row, position)
             index, steps = state.get("protection_step_index", -1), levels["step_levels"]
             next_step = steps[index + 1] if index + 1 < len(steps) else None

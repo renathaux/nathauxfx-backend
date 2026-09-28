@@ -612,7 +612,8 @@ def test_protection_rejection_is_visible_and_never_moves_target_backward(db_sess
     identity = AccountIdentity("acct-a", "demo")
     manager.manage_selected_account_positions("owner-1", identity, [open_position(price=1.109)], prices(bid=1.109), session_factory=db_session_factory)
     manager.manage_selected_account_positions("owner-1", identity, [open_position(price=1.106)], prices(), session_factory=db_session_factory)
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
     state = manager.managed_position_states("owner-1", identity, [open_position()], session_factory=db_session_factory)["pos-1"]
     assert state["protection_state"] == "FAILED"
     assert state["protection_step_index"] == 1
@@ -669,3 +670,23 @@ def test_pending_stop_recovers_after_crash_even_if_price_retreats(db_session_fac
     assert len(calls) == 1
     state = manager.managed_position_states("owner-1", identity, [open_position(sl=1.106)], session_factory=db_session_factory)["pos-1"]
     assert state["protection_state"] == "CONFIRMED"
+
+
+def test_confirmed_stop_regression_retries_saved_target_after_price_retreat(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+    seed_lifecycle(db_session_factory, tp1_done=True, strategy_definition=definition(protection_mode="TP2_STEPS", protection_trigger_method="PRICE_TOUCH", protection_steps=[{"trigger_percent": 80, "secure_percent": 60}]))
+    with db_session_factory() as session:
+        row = session.get(StrategySetupLifecycle, "setup-1")
+        row.execution_snapshot = {"entry": 1.1, "initial_sl": 1.095, "tp2": 1.11}
+        row.management_state = {"protection_state": "CONFIRMED", "target_protected_sl": 1.106, "broker_confirmed_sl": 1.106, "protection_step_index": 0, "protection_trigger_percent": 80, "protection_secure_percent": 60}
+        session.commit()
+    calls = []
+    monkeypatch.setattr(manager, "modify_position_stop_loss", lambda *a, **k: calls.append(a) or {"ok": True})
+    identity = AccountIdentity("acct-a", "demo")
+    manager.manage_selected_account_positions("owner-1", identity, [open_position(price=1.107, sl=1.095)], prices(bid=1.107), session_factory=db_session_factory)
+    assert calls == [("pos-1", 1.106)]
+    with db_session_factory() as session:
+        state = session.get(StrategySetupLifecycle, "setup-1").management_state
+        assert state["protection_state"] == "PENDING"
+        assert state["broker_confirmed_sl"] is None
+        assert state["last_confirmed_sl"] == 1.106
