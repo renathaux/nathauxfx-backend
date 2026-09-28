@@ -283,7 +283,7 @@ def test_fast_job_captures_read_only_account_balance_and_owner(monkeypatch, tmp_
     actors = []
     def actor(request, mutation=False):
         actors.append(mutation)
-        return {'email': 'alice@example.com'}
+        return {'role': 'admin', 'email': 'alice@example.com'}
     @contextmanager
     def pinned(): yield SimpleNamespace(scope='CTRADER:DEMO:123')
     monkeypatch.setattr(route, '_actor', actor)
@@ -296,7 +296,7 @@ def test_fast_job_captures_read_only_account_balance_and_owner(monkeypatch, tmp_
     assert saved['starting_balance'] == 12345
     assert saved['account_scope'] == 'CTRADER:DEMO:123'
     assert actors == [True]
-    monkeypatch.setattr(route, '_actor', lambda request, mutation=False: {'email': 'bob@example.com'})
+    monkeypatch.setattr(route, '_actor', lambda request, mutation=False: {'role': 'admin', 'email': 'bob@example.com'})
     for operation in (route.get_fast_job, route.cancel_fast_job):
         with pytest.raises(HTTPException) as exc: operation(created['job_id'], SimpleNamespace())
         assert exc.value.status_code == 404
@@ -307,7 +307,7 @@ def test_fast_job_captures_read_only_account_balance_and_owner(monkeypatch, tmp_
     {'start': '2026-09-01T00:00:00'}, {'symbol': 'XAUUSD'},
 ])
 def test_fast_job_rejects_invalid_range_and_symbol_before_account_read(monkeypatch, overrides):
-    monkeypatch.setattr(route, '_actor', lambda request, mutation=False: {'email': 'alice@example.com'})
+    monkeypatch.setattr(route, '_actor', lambda request, mutation=False: {'role': 'admin', 'email': 'alice@example.com'})
     monkeypatch.setattr(route, '_fast_jobs', lambda: pytest.fail('invalid payload'))
     with pytest.raises(HTTPException) as exc: route.create_fast_job(fast_payload(**overrides), SimpleNamespace())
     assert exc.value.status_code == 400

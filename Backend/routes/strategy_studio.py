@@ -7,6 +7,12 @@ or switches broker accounts.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
+import logging
+import os
+
+from fastapi.routing import APIRoute
+from starlette.concurrency import run_in_threadpool
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
@@ -40,9 +46,57 @@ from services.strategy_studio_service import (
     update_strategy,
 )
 from services.user_auth_service import current_user, current_user_with_csrf
+from services.strategy_studio_owner import canonical_strategy_owner
 
 
-router = APIRouter(prefix="/strategy-studio", tags=["strategy-studio"])
+def owner_debug_snapshot(owner):
+    """Read metadata only; never initialize or change LIVE/selection state."""
+    from db import SessionLocal, engine
+    from models import StrategyStudioLiveState
+    from services.strategy_studio_models import SavedStrategy, StrategyStudioSelection
+    with SessionLocal() as session:
+        count = session.query(SavedStrategy).filter(SavedStrategy.owner_id == owner).count()
+        selection = session.get(StrategyStudioSelection, owner)
+        live = session.get(StrategyStudioLiveState, owner)
+        return {
+            "strategy_count": count,
+            "database_host": engine.url.host,
+            "database_name": engine.url.database,
+            "active_strategy_id": selection.strategy_id if selection else None,
+            "live_strategy_id": live.enabled_strategy_id if live and live.enabled else None,
+        }
+
+
+class StrategyOwnerDiagnosticRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+        async def traced(request):
+            response = None
+            status_code = 500
+            try:
+                response = await handler(request)
+                status_code = response.status_code
+                response.headers["Cache-Control"] = "private, no-store"
+                return response
+            except HTTPException as exc:
+                status_code = exc.status_code
+                raise
+            finally:
+                if os.getenv("STRATEGY_STUDIO_OWNER_DEBUG", "1").lower() not in {"0", "false", "off"}:
+                    data = {"route": self.path, "method": request.method, "status": status_code,
+                            "role": None, "email": None, "actor_id": None, "owner_key": None,
+                            "strategy_count": None, "active_strategy_id": None, "live_strategy_id": None}
+                    data.update(getattr(request.state, "strategy_owner_debug", {}))
+                    if data["owner_key"]:
+                        try:
+                            data.update(await run_in_threadpool(owner_debug_snapshot, data["owner_key"]))
+                        except Exception:
+                            data["snapshot_available"] = False
+                    logging.getLogger("uvicorn.error").info("STRATEGY_STUDIO_OWNER_DEBUG = %s", json.dumps(data))
+        return traced
+
+
+router = APIRouter(prefix="/strategy-studio", tags=["strategy-studio"], route_class=StrategyOwnerDiagnosticRoute)
 PARITY_LOOKBACK_DAYS = 7
 
 
@@ -71,24 +125,8 @@ class LiveHandoffRequest(BaseModel):
     strategy_id: str | None = None
 
 
-def owner_key(actor):
-    if isinstance(actor, dict):
-        role = str(actor.get("role") or "").strip().lower()
-        email = str(actor.get("email") or "legacy-admin").strip().lower()
-        actor_id = actor.get("id")
-    else:
-        role = str(getattr(actor, "role", None) or "").strip().lower()
-        email = str(getattr(actor, "email", None) or "legacy-admin").strip().lower()
-        actor_id = getattr(actor, "id", None)
-
-    # Admin ownership is email-scoped so legacy/persisted owner sessions and any
-    # future typed admin actor resolve to the same durable Strategy Studio
-    # library instead of creating a second user:<uuid> namespace.
-    if role == "admin":
-        return f"owner:{email}"
-    if actor_id is not None:
-        return f"user:{actor_id}"
-    return f"owner:{email}"
+# Compatibility for simulator routes importing this name.
+owner_key = canonical_strategy_owner
 
 
 def _legacy_actor(request: Request, *, mutation: bool = False):
@@ -106,7 +144,7 @@ def _legacy_actor(request: Request, *, mutation: bool = False):
     return session
 
 
-def _actor(request: Request, *, mutation: bool = False):
+def _resolve_actor(request: Request, *, mutation: bool = False):
     # A valid legacy-owner Bearer token is explicit and must win over any
     # customer cookie that may also exist in the browser. Otherwise an admin
     # tab can be incorrectly scoped to a customer user and see an empty library.
@@ -114,8 +152,25 @@ def _actor(request: Request, *, mutation: bool = False):
     if legacy is not None:
         return legacy
 
+    # Explicit owner credentials cannot silently become a different cookie actor.
+    authorization = str(request.headers.get("authorization") or "").split(None, 1)
+    if authorization and authorization[0].lower() == "bearer":
+        raise HTTPException(status_code=401, detail="OWNER_SESSION_EXPIRED")
+
     resolver = current_user_with_csrf if mutation else current_user
     return resolver(request)
+
+
+def _actor(request: Request, *, mutation: bool = False):
+    actor = _resolve_actor(request, mutation=mutation)
+    def field(name):
+        value = actor.get(name) if isinstance(actor, dict) else getattr(actor, name, None)
+        return str(value)[:320] if value is not None else None
+    request.state.strategy_owner_debug = {
+        "role": field("role"), "email": field("email"), "actor_id": field("id"),
+        "owner_key": canonical_strategy_owner(actor),
+    }
+    return actor
 
 
 def _service_http_error(exc: Exception) -> HTTPException:
@@ -324,7 +379,7 @@ def _evaluate_live_handoff_readiness(owner: str) -> dict:
 def strategies_list(request: Request):
     owner = owner_key(_actor(request))
     try:
-        return {"ok": True, "strategies": list_strategies(owner)}
+        return {"ok": True, "owner_id": owner, "strategies": list_strategies(owner)}
     except Exception as exc:
         raise _service_http_error(exc) from exc
 
