@@ -558,8 +558,8 @@ def test_oauth_single_authorized_account_auto_selects_new_account(monkeypatch):
 
     selected = []
 
-    def select(account_id):
-        selected.append(account_id)
+    def select(account_id, **kwargs):
+        selected.append((account_id, kwargs))
         return {"ok": True, "account_id": account_id}
 
     monkeypatch.setattr(api, "set_active_ctrader_account", select)
@@ -584,7 +584,84 @@ def test_oauth_single_authorized_account_auto_selects_new_account(monkeypatch):
         ],
     })
 
-    assert selected == ["48869794"]
+    assert selected == [("48869794", {"refresh_snapshot": False})]
     assert result["active_account_id"] == "48869794"
     assert result["authorized_account_ids"] == ["48869794"]
     assert result["oauth_auto_selected_account_id"] == "48869794"
+
+
+def test_oauth_preserves_previous_active_account_when_grant_contains_multiple(monkeypatch):
+    import api
+
+    selected = []
+
+    def select(account_id, **kwargs):
+        selected.append((account_id, kwargs))
+        return {"ok": True, "account_id": account_id, "env": "demo"}
+
+    monkeypatch.setattr(api, "set_active_ctrader_account", select)
+    monkeypatch.setattr(
+        api,
+        "fetch_ctrader_accounts",
+        lambda refresh=False: {
+            "ok": True,
+            "active_account_id": "48869794",
+            "accounts": [
+                {"account_id": "48817926", "env": "demo"},
+                {"account_id": "48869794", "env": "demo"},
+            ],
+            "cached": True,
+        },
+    )
+
+    result = api.reconcile_ctrader_oauth_accounts(
+        {
+            "ok": True,
+            "active_account_id": None,
+            "authorized_account_ids": ["48817926", "48869794"],
+            "accounts": [
+                {"account_id": "48817926", "env": "demo"},
+                {"account_id": "48869794", "env": "demo"},
+            ],
+        },
+        preferred_active_account_id="48869794",
+    )
+
+    assert selected == [("48869794", {"refresh_snapshot": False})]
+    assert result["active_account_id"] == "48869794"
+    assert result["oauth_auto_selected_account_id"] == "48869794"
+
+
+def test_fast_account_activation_skips_balance_snapshot(selected, monkeypatch):
+    selected["accounts"] = [{"account_id": "47784297", "env": "demo"}]
+    monkeypatch.setattr(
+        connector,
+        "verify_ctrader_account_auth",
+        lambda account_id, **kw: {
+            "ok": True,
+            "account_id": account_id,
+            "authorized_account_ids": [account_id],
+        },
+    )
+    monkeypatch.setattr(
+        connector,
+        "get_ctrader_account_snapshot",
+        lambda: pytest.fail("fast activation must not wait for a balance snapshot"),
+    )
+    monkeypatch.setattr(connector, "save_ctrader_account_settings", lambda *a, **kw: None)
+    monkeypatch.setattr(connector, "update_env_file_values", lambda values: None)
+    monkeypatch.setattr(
+        connector,
+        "selected_identity",
+        lambda: __import__("ctrader_account_context").AccountIdentity("47784297", "demo"),
+    )
+
+    result = connector.set_active_ctrader_account(
+        "47784297",
+        refresh_snapshot=False,
+    )
+
+    assert result["ok"] is True
+    assert result["fresh_account_snapshot"] is None
+    assert connector.CONNECTED["connected"] is True
+    assert connector.CONNECTED["status"] is True
