@@ -295,5 +295,7 @@ def test_live_status_reports_gate_without_enabling_it(monkeypatch):
     body = response.json()
     assert body["enabled"] is False
     assert body["parity_status"] == "REQUIRES_VERIFICATION"
-    assert body["entry_parity_only"] is True
+    assert body["entry_parity_only"] is False
+    assert body["v3b_parity_required"] is False
+    assert body["readiness_validation"] == "ACTIVE_STRATEGY_EXECUTABILITY"
     assert body["post_entry_management_compared"] is False

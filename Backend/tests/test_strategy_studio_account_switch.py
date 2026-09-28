@@ -15,6 +15,12 @@ def test_account_switch_without_managed_studio_position_uses_existing_switch(mon
     monkeypatch.setattr(api, "set_active_ctrader_account", switched)
     monkeypatch.setattr(api, "sync_ctrader_account_state", lambda force=False: {"account_id": "acct-b"})
 
+    # The switch resumes management in the destination account, even with no
+    # source positions. Keep that database boundary isolated in this unit test.
+    resumed = MagicMock(return_value={"actions": []})
+    monkeypatch.setattr(api, "resume_studio_account_management", resumed)
+    monkeypatch.setattr(api, "get_live_prices", lambda: {"live_prices": {}})
+
     result = api.switch_ctrader_account_with_studio_management("acct-b", confirmed=False)
 
     assert result["ok"] is True
