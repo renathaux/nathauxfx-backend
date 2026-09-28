@@ -134,6 +134,7 @@ def test_route_uses_static_candles_and_positive_balance(monkeypatch):
         *, risk_override=None, include_replay=False,
         evaluation_start=None, evaluation_end=None,
         continuation=None, finalize_open_trade=True,
+        max_concurrent_positions=1, max_combined_open_risk_percent=None,
     ):
         calls["definition"] = strategy_definition
         calls["balance"] = balance
@@ -142,6 +143,8 @@ def test_route_uses_static_candles_and_positive_balance(monkeypatch):
         calls["evaluation_end"] = evaluation_end
         calls["continuation"] = continuation
         calls["finalize"] = finalize_open_trade
+        calls["max_concurrent_positions"] = max_concurrent_positions
+        calls["max_combined_open_risk_percent"] = max_combined_open_risk_percent
         return {
             "metrics": {"starting_balance": balance},
             "trades": [],
@@ -151,7 +154,12 @@ def test_route_uses_static_candles_and_positive_balance(monkeypatch):
 
     monkeypatch.setattr(route, "run_simulation", fake_run)
     result = route.strategy_simulation_run(
-        payload(mode="REPLAY"), SimpleNamespace()
+        payload(
+            mode="REPLAY",
+            max_concurrent_positions=2,
+            max_combined_open_risk_percent=2.0,
+        ),
+        SimpleNamespace(),
     )
 
     assert result["ok"] is True
@@ -165,6 +173,8 @@ def test_route_uses_static_candles_and_positive_balance(monkeypatch):
     assert calls["evaluation_end"] == payload().end
     assert calls["continuation"] is None
     assert calls["finalize"] is True
+    assert calls["max_concurrent_positions"] == 2
+    assert calls["max_combined_open_risk_percent"] == pytest.approx(2.0)
 
 
 def test_missing_static_history_is_rejected_before_simulation(monkeypatch):
@@ -311,3 +321,16 @@ def test_fast_job_rejects_invalid_range_and_symbol_before_account_read(monkeypat
     monkeypatch.setattr(route, '_fast_jobs', lambda: pytest.fail('invalid payload'))
     with pytest.raises(HTTPException) as exc: route.create_fast_job(fast_payload(**overrides), SimpleNamespace())
     assert exc.value.status_code == 400
+
+
+def test_invalid_simulator_concurrency_options_are_rejected(monkeypatch):
+    monkeypatch.setattr(route, "_actor", lambda request: {"email": "x@example.com"})
+    for kwargs in (
+        {"max_concurrent_positions": 0},
+        {"max_concurrent_positions": 4},
+        {"max_combined_open_risk_percent": 0},
+        {"max_combined_open_risk_percent": 11},
+    ):
+        with pytest.raises(HTTPException) as exc:
+            route.strategy_simulation_run(payload(**kwargs), SimpleNamespace())
+        assert exc.value.status_code == 400

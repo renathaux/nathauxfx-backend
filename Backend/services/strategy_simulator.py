@@ -389,7 +389,8 @@ def _evaluation_reason(evaluation) -> tuple[str | None, str | None]:
 
 def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_override=None,
                    include_replay=False, evaluation_start=None, evaluation_end=None,
-                   continuation=None, finalize_open_trade=True, timeline=None, progress=None, is_cancelled=None) -> dict:
+                   continuation=None, finalize_open_trade=True, timeline=None, progress=None, is_cancelled=None,
+                   max_concurrent_positions=1, max_combined_open_risk_percent=None) -> dict:
     value = normalize_definition(definition)
     timeline = timeline or build_market_facts(
         market_bundle,
@@ -402,6 +403,22 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
     if base_balance <= 0:
         raise ValueError("SIMULATION_BALANCE_INVALID")
 
+    try:
+        max_positions = int(max_concurrent_positions)
+    except (TypeError, ValueError):
+        raise ValueError("SIMULATION_MAX_CONCURRENT_POSITIONS_INVALID")
+    if max_positions < 1 or max_positions > 3:
+        raise ValueError("SIMULATION_MAX_CONCURRENT_POSITIONS_INVALID")
+
+    risk_cap_percent = None
+    if max_combined_open_risk_percent is not None:
+        try:
+            risk_cap_percent = float(max_combined_open_risk_percent)
+        except (TypeError, ValueError):
+            raise ValueError("SIMULATION_MAX_COMBINED_OPEN_RISK_INVALID")
+        if not 0 < risk_cap_percent <= 10:
+            raise ValueError("SIMULATION_MAX_COMBINED_OPEN_RISK_INVALID")
+
     continuation_value = continuation if isinstance(continuation, dict) else {}
     balance = float(continuation_value.get("balance", base_balance))
     if balance <= 0:
@@ -412,19 +429,37 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         str(continuation_value.get("evaluator_status") or "WAITING"),
         continuation_value.get("pending_setup"),
     )
-    active = _virtual_trade_from_payload(continuation_value.get("active_trade"))
+
+    active_payloads = continuation_value.get("active_trades")
+    if isinstance(active_payloads, list):
+        active = [
+            trade for trade in
+            (_virtual_trade_from_payload(item) for item in active_payloads)
+            if trade is not None
+        ]
+    else:
+        legacy_active = _virtual_trade_from_payload(
+            continuation_value.get("active_trade")
+        )
+        active = [legacy_active] if legacy_active is not None else []
+
+    if len(active) > max_positions:
+        raise ValueError("SIMULATION_CONTINUATION_EXCEEDS_MAX_CONCURRENT_POSITIONS")
+
     trades: list[dict] = []
     replay: list[dict] = []
     ordinal = int(continuation_value.get("ordinal") or 0)
 
-    # Fast Backtest must explain *why* a strategy produced few or zero trades.
-    # Keep diagnostics independent from replay frames so FAST and REPLAY return
-    # the same funnel/rejection summary without storing every candle decision.
     diagnostic_setups: dict[str, dict] = {}
     no_setup_reasons: dict[str, int] = {}
     candles_analyzed = 0
     evaluations = 0
     signals_emitted = 0
+    trades_opened = 0
+    capacity_blocked_candles = 0
+    combined_risk_blocked_signals = 0
+    max_simultaneous_positions = len(active)
+    max_open_risk_dollars = sum(float(item.risk_dollars) for item in active)
     window_start = pd.Timestamp(evaluation_start) if evaluation_start is not None else None
     window_end = pd.Timestamp(evaluation_end) if evaluation_end is not None else None
 
@@ -445,16 +480,35 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
             continue
         candles_analyzed += 1
 
-        if active is not None:
-            closed = resolve_virtual_trade(active, candle)
+        # Every open position is managed independently. If any position closes on
+        # this candle, do not also invent a same-candle re-entry ordering.
+        closed_on_candle = False
+        if active:
+            survivors = []
+            for trade in active:
+                closed = resolve_virtual_trade(trade, candle)
+                if closed is not None:
+                    closed_on_candle = True
+                    trades.append(closed)
+                    if closed.get("resolved") is True:
+                        balance += float(closed.get("pnl_dollars") or 0.0)
+                else:
+                    survivors.append(trade)
+            active = survivors
+
             if include_replay:
-                replay.append(_replay_frame(timestamp, candle, None, active, closed))
-            if closed is not None:
-                trades.append(closed)
-                if closed.get("resolved") is True:
-                    balance += float(closed.get("pnl_dollars") or 0.0)
-                active = None
-            # Never invent an intrabar exit-then-reentry order on the same candle.
+                latest = active[-1] if active else None
+                replay.append(
+                    _replay_frame(timestamp, candle, None, latest, None)
+                )
+            if closed_on_candle:
+                continue
+
+        # Preserve the legacy one-position behavior exactly: when capacity is
+        # full, the evaluator is not advanced and setups during that interval
+        # are intentionally ignored.
+        if len(active) >= max_positions:
+            capacity_blocked_candles += 1
             continue
 
         evaluation = evaluate_strategy(
@@ -490,51 +544,89 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         elif reason:
             no_setup_reasons[reason] = no_setup_reasons.get(reason, 0) + 1
 
+        opened_trade = None
         if evaluation.signal in {"BUY", "SELL"}:
             signals_emitted += 1
-            if evaluation.setup_id:
-                diagnostic_setups[str(evaluation.setup_id)]["signaled"] = True
-            ordinal += 1
-            tp1 = value["tp1"]
-            active = VirtualTrade(
-                trade_id=_trade_id(evaluation.setup_id, timestamp, ordinal),
-                entry_time=pd.Timestamp(timestamp),
-                entry=float(evaluation.entry),
-                sl=float(evaluation.sl),
-                tp1=float(evaluation.tp1) if evaluation.tp1 is not None else None,
-                tp2=float(evaluation.tp2),
-                side=evaluation.signal,
-                risk_dollars=float(evaluation.risk_budget["dollars"]),
-                tp1_close_fraction=float(tp1["close_percent"] or 0.0) / 100.0 if tp1["enabled"] else 0.0,
-                protection_r=float(tp1.get("protection_r") or 0.0) if tp1["enabled"] else 0.0,
-                protection_basis=str(tp1.get("target_basis") or "SL_DISTANCE"),
-                protection_mode=str(tp1.get("protection_mode") or "FIXED"),
-                protection_trigger_method=str(
-                    tp1.get("protection_trigger_method") or "CANDLE_CLOSE"
-                ),
-                protection_steps=list(tp1.get("protection_steps") or []),
+            candidate_risk = float(evaluation.risk_budget["dollars"])
+            open_risk = sum(float(item.risk_dollars) for item in active)
+            cap_dollars = (
+                balance * risk_cap_percent / 100.0
+                if risk_cap_percent is not None
+                else None
             )
-        if include_replay:
-            replay.append(_replay_frame(timestamp, candle, evaluation, active, None))
+            if (
+                cap_dollars is not None
+                and open_risk + candidate_risk > cap_dollars + 1e-9
+            ):
+                combined_risk_blocked_signals += 1
+                if evaluation.setup_id:
+                    diagnostic_setups[str(evaluation.setup_id)]["last_state"] = "BLOCKED"
+                    diagnostic_setups[str(evaluation.setup_id)]["last_reason"] = (
+                        "MAX_COMBINED_OPEN_RISK"
+                    )
+            else:
+                if evaluation.setup_id:
+                    diagnostic_setups[str(evaluation.setup_id)]["signaled"] = True
+                ordinal += 1
+                tp1 = value["tp1"]
+                opened_trade = VirtualTrade(
+                    trade_id=_trade_id(evaluation.setup_id, timestamp, ordinal),
+                    entry_time=pd.Timestamp(timestamp),
+                    entry=float(evaluation.entry),
+                    sl=float(evaluation.sl),
+                    tp1=float(evaluation.tp1) if evaluation.tp1 is not None else None,
+                    tp2=float(evaluation.tp2),
+                    side=evaluation.signal,
+                    risk_dollars=candidate_risk,
+                    tp1_close_fraction=float(tp1["close_percent"] or 0.0) / 100.0 if tp1["enabled"] else 0.0,
+                    protection_r=float(tp1.get("protection_r") or 0.0) if tp1["enabled"] else 0.0,
+                    protection_basis=str(tp1.get("target_basis") or "SL_DISTANCE"),
+                    protection_mode=str(tp1.get("protection_mode") or "FIXED"),
+                    protection_trigger_method=str(
+                        tp1.get("protection_trigger_method") or "CANDLE_CLOSE"
+                    ),
+                    protection_steps=list(tp1.get("protection_steps") or []),
+                )
+                active.append(opened_trade)
+                trades_opened += 1
+                max_simultaneous_positions = max(
+                    max_simultaneous_positions, len(active)
+                )
+                max_open_risk_dollars = max(
+                    max_open_risk_dollars,
+                    sum(float(item.risk_dollars) for item in active),
+                )
 
-    if active is not None and finalize_open_trade:
-        trades.append({
-            "trade_id": active.trade_id,
-            "side": active.side,
-            "entry_time": pd.Timestamp(active.entry_time).isoformat(),
-            "exit_time": None,
-            "entry": active.entry,
-            "sl": active.sl,
-            "tp1": active.tp1,
-            "tp2": active.tp2,
-            "exit_price": None,
-            "risk_dollars": active.risk_dollars,
-            "r": None,
-            "pnl_dollars": 0.0,
-            "outcome": "OPEN_AT_END",
-            "resolved": False,
-            "tp1_hit": active.tp1_hit,
-        })
+        if include_replay:
+            replay.append(
+                _replay_frame(
+                    timestamp,
+                    candle,
+                    evaluation,
+                    opened_trade or (active[-1] if active else None),
+                    None,
+                )
+            )
+
+    if active and finalize_open_trade:
+        for trade in active:
+            trades.append({
+                "trade_id": trade.trade_id,
+                "side": trade.side,
+                "entry_time": pd.Timestamp(trade.entry_time).isoformat(),
+                "exit_time": None,
+                "entry": trade.entry,
+                "sl": trade.sl,
+                "tp1": trade.tp1,
+                "tp2": trade.tp2,
+                "exit_price": None,
+                "risk_dollars": trade.risk_dollars,
+                "r": None,
+                "pnl_dollars": 0.0,
+                "outcome": "OPEN_AT_END",
+                "resolved": False,
+                "tp1_hit": trade.tp1_hit,
+            })
 
     metrics = simulation_metrics(chunk_start_balance, trades)
 
@@ -578,11 +670,15 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         "evaluations": evaluations,
         "setups_detected": len(diagnostic_setups),
         "signals_emitted": signals_emitted,
-        "trades_opened": signals_emitted,
+        "trades_opened": trades_opened,
         "resolved_trades": metrics["total_resolved_trades"],
-        "open_trades_at_end": sum(1 for item in trades if item.get("outcome") == "OPEN_AT_END"),
+        "open_trades_at_end": len(active),
         "blocked_setups": blocked_setups,
         "waiting_setups": waiting_setups,
+        "capacity_blocked_candles": capacity_blocked_candles,
+        "combined_risk_blocked_signals": combined_risk_blocked_signals,
+        "max_simultaneous_positions": max_simultaneous_positions,
+        "max_open_risk_dollars": max_open_risk_dollars,
         "stage_pass_counts": stage_pass_counts,
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "no_setup_reasons": dict(sorted(no_setup_reasons.items())),
@@ -603,11 +699,19 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         "trades": trades,
         "equity_curve": metrics["equity_curve"],
         "diagnostics": diagnostics,
+        "execution_options": {
+            "max_concurrent_positions": max_positions,
+            "max_combined_open_risk_percent": risk_cap_percent,
+        },
         "continuation": {
             "balance": float(balance),
             "evaluator_status": str(state.status),
             "pending_setup": state.pending_setup,
-            "active_trade": _virtual_trade_payload(active),
+            "active_trades": [_virtual_trade_payload(item) for item in active],
+            # Backward-compatible single-position field for older clients.
+            "active_trade": (
+                _virtual_trade_payload(active[0]) if len(active) == 1 else None
+            ),
             "ordinal": int(ordinal),
         },
     }
