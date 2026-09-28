@@ -19,7 +19,7 @@ def test_account_switch_without_managed_studio_position_uses_existing_switch(mon
 
     assert result["ok"] is True
     assert result.get("confirmation_required") is not True
-    switched.assert_called_once_with("acct-b")
+    switched.assert_called_once_with("acct-b", refresh_snapshot=False)
 
 
 def test_switch_away_with_managed_studio_position_requires_explicit_confirmation(monkeypatch):
@@ -62,7 +62,7 @@ def test_confirmed_switch_suspends_old_then_switches_then_resumes_new(monkeypatc
     monkeypatch.setattr(
         api,
         "set_active_ctrader_account",
-        lambda account_id: sequence.append(("switch", account_id)) or {"ok": True, "account_id": account_id},
+        lambda account_id, **kwargs: sequence.append(("switch", account_id, kwargs)) or {"ok": True, "account_id": account_id, "env": "demo"},
     )
     monkeypatch.setattr(api, "sync_ctrader_account_state", lambda force=False: sequence.append(("sync", force)) or {"account_id": "acct-b"})
     monkeypatch.setattr(api, "get_live_prices", lambda: {"live_prices": {"XAUUSD": {"bid": 4000, "ask": 4000.1}}})
@@ -76,8 +76,9 @@ def test_confirmed_switch_suspends_old_then_switches_then_resumes_new(monkeypatc
     result = api.switch_ctrader_account_with_studio_management("acct-b", confirmed=True)
 
     assert result["ok"] is True
-    assert [item[0] for item in sequence] == ["suspend", "switch", "sync", "resume"]
+    assert [item[0] for item in sequence] == ["suspend", "switch", "resume"]
     assert sequence[0][1] == "acct-a"
+    assert sequence[1][2] == {"refresh_snapshot": False}
     assert sequence[-1][1] == "acct-b"
 
 
@@ -91,4 +92,4 @@ def test_studio_gate_off_keeps_account_switch_behavior_unchanged(monkeypatch):
     result = api.switch_ctrader_account_with_studio_management("acct-b", confirmed=False)
 
     assert result["ok"] is True
-    switched.assert_called_once_with("acct-b")
+    switched.assert_called_once_with("acct-b", refresh_snapshot=False)
