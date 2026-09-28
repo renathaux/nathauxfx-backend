@@ -174,11 +174,27 @@ def _target_hit(side, price, target, position=None):
     )
 
 
-def _closed_price(symbol, closed_prices):
+def _closed_price(symbol, closed_prices, *, after=None):
     payload = (closed_prices or {}).get(str(symbol)) or {}
-    if isinstance(payload, dict):
-        return _float(payload.get("close"), payload.get("price"))
-    return _float(payload)
+    if not isinstance(payload, dict):
+        return None if after is not None else _float(payload)
+
+    if after is not None:
+        raw_closed_at = payload.get("closed_at")
+        if raw_closed_at in (None, ""):
+            return None
+        try:
+            closed_at = datetime.fromisoformat(str(raw_closed_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if closed_at.tzinfo is None:
+            closed_at = closed_at.replace(tzinfo=timezone.utc)
+        if after.tzinfo is None:
+            after = after.replace(tzinfo=timezone.utc)
+        if closed_at <= after:
+            return None
+
+    return _float(payload.get("close"), payload.get("price"))
 
 
 def _step_for_price(levels, price):
@@ -479,7 +495,11 @@ def _manage(owner_id, account_identity, open_positions, prices, *, resume, close
 
             if levels.get("protection_mode") == "TP2_STEPS":
                 protection_price = (
-                    _closed_price(str(row.symbol), closed_prices)
+                    _closed_price(
+                        str(row.symbol),
+                        closed_prices,
+                        after=row.tp1_completed_at,
+                    )
                     if levels.get("protection_trigger_method") == "CANDLE_CLOSE"
                     else price
                 )
