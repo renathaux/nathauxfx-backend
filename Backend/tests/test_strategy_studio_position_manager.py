@@ -309,6 +309,37 @@ def test_step_protection_advances_70_50_80_60_90_70(db_session_factory, monkeypa
     assert protected[-1][1] == pytest.approx(1.1070)
 
 
+def test_tp1_touch_can_be_recovered_from_trusted_post_entry_wick(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+
+    seed_lifecycle(db_session_factory)
+    closed = []
+    monkeypatch.setattr(
+        manager, "close_position",
+        lambda position_id, volume=None:
+            closed.append((position_id, volume)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        manager, "modify_position_stop_loss",
+        lambda *args, **kwargs: {"ok": True},
+    )
+
+    position = open_position(
+        price=1.1040, entry=1.1000, sl=1.0950, tp2=1.1100
+    )
+    position["trusted_tp1_high"] = 1.1065
+    result = manager.manage_selected_account_positions(
+        "owner-1",
+        AccountIdentity("acct-a", "demo"),
+        [position],
+        prices(bid=1.1040),
+        session_factory=db_session_factory,
+    )
+
+    assert result["actions"]
+    assert closed
+
+
 def test_candle_close_step_protection_waits_for_closed_5m_confirmation(db_session_factory, monkeypatch):
     from services import strategy_studio_position_manager as manager
 
