@@ -25,7 +25,8 @@ def db_session_factory():
 
 
 def definition(*, tp1_enabled=True, close_percent=50.0, protection_r=0.5, target_r=1.0,
-               target_basis="SL_DISTANCE", protection_mode="FIXED", protection_steps=None):
+               target_basis="SL_DISTANCE", protection_mode="FIXED",
+               protection_trigger_method="CANDLE_CLOSE", protection_steps=None):
     return {
         "schema_version": 1,
         "symbols": ["EURUSD"],
@@ -47,6 +48,9 @@ def definition(*, tp1_enabled=True, close_percent=50.0, protection_r=0.5, target
             "close_percent": close_percent if tp1_enabled else None,
             "protection_r": protection_r if (tp1_enabled and protection_mode == "FIXED") else None,
             "protection_mode": protection_mode if tp1_enabled else "FIXED",
+            "protection_trigger_method": (
+                protection_trigger_method if tp1_enabled else "CANDLE_CLOSE"
+            ),
             "protection_steps": list(protection_steps or []) if tp1_enabled else [],
         },
         "tp2": {"method": "FIXED_R", "value": 2.0},
@@ -261,6 +265,7 @@ def test_step_protection_advances_70_50_80_60_90_70(db_session_factory, monkeypa
         target_r=0.70,
         target_basis="TP2_DISTANCE",
         protection_mode="TP2_STEPS",
+        protection_trigger_method="PRICE_TOUCH",
         protection_steps=steps,
     )
     seed_lifecycle(db_session_factory, strategy_definition=strategy)
@@ -302,6 +307,77 @@ def test_step_protection_advances_70_50_80_60_90_70(db_session_factory, monkeypa
     )
     assert third["actions"][0]["secure_percent"] == 70
     assert protected[-1][1] == pytest.approx(1.1070)
+
+
+def test_candle_close_step_protection_waits_for_closed_5m_confirmation(db_session_factory, monkeypatch):
+    from services import strategy_studio_position_manager as manager
+
+    steps = [
+        {"trigger_percent": 70, "secure_percent": 40},
+        {"trigger_percent": 75, "secure_percent": 50},
+        {"trigger_percent": 80, "secure_percent": 65},
+    ]
+    strategy = definition(
+        close_percent=10.0,
+        target_r=0.70,
+        target_basis="TP2_DISTANCE",
+        protection_mode="TP2_STEPS",
+        protection_trigger_method="CANDLE_CLOSE",
+        protection_steps=steps,
+    )
+    seed_lifecycle(db_session_factory, strategy_definition=strategy)
+
+    closed = []
+    protected = []
+    monkeypatch.setattr(
+        manager, "close_position",
+        lambda position_id, volume=None:
+            closed.append((position_id, volume)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        manager, "modify_position_stop_loss",
+        lambda position_id, stop_loss, take_profit_price=None:
+            protected.append((position_id, stop_loss, take_profit_price)) or {"ok": True},
+    )
+
+    # Touch TP1 at 70%: partial close happens now, but protection waits for close.
+    first = manager.manage_selected_account_positions(
+        "owner-1",
+        AccountIdentity("acct-a", "demo"),
+        [open_position(price=1.1070, entry=1.1000, sl=1.0950, tp2=1.1100)],
+        prices(bid=1.1070),
+        closed_prices={"EURUSD": {"close": 1.1065}},
+        session_factory=db_session_factory,
+    )
+    assert first["actions"][0]["action"] == "TP1_PARTIAL_CLOSE"
+    assert first["actions"][0]["protection_deferred"] is True
+    assert closed
+    assert protected == []
+
+    # Current quote can run higher, but a 5m close below 70% still does not move SL.
+    second = manager.manage_selected_account_positions(
+        "owner-1",
+        AccountIdentity("acct-a", "demo"),
+        [open_position(price=1.1080, entry=1.1000, sl=1.0950, tp2=1.1100)],
+        prices(bid=1.1080),
+        closed_prices={"EURUSD": {"close": 1.1069}},
+        session_factory=db_session_factory,
+    )
+    assert second["actions"] == []
+    assert protected == []
+
+    # Once the closed 5m candle confirms 70%, secure 40% of Entry->TP2.
+    third = manager.manage_selected_account_positions(
+        "owner-1",
+        AccountIdentity("acct-a", "demo"),
+        [open_position(price=1.1072, entry=1.1000, sl=1.0950, tp2=1.1100)],
+        prices(bid=1.1072),
+        closed_prices={"EURUSD": {"close": 1.1070}},
+        session_factory=db_session_factory,
+    )
+    assert third["actions"][0]["action"] == "TP2_STEP_PROTECTION"
+    assert third["actions"][0]["protection_trigger_method"] == "CANDLE_CLOSE"
+    assert protected[-1][1] == pytest.approx(1.1040)
 
 
 def test_tp1_completed_prevents_duplicate_partial_close(db_session_factory, monkeypatch):
