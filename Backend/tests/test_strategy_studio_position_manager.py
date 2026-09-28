@@ -106,6 +106,18 @@ def prices(*, bid=1.1060, ask=1.1062):
     return {"EURUSD": {"bid": bid, "ask": ask}}
 
 
+def test_open_studio_position_resolves_management_owner_even_without_live_gate(db_session_factory):
+    from services import strategy_studio_position_manager as manager
+
+    seed_lifecycle(db_session_factory)
+    owner = manager.managed_owner_for_account(
+        AccountIdentity("acct-a", "demo"),
+        [open_position()],
+        session_factory=db_session_factory,
+    )
+    assert owner == "owner-1"
+
+
 def test_switching_away_suspends_management_without_broker_mutation(db_session_factory, monkeypatch):
     from services import strategy_studio_position_manager as manager
 
