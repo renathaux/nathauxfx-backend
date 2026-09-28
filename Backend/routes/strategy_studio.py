@@ -71,13 +71,22 @@ class LiveHandoffRequest(BaseModel):
 
 
 def owner_key(actor):
-    actor_id = getattr(actor, "id", None)
+    if isinstance(actor, dict):
+        role = str(actor.get("role") or "").strip().lower()
+        email = str(actor.get("email") or "legacy-admin").strip().lower()
+        actor_id = actor.get("id")
+    else:
+        role = str(getattr(actor, "role", None) or "").strip().lower()
+        email = str(getattr(actor, "email", None) or "legacy-admin").strip().lower()
+        actor_id = getattr(actor, "id", None)
+
+    # Admin ownership is email-scoped so legacy/persisted owner sessions and any
+    # future typed admin actor resolve to the same durable Strategy Studio
+    # library instead of creating a second user:<uuid> namespace.
+    if role == "admin":
+        return f"owner:{email}"
     if actor_id is not None:
         return f"user:{actor_id}"
-    if isinstance(actor, dict):
-        email = str(actor.get("email") or "legacy-admin").strip().lower()
-    else:
-        email = str(getattr(actor, "email", None) or "legacy-admin").strip().lower()
     return f"owner:{email}"
 
 
