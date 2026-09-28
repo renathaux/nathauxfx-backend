@@ -235,6 +235,22 @@ def test_studio_submission_uses_shared_claim_and_stable_setup(monkeypatch):
     )
 
 
+def test_live_refresh_runs_strategy_studio_position_manager():
+    import inspect
+
+    source = inspect.getsource(api.refresh_live_panel_meta)
+    assert "manage_studio_account_positions" in source
+    assert "closed_prices=closed_5m_prices" in source
+
+
+def test_broker_sync_skips_legacy_manager_for_studio_positions():
+    import inspect
+
+    source = inspect.getsource(api.sync_live_positions)
+    assert "studio_managed_ids" in source
+    assert "strategy_studio_broker_position_synced" in source
+
+
 def test_runtime_owner_resolution_fails_closed_when_not_exactly_one_enabled(monkeypatch):
     resolver = getattr(live_state, "get_enabled_studio_live_owner", None)
     assert resolver is not None, "Task 5 contract missing: get_enabled_studio_live_owner"
