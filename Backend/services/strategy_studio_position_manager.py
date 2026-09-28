@@ -9,7 +9,11 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 
-from ctrader_connector import close_position, modify_position_stop_loss
+from ctrader_connector import (
+    close_position,
+    get_ctrader_symbol_risk_metadata,
+    modify_position_stop_loss,
+)
 from db import SessionLocal
 from models import StrategySetupLifecycle
 
@@ -224,10 +228,48 @@ def _is_more_protective(side, current_sl, desired_sl):
 
 
 def _partial_volume(row, position, close_percent):
-    total = _float(row.initial_volume_units, (position or {}).get("volume_units"), (position or {}).get("volume"))
+    total = _float(
+        row.initial_volume_units,
+        (position or {}).get("volume_units"),
+        (position or {}).get("volume"),
+    )
     if total is None or total <= 0 or close_percent is None or not (0 < close_percent <= 100):
         return None
-    return max(1, int(round(total * close_percent / 100.0)))
+
+    target = float(total) * float(close_percent) / 100.0
+    metadata = (position or {}).get("symbol_metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if not metadata:
+        try:
+            metadata = get_ctrader_symbol_risk_metadata(str(row.symbol)) or {}
+        except Exception:
+            metadata = {}
+
+    step = _float(
+        (position or {}).get("volume_step_units"),
+        metadata.get("volume_step_units"),
+    )
+    minimum = _float(
+        (position or {}).get("min_volume_units"),
+        metadata.get("min_volume_units"),
+    )
+
+    if step is not None and step > 0:
+        units = int(round(target / step) * step)
+    else:
+        units = int(round(target))
+
+    minimum_units = int(math.ceil(minimum)) if minimum is not None and minimum > 0 else 1
+    if units < minimum_units:
+        # Do not silently close more than the configured partial percentage
+        # just to satisfy a broker minimum.
+        return None
+    units = min(units, int(total))
+    if units <= 0:
+        return None
+    if close_percent < 100 and units >= int(total):
+        return None
+    return units
 
 
 def _is_ambiguous(result):
