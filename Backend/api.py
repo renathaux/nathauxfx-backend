@@ -2404,10 +2404,6 @@ def refresh_live_panel_meta(panel_data):
         })
         return False
 
-    # Dashboard condition rendering is intentionally lower priority than order
-    # execution and runs in its own daemon worker.
-    schedule_live_strategy_display_refresh()
-
     trade_management_error = None
     try:
         update_live_trade_exit_states(panel_data)
@@ -2463,6 +2459,11 @@ def refresh_live_panel_meta(panel_data):
         "history": len(live_recent_history or []),
         "trade_management_error": trade_management_error,
     })
+
+    # Presentation work is last and asynchronous so it cannot delay entry,
+    # position protection, or broker/history synchronization.
+    schedule_live_strategy_display_refresh()
+
     return trade_management_error is None
 
 
