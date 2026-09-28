@@ -531,3 +531,60 @@ def test_actual_position_sync_a_b_a_preserves_frozen_management(selected, monkey
     api.sync_live_positions()
     assert len(checked) == 1
     assert api.LIVE_ACTIVE_ORDERS["EURUSD"]["no_partial_close_at_protection_trigger"] is True
+
+
+def test_account_state_sync_retries_once_after_selection_change(monkeypatch):
+    import api
+    from ctrader_account_context import AccountSelectionChanged
+
+    calls = []
+
+    def once(*, force=False):
+        calls.append(force)
+        if len(calls) == 1:
+            raise AccountSelectionChanged("selection changed during status validation")
+        return {"connected": False, "active_account_id": None}
+
+    monkeypatch.setattr(api, "_sync_ctrader_account_state_once", once)
+
+    result = api.sync_ctrader_account_state(force=False)
+
+    assert result["connected"] is False
+    assert calls == [False, True]
+
+
+def test_oauth_single_authorized_account_auto_selects_new_account(monkeypatch):
+    import api
+
+    selected = []
+
+    def select(account_id):
+        selected.append(account_id)
+        return {"ok": True, "account_id": account_id}
+
+    monkeypatch.setattr(api, "set_active_ctrader_account", select)
+    monkeypatch.setattr(
+        api,
+        "fetch_ctrader_accounts",
+        lambda refresh=False: {
+            "ok": True,
+            "active_account_id": "48869794",
+            "accounts": [{"account_id": "48869794", "env": "demo"}],
+            "cached": True,
+        },
+    )
+
+    result = api.reconcile_ctrader_oauth_accounts({
+        "ok": True,
+        "active_account_id": "48817926",
+        "authorized_account_ids": ["48869794"],
+        "accounts": [
+            {"account_id": "48869794", "env": "demo"},
+            {"account_id": "48817926", "env": "demo", "unavailable": True},
+        ],
+    })
+
+    assert selected == ["48869794"]
+    assert result["active_account_id"] == "48869794"
+    assert result["authorized_account_ids"] == ["48869794"]
+    assert result["oauth_auto_selected_account_id"] == "48869794"
