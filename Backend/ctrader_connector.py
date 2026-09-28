@@ -955,12 +955,15 @@ def clear_ctrader_saved_accounts():
         "accounts": [],
     }
 
-def set_active_ctrader_account(account_id):
+def set_active_ctrader_account(account_id, *, refresh_snapshot=True):
     with account_state_lock:
-        return _set_active_ctrader_account(account_id)
+        return _set_active_ctrader_account(
+            account_id,
+            refresh_snapshot=refresh_snapshot,
+        )
 
 
-def _set_active_ctrader_account(account_id):
+def _set_active_ctrader_account(account_id, *, refresh_snapshot=True):
     account_id = str(account_id or "").strip()
 
     if not account_id:
@@ -1027,36 +1030,58 @@ def _set_active_ctrader_account(account_id):
     CONNECTED["account_id"] = account_id
     CONNECTED["mode"] = account_env
     CONNECTED["execution_ready"] = True
+    CONNECTED["connected"] = True
+    CONNECTED["status"] = True
     clear_ctrader_connection_cache()
-    try:
-        with pinned_account(selected):
-            fresh_snapshot = get_ctrader_account_snapshot()
-            assert_current_selection(selected)
-    except AccountSelectionChanged:
-        raise
-    except Exception as exc:
-        fresh_snapshot = {
-            "ok": False,
-            "broker": "ctrader",
-            "mode": account_env,
-            "account_id": account_id,
-            "reason": describe_ctrader_error(exc),
-            "balance": None,
-            "equity": None,
-            "balance_verified": False,
-            "equity_verified": False,
-            "cached_balance_used": False,
-        }
-        print("ACCOUNT_BALANCE_VERIFICATION_FAILED =", fresh_snapshot)
+
+    fresh_snapshot = None
+    if refresh_snapshot:
+        try:
+            with pinned_account(selected):
+                fresh_snapshot = get_ctrader_account_snapshot()
+                assert_current_selection(selected)
+        except AccountSelectionChanged:
+            raise
+        except Exception as exc:
+            fresh_snapshot = {
+                "ok": False,
+                "broker": "ctrader",
+                "mode": account_env,
+                "account_id": account_id,
+                "reason": describe_ctrader_error(exc),
+                "balance": None,
+                "equity": None,
+                "balance_verified": False,
+                "equity_verified": False,
+                "cached_balance_used": False,
+            }
+            print("ACCOUNT_BALANCE_VERIFICATION_FAILED =", fresh_snapshot)
 
     print("ACTIVE_ACCOUNT_SELECTED_DEBUG =", {
         "ok": True,
         "account_id": account_id,
         "env": account_env,
-        "fresh_balance_verified": fresh_snapshot.get("balance_verified"),
-        "fresh_equity_verified": fresh_snapshot.get("equity_verified"),
-        "fresh_balance": fresh_snapshot.get("balance"),
-        "fresh_equity": fresh_snapshot.get("equity"),
+        "refresh_snapshot": bool(refresh_snapshot),
+        "fresh_balance_verified": (
+            fresh_snapshot.get("balance_verified")
+            if isinstance(fresh_snapshot, dict)
+            else None
+        ),
+        "fresh_equity_verified": (
+            fresh_snapshot.get("equity_verified")
+            if isinstance(fresh_snapshot, dict)
+            else None
+        ),
+        "fresh_balance": (
+            fresh_snapshot.get("balance")
+            if isinstance(fresh_snapshot, dict)
+            else None
+        ),
+        "fresh_equity": (
+            fresh_snapshot.get("equity")
+            if isinstance(fresh_snapshot, dict)
+            else None
+        ),
     })
 
     return {
