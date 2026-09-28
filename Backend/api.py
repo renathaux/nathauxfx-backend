@@ -138,6 +138,7 @@ from services.strategy_studio_live_state import get_enabled_studio_live_owner
 from services.strategy_studio_live_candidate import build_studio_candidate
 from services.strategy_studio_position_manager import (
     account_has_managed_position as studio_account_has_managed_position,
+    managed_owner_for_account as studio_managed_owner_for_account,
     managed_position_ids as studio_managed_position_ids,
     manage_selected_account_positions as manage_studio_account_positions,
     suspend_account_management as suspend_studio_account_management,
@@ -2101,16 +2102,25 @@ def refresh_live_panel_meta(panel_data):
         return False
 
     try:
-        studio_owner = get_enabled_studio_live_owner()
         studio_identity = current_identity()
+        studio_positions = [
+            trade
+            for trade in LIVE_ACTIVE_ORDERS.values()
+            if trade and _trade_matches_operation_account(trade)
+        ]
+        studio_owner = get_enabled_studio_live_owner()
+        if studio_identity is not None:
+            open_position_owner = studio_managed_owner_for_account(
+                studio_identity,
+                studio_positions,
+            )
+            if studio_owner and open_position_owner and studio_owner != open_position_owner:
+                raise RuntimeError("STRATEGY_STUDIO_MANAGEMENT_OWNER_MISMATCH")
+            studio_owner = open_position_owner or studio_owner
+
         if studio_owner and studio_identity is not None:
             live_prices = ((get_live_prices() or {}).get("live_prices") or {})
             closed_5m_prices = get_strategy_studio_closed_5m_prices(panel_data)
-            studio_positions = [
-                trade
-                for trade in LIVE_ACTIVE_ORDERS.values()
-                if trade and _trade_matches_operation_account(trade)
-            ]
             studio_management = manage_studio_account_positions(
                 studio_owner,
                 studio_identity,
@@ -8921,8 +8931,16 @@ def sync_live_positions(panel_data=None):
 
         studio_managed_ids = set()
         try:
-            studio_owner = get_enabled_studio_live_owner()
             studio_identity = current_identity()
+            studio_owner = get_enabled_studio_live_owner()
+            if studio_identity is not None:
+                open_position_owner = studio_managed_owner_for_account(
+                    studio_identity,
+                    positions,
+                )
+                if studio_owner and open_position_owner and studio_owner != open_position_owner:
+                    raise RuntimeError("STRATEGY_STUDIO_MANAGEMENT_OWNER_MISMATCH")
+                studio_owner = open_position_owner or studio_owner
             if studio_owner and studio_identity is not None:
                 studio_managed_ids = studio_managed_position_ids(
                     studio_owner,
@@ -8931,6 +8949,7 @@ def sync_live_positions(panel_data=None):
                 )
         except Exception as exc:
             print("STRATEGY_STUDIO_MANAGED_POSITION_LOOKUP_ERROR =", str(exc))
+            raise
 
         previous_active_orders = {
             symbol: trade
