@@ -2103,10 +2103,15 @@ def refresh_live_panel_meta(panel_data):
         if studio_owner and studio_identity is not None:
             live_prices = ((get_live_prices() or {}).get("live_prices") or {})
             closed_5m_prices = get_strategy_studio_closed_5m_prices(panel_data)
+            studio_positions = [
+                trade
+                for trade in LIVE_ACTIVE_ORDERS.values()
+                if trade and _trade_matches_operation_account(trade)
+            ]
             studio_management = manage_studio_account_positions(
                 studio_owner,
                 studio_identity,
-                live_positions,
+                studio_positions,
                 live_prices,
                 closed_prices=closed_5m_prices,
             )
