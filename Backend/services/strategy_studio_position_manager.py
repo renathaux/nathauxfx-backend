@@ -148,10 +148,30 @@ def _levels(row, position):
     }
 
 
-def _target_hit(side, price, target):
-    if price is None or target is None:
+def _target_hit(side, price, target, position=None):
+    if target is None:
         return False
-    return (side == "BUY" and price >= target) or (side == "SELL" and price <= target)
+    if price is not None and (
+        (side == "BUY" and price >= target)
+        or (side == "SELL" and price <= target)
+    ):
+        return True
+
+    # Broker sync maintains trusted post-entry wick extremes. Use them as a
+    # catch-up proof so a fast TP1 touch is not lost between 15s management polls.
+    favorable_extreme = _float(
+        (position or {}).get("trusted_tp1_high") if side == "BUY" else None,
+        (position or {}).get("current_high") if side == "BUY" else None,
+        (position or {}).get("trusted_tp1_low") if side == "SELL" else None,
+        (position or {}).get("current_low") if side == "SELL" else None,
+    )
+    if favorable_extreme is None:
+        return False
+    return (
+        favorable_extreme >= target
+        if side == "BUY"
+        else favorable_extreme <= target
+    )
 
 
 def _closed_price(symbol, closed_prices):
@@ -446,7 +466,9 @@ def _manage(owner_id, account_identity, open_positions, prices, *, resume, close
             price = _current_price(str(row.symbol), levels["side"], position, prices)
 
             if row.tp1_completed_at is None:
-                if not _target_hit(levels["side"], price, levels["target"]):
+                if not _target_hit(
+                    levels["side"], price, levels["target"], position
+                ):
                     continue
                 action = _partial_close(
                     row, position, levels, price, now,
