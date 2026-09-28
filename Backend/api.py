@@ -10008,8 +10008,8 @@ def get_frontend_redirect_url(status):
     return redirect_url
 
 
-def reconcile_ctrader_oauth_accounts(accounts_result):
-    """Make a newly authorized sole account usable immediately after OAuth."""
+def reconcile_ctrader_oauth_accounts(accounts_result, preferred_active_account_id=None):
+    """Restore a usable active account after OAuth without forcing the user to reselect it."""
     if not isinstance(accounts_result, dict):
         return {
             "ok": False,
@@ -10032,15 +10032,25 @@ def reconcile_ctrader_oauth_accounts(accounts_result):
     if active_account_id and active_account_id in authorized_account_ids:
         return accounts_result
 
-    # A fresh OAuth grant can replace the token that authorized the previous
-    # selection. If the new grant exposes exactly one account, selecting it is
-    # deterministic and prevents the callback from leaving the app with no
-    # usable broker account.
-    if len(authorized_account_ids) != 1:
+    preferred_account_id = str(preferred_active_account_id or "").strip()
+    selected_account_id = None
+
+    # Preserve the account that was active before the OAuth token was replaced
+    # whenever the new grant still authorizes it. This matters when a user adds
+    # a second cTrader account: the grant can contain both accounts while the
+    # durable selection was temporarily cleared during re-authorization.
+    if preferred_account_id and preferred_account_id in authorized_account_ids:
+        selected_account_id = preferred_account_id
+    elif len(authorized_account_ids) == 1:
+        selected_account_id = authorized_account_ids[0]
+
+    if not selected_account_id:
         return accounts_result
 
-    selected_account_id = authorized_account_ids[0]
-    selection_result = set_active_ctrader_account(selected_account_id)
+    selection_result = set_active_ctrader_account(
+        selected_account_id,
+        refresh_snapshot=False,
+    )
     if not selection_result.get("ok"):
         return {
             **accounts_result,
@@ -10070,6 +10080,7 @@ def ctrader_oauth_callback(request: Request):
     code = request.query_params.get("code")
     error = request.query_params.get("error")
     error_description = request.query_params.get("error_description")
+    previous_active_account_id = get_active_ctrader_account_id()
 
     if error:
         reason = error_description or error
@@ -10120,7 +10131,8 @@ def ctrader_oauth_callback(request: Request):
     if token_result.get("ok"):
         try:
             accounts_result = reconcile_ctrader_oauth_accounts(
-                fetch_ctrader_accounts(refresh=True)
+                fetch_ctrader_accounts(refresh=True),
+                preferred_active_account_id=previous_active_account_id,
             )
             if accounts_result.get("ok") is False:
                 oauth_result = {
@@ -10196,6 +10208,36 @@ def ctrader_accounts_endpoint():
     return fetch_ctrader_accounts(refresh=False)
 
 
+def publish_selected_ctrader_account_state(selection_result):
+    """Publish verified selection immediately; deeper broker refresh happens afterward."""
+    if not isinstance(selection_result, dict) or not selection_result.get("ok"):
+        return LIVE_ACCOUNT_STATE
+
+    account_id = str(selection_result.get("account_id") or "").strip() or None
+    account_env = selection_result.get("env") or "demo"
+    selection_debug = get_ctrader_account_selection_debug()
+    authorized_ids = selection_result.get("authorized_account_ids") or selection_debug.get(
+        "authorized_account_ids", []
+    )
+
+    LIVE_ACCOUNT_STATE.update({
+        "connected": True,
+        "mode": account_env,
+        "broker": "ctrader",
+        "account_id": account_id,
+        "execution_ready": True,
+        "auth_ok": True,
+        "account_found": True,
+        "reason": "authenticated",
+        "degraded": False,
+        "active_account_id": account_id,
+        "authorized_account_ids": authorized_ids,
+        "selected_account_source": "settings",
+        "is_active_account_authorized": True,
+    })
+    return LIVE_ACCOUNT_STATE
+
+
 def switch_ctrader_account_with_studio_management(account_id, confirmed=False):
     """Switch accounts without allowing Studio app management to cross scope."""
     target_account_id = str(account_id or "").strip()
@@ -10204,14 +10246,20 @@ def switch_ctrader_account_with_studio_management(account_id, confirmed=False):
 
     owner_id = get_enabled_studio_live_owner()
     if not owner_id:
-        result = set_active_ctrader_account(target_account_id)
-        sync_ctrader_account_state(force=True)
+        result = set_active_ctrader_account(
+            target_account_id,
+            refresh_snapshot=False,
+        )
+        publish_selected_ctrader_account_state(result)
         return {**result, "live_account": LIVE_ACCOUNT_STATE}
 
     old_identity = selected_identity()
     if old_identity is None or str(old_identity.account_id) == target_account_id:
-        result = set_active_ctrader_account(target_account_id)
-        sync_ctrader_account_state(force=True)
+        result = set_active_ctrader_account(
+            target_account_id,
+            refresh_snapshot=False,
+        )
+        publish_selected_ctrader_account_state(result)
         return {**result, "live_account": LIVE_ACCOUNT_STATE}
 
     old_positions = get_open_positions() or []
@@ -10234,7 +10282,10 @@ def switch_ctrader_account_with_studio_management(account_id, confirmed=False):
     if has_managed_position:
         suspend_studio_account_management(owner_id, old_identity, old_positions)
 
-    result = set_active_ctrader_account(target_account_id)
+    result = set_active_ctrader_account(
+        target_account_id,
+        refresh_snapshot=False,
+    )
     if not result.get("ok", False):
         if has_managed_position:
             try:
@@ -10247,7 +10298,7 @@ def switch_ctrader_account_with_studio_management(account_id, confirmed=False):
         sync_ctrader_account_state(force=True)
         return {**result, "live_account": LIVE_ACCOUNT_STATE}
 
-    sync_ctrader_account_state(force=True)
+    publish_selected_ctrader_account_state(result)
     new_identity = selected_identity()
     resume_result = None
     if new_identity is not None:
