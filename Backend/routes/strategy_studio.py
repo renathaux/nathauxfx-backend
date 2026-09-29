@@ -268,6 +268,11 @@ def _evaluate_live_handoff_readiness(owner: str) -> dict:
     ]
     unresolved = has_unresolved_studio_reconciliation(owner)
 
+    risk_definition = definition.get("risk") or {}
+    max_concurrent_positions = int(
+        risk_definition.get("max_concurrent_positions") or 1
+    )
+
     if errors:
         return {
             **_unavailable_readiness("STRATEGY_STUDIO_DEFINITION_INVALID"),
@@ -275,6 +280,28 @@ def _evaluate_live_handoff_readiness(owner: str) -> dict:
             "configured_symbols": symbols,
             "unresolved_reconciliation": unresolved,
             "reports": {"definition": {"executable": False, "errors": errors}},
+        }
+
+    # Multi-position execution is intentionally Simulator-only until LIVE has
+    # matching per-symbol admission, combined-risk accounting, and broker
+    # lifecycle concurrency. Never let a saved backtest rule silently imply
+    # unsupported LIVE behavior.
+    if max_concurrent_positions > 1:
+        return {
+            **_unavailable_readiness("STRATEGY_STUDIO_LIVE_MULTI_POSITION_NOT_SUPPORTED"),
+            "active_strategy_id": active.get("strategy_id"),
+            "configured_symbols": symbols,
+            "unresolved_reconciliation": unresolved,
+            "reports": {
+                "position_stacking": {
+                    "executable": False,
+                    "max_concurrent_positions": max_concurrent_positions,
+                    "max_combined_open_risk_percent": risk_definition.get(
+                        "max_combined_open_risk_percent"
+                    ),
+                    "live_supported": False,
+                }
+            },
         }
 
     identity = selected_identity()
