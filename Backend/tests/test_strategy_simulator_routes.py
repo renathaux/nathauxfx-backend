@@ -134,7 +134,6 @@ def test_route_uses_static_candles_and_positive_balance(monkeypatch):
         *, risk_override=None, include_replay=False,
         evaluation_start=None, evaluation_end=None,
         continuation=None, finalize_open_trade=True,
-        max_concurrent_positions=1, max_combined_open_risk_percent=None,
     ):
         calls["definition"] = strategy_definition
         calls["balance"] = balance
@@ -143,22 +142,20 @@ def test_route_uses_static_candles_and_positive_balance(monkeypatch):
         calls["evaluation_end"] = evaluation_end
         calls["continuation"] = continuation
         calls["finalize"] = finalize_open_trade
-        calls["max_concurrent_positions"] = max_concurrent_positions
-        calls["max_combined_open_risk_percent"] = max_combined_open_risk_percent
         return {
             "metrics": {"starting_balance": balance},
             "trades": [],
             "equity_curve": [],
             "replay": [],
+            "execution_options": {
+                "max_concurrent_positions": strategy_definition.get("risk", {}).get("max_concurrent_positions", 1),
+                "max_combined_open_risk_percent": strategy_definition.get("risk", {}).get("max_combined_open_risk_percent"),
+            },
         }
 
     monkeypatch.setattr(route, "run_simulation", fake_run)
     result = route.strategy_simulation_run(
-        payload(
-            mode="REPLAY",
-            max_concurrent_positions=2,
-            max_combined_open_risk_percent=2.0,
-        ),
+        payload(mode="REPLAY"),
         SimpleNamespace(),
     )
 
@@ -173,8 +170,8 @@ def test_route_uses_static_candles_and_positive_balance(monkeypatch):
     assert calls["evaluation_end"] == payload().end
     assert calls["continuation"] is None
     assert calls["finalize"] is True
-    assert calls["max_concurrent_positions"] == 2
-    assert calls["max_combined_open_risk_percent"] == pytest.approx(2.0)
+    assert result["assumptions"]["max_concurrent_positions"] == 1
+    assert result["assumptions"]["max_combined_open_risk_percent"] is None
 
 
 def test_missing_static_history_is_rejected_before_simulation(monkeypatch):
@@ -323,14 +320,49 @@ def test_fast_job_rejects_invalid_range_and_symbol_before_account_read(monkeypat
     assert exc.value.status_code == 400
 
 
-def test_invalid_simulator_concurrency_options_are_rejected(monkeypatch):
+
+
+def test_route_uses_stacking_rules_from_strategy_definition(monkeypatch):
+    calls = {}
+    identity = SimpleNamespace(scope="CTRADER:DEMO:47810571")
+
+    @contextmanager
+    def fake_pinned():
+        yield identity
+
+    stacked = definition()
+    stacked["risk"].update({
+        "max_concurrent_positions": 3,
+        "max_combined_open_risk_percent": 3.0,
+    })
+
     monkeypatch.setattr(route, "_actor", lambda request: {"email": "x@example.com"})
-    for kwargs in (
-        {"max_concurrent_positions": 0},
-        {"max_concurrent_positions": 4},
-        {"max_combined_open_risk_percent": 0},
-        {"max_combined_open_risk_percent": 11},
-    ):
-        with pytest.raises(HTTPException) as exc:
-            route.strategy_simulation_run(payload(**kwargs), SimpleNamespace())
-        assert exc.value.status_code == 400
+    monkeypatch.setattr(route, "pinned_account", fake_pinned)
+    monkeypatch.setattr(route, "get_ctrader_account_snapshot", lambda: {"balance": 10000})
+    monkeypatch.setattr(
+        route, "build_static_market_bundle",
+        lambda rows, start, end: {"5m": object(), "15m": object(), "1h": object(), "4h": object()},
+    )
+
+    def fake_run(strategy_definition, *args, **kwargs):
+        calls["definition"] = strategy_definition
+        return {
+            "metrics": {"starting_balance": 10000},
+            "trades": [],
+            "equity_curve": [],
+            "execution_options": {
+                "max_concurrent_positions": strategy_definition["risk"]["max_concurrent_positions"],
+                "max_combined_open_risk_percent": strategy_definition["risk"]["max_combined_open_risk_percent"],
+            },
+        }
+
+    monkeypatch.setattr(route, "run_simulation", fake_run)
+    result = route.strategy_simulation_run(
+        payload(strategy_definition=stacked),
+        SimpleNamespace(),
+    )
+
+    assert calls["definition"]["risk"]["max_concurrent_positions"] == 3
+    assert calls["definition"]["risk"]["max_combined_open_risk_percent"] == pytest.approx(3.0)
+    assert result["assumptions"]["max_concurrent_positions"] == 3
+    assert result["assumptions"]["max_combined_open_risk_percent"] == pytest.approx(3.0)
