@@ -5,6 +5,9 @@ def test_cross_boundary_diagnostics_merge_once_and_keep_compounded_equity():
     def diagnostics(details, candles=10):
         return dict(candles_analyzed=candles, warmup_candles=7, history_start='2025-01-01',
                     evaluations=candles, signals_emitted=1, trades_opened=1,
+                    capacity_blocked_candles=2, combined_risk_blocked_signals=1,
+                    overlapping_entries_opened=1, max_simultaneous_positions=2,
+                    max_open_risk_dollars=200,
                     no_setup_reasons={'NO_STRUCTURE': 2}, setup_details=details, open_trades_at_end=0)
     waiting = dict(setup_id='across-boundary', passed_stages=['trend', 'structure'],
                    last_state='WAITING', last_reason='CONFIRMATION_PENDING', signaled=False)
@@ -27,6 +30,11 @@ def test_cross_boundary_diagnostics_merge_once_and_keep_compounded_equity():
     assert d['waiting_setups'] == 0 and d['blocked_setups'] == 1
     assert d['stage_pass_counts']['trend'] == 2 and d['stage_pass_counts']['confirmation'] == 1
     assert d['warmup_candles'] == 7 and d['no_setup_reasons'] == {'NO_STRUCTURE': 4}
+    assert d['capacity_blocked_candles'] == 4
+    assert d['combined_risk_blocked_signals'] == 2
+    assert d['overlapping_entries_opened'] == 2
+    assert d['max_simultaneous_positions'] == 2
+    assert d['max_open_risk_dollars'] == 200
     # Aggregation must not mutate continuation/source diagnostics.
     assert waiting['passed_stages'] == ['trend', 'structure'] and waiting['signaled'] is False
 
