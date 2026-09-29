@@ -89,8 +89,6 @@ def _execute(payload, *, progress, cancelled, history_dir, results):
                 evaluation_start=start, evaluation_end=end, timeline=facts,
                 progress=window_progress, is_cancelled=cancelled,
                 continuation=continuation, finalize_open_trade=index == len(windows) - 1,
-                max_concurrent_positions=payload.get('max_concurrent_positions', 1),
-                max_combined_open_risk_percent=payload.get('max_combined_open_risk_percent'),
             )
             continuation = result['continuation']
             results.append(result)
@@ -110,7 +108,8 @@ def _execute(payload, *, progress, cancelled, history_dir, results):
     gc.collect()
     stage('Working memory released',99)
 
-    result.update(ok=True,strategy_id=payload['strategy_id'],strategy_name=payload.get('strategy_name'),symbol=symbol,mode='FAST',history_source='STATIC_REPLAY_JSON',account_scope=payload['account_scope'],starting_balance=payload['starting_balance'],neon_candle_reads=False,assumptions=dict(closed_candles_only=True,spread=False,commission=False,slippage=False,ambiguous_intrabar_excluded=True,live_trading_enabled=False,max_concurrent_positions=payload.get('max_concurrent_positions',1),max_combined_open_risk_percent=payload.get('max_combined_open_risk_percent')))
+    execution_options=result.get('execution_options') or {}
+    result.update(ok=True,strategy_id=payload['strategy_id'],strategy_name=payload.get('strategy_name'),symbol=symbol,mode='FAST',history_source='STATIC_REPLAY_JSON',account_scope=payload['account_scope'],starting_balance=payload['starting_balance'],neon_candle_reads=False,assumptions=dict(closed_candles_only=True,spread=False,commission=False,slippage=False,ambiguous_intrabar_excluded=True,live_trading_enabled=False,max_concurrent_positions=execution_options.get('max_concurrent_positions',1),max_combined_open_risk_percent=execution_options.get('max_combined_open_risk_percent')))
     result['performance']={**metadata,**timings,'stage_peak_rss_bytes':memory_stages,'total_seconds':time.perf_counter()-begin,'peak_rss_bytes':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*(1024 if sys.platform!='darwin' else 1)}
     return result
 

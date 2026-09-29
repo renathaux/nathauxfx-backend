@@ -89,6 +89,8 @@ class TP2Definition(_StrictModel):
 class RiskDefinition(_StrictModel):
     method: Literal["PERCENT_BALANCE", "FIXED_DOLLARS"]
     value: float
+    max_concurrent_positions: int = Field(default=1, ge=1, le=3, strict=True)
+    max_combined_open_risk_percent: float | None = Field(default=None, gt=0, le=10)
 
 
 class FundamentalDefinition(_StrictModel):
@@ -330,6 +332,19 @@ def _cross_field_errors(value: StrategyDefinition) -> dict[str, str]:
     if not _valid_positive(value.risk.value):
         errors["risk.value"] = "Risk value must be a finite number greater than 0"
 
+    if value.risk.max_concurrent_positions > 1:
+        if value.risk.max_combined_open_risk_percent is None:
+            errors["risk.max_combined_open_risk_percent"] = (
+                "Combined open risk is required when multiple positions are allowed"
+            )
+        elif (
+            value.risk.method == "PERCENT_BALANCE"
+            and float(value.risk.max_combined_open_risk_percent) + 1e-12 < float(value.risk.value)
+        ):
+            errors["risk.max_combined_open_risk_percent"] = (
+                "Combined open risk must be at least the per-trade risk"
+            )
+
     return errors
 
 
@@ -438,6 +453,12 @@ def _parse_without_cross_validation(payload: dict) -> StrategyDefinition:
 
 def normalize_definition(payload: dict) -> dict:
     normalized = _normalize_tp1(payload)
+    if isinstance(normalized, dict):
+        normalized = dict(normalized)
+        risk = dict(normalized.get("risk") or {})
+        risk.setdefault("max_concurrent_positions", 1)
+        risk.setdefault("max_combined_open_risk_percent", None)
+        normalized["risk"] = risk
     errors = validation_errors(normalized)
     if errors:
         raise ValueError("; ".join(f"{path}: {message}" for path, message in errors.items()))
@@ -578,6 +599,12 @@ def strategy_summary(definition: dict) -> str:
         parts.append(f"risk {_fmt(risk['value'])}% balance")
     else:
         parts.append(f"risk ${_fmt(risk['value'])}")
+    if int(risk.get("max_concurrent_positions") or 1) > 1:
+        parts.append(f"max {int(risk['max_concurrent_positions'])} concurrent positions")
+        if risk.get("max_combined_open_risk_percent") is not None:
+            parts.append(
+                f"combined open risk <= {_fmt(risk['max_combined_open_risk_percent'])}%"
+            )
 
     fundamental_mode = value["fundamentals"]["mode"]
     if fundamental_mode == "REQUIRE_ALIGNMENT":

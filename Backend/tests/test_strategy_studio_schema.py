@@ -313,3 +313,31 @@ def test_remember_bos_requires_confirmation_close_entry():
 def test_legacy_entry_defaults_remember_bos_off():
     normalized = normalize_definition(valid_definition())
     assert normalized["entry"]["remember_bos_on_confirmation_failure"] is False
+
+
+def test_legacy_risk_defaults_to_single_position():
+    result = normalize_definition(valid_definition())
+    assert result["risk"]["max_concurrent_positions"] == 1
+    assert result["risk"]["max_combined_open_risk_percent"] is None
+
+
+def test_multiple_positions_require_combined_open_risk_cap():
+    payload = valid_definition()
+    payload["risk"].update({
+        "max_concurrent_positions": 2,
+        "max_combined_open_risk_percent": None,
+    })
+    errors = validation_errors(payload)
+    assert "risk.max_combined_open_risk_percent" in errors
+
+
+def test_multiple_positions_and_combined_risk_are_valid():
+    payload = valid_definition()
+    payload["risk"].update({
+        "max_concurrent_positions": 3,
+        "max_combined_open_risk_percent": 3.0,
+    })
+    assert validation_errors(payload) == {}
+    result = normalize_definition(payload)
+    assert result["risk"]["max_concurrent_positions"] == 3
+    assert result["risk"]["max_combined_open_risk_percent"] == 3.0

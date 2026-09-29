@@ -389,8 +389,7 @@ def _evaluation_reason(evaluation) -> tuple[str | None, str | None]:
 
 def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_override=None,
                    include_replay=False, evaluation_start=None, evaluation_end=None,
-                   continuation=None, finalize_open_trade=True, timeline=None, progress=None, is_cancelled=None,
-                   max_concurrent_positions=1, max_combined_open_risk_percent=None) -> dict:
+                   continuation=None, finalize_open_trade=True, timeline=None, progress=None, is_cancelled=None) -> dict:
     value = normalize_definition(definition)
     timeline = timeline or build_market_facts(
         market_bundle,
@@ -403,21 +402,27 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
     if base_balance <= 0:
         raise ValueError("SIMULATION_BALANCE_INVALID")
 
+    # Position stacking is part of the saved Strategy Studio definition.
+    # Simulator requests cannot override it independently.
+    risk_definition = value.get("risk") or {}
     try:
-        max_positions = int(max_concurrent_positions)
+        max_positions = int(risk_definition.get("max_concurrent_positions") or 1)
     except (TypeError, ValueError):
         raise ValueError("SIMULATION_MAX_CONCURRENT_POSITIONS_INVALID")
     if max_positions < 1 or max_positions > 3:
         raise ValueError("SIMULATION_MAX_CONCURRENT_POSITIONS_INVALID")
 
+    configured_cap = risk_definition.get("max_combined_open_risk_percent")
     risk_cap_percent = None
-    if max_combined_open_risk_percent is not None:
+    if configured_cap is not None:
         try:
-            risk_cap_percent = float(max_combined_open_risk_percent)
+            risk_cap_percent = float(configured_cap)
         except (TypeError, ValueError):
             raise ValueError("SIMULATION_MAX_COMBINED_OPEN_RISK_INVALID")
         if not 0 < risk_cap_percent <= 10:
             raise ValueError("SIMULATION_MAX_COMBINED_OPEN_RISK_INVALID")
+    if max_positions > 1 and risk_cap_percent is None:
+        raise ValueError("SIMULATION_MAX_COMBINED_OPEN_RISK_REQUIRED")
 
     continuation_value = continuation if isinstance(continuation, dict) else {}
     balance = float(continuation_value.get("balance", base_balance))
@@ -460,6 +465,7 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
     combined_risk_blocked_signals = 0
     max_simultaneous_positions = len(active)
     max_open_risk_dollars = sum(float(item.risk_dollars) for item in active)
+    overlapping_entries_opened = 0
     window_start = pd.Timestamp(evaluation_start) if evaluation_start is not None else None
     window_end = pd.Timestamp(evaluation_end) if evaluation_end is not None else None
 
@@ -587,8 +593,11 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
                     ),
                     protection_steps=list(tp1.get("protection_steps") or []),
                 )
+                had_open_position = bool(active)
                 active.append(opened_trade)
                 trades_opened += 1
+                if had_open_position:
+                    overlapping_entries_opened += 1
                 max_simultaneous_positions = max(
                     max_simultaneous_positions, len(active)
                 )
@@ -679,6 +688,7 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
         "combined_risk_blocked_signals": combined_risk_blocked_signals,
         "max_simultaneous_positions": max_simultaneous_positions,
         "max_open_risk_dollars": max_open_risk_dollars,
+        "overlapping_entries_opened": overlapping_entries_opened,
         "stage_pass_counts": stage_pass_counts,
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "no_setup_reasons": dict(sorted(no_setup_reasons.items())),

@@ -480,6 +480,15 @@ def test_simulation_continuation_carries_open_trade_across_chunks(monkeypatch):
     assert second["continuation"]["ordinal"] == 1
 
 
+def _stacking_definition(max_positions=2, risk_cap=2.0):
+    value = _definition()
+    value["risk"].update({
+        "max_concurrent_positions": max_positions,
+        "max_combined_open_risk_percent": risk_cap,
+    })
+    return value
+
+
 def _concurrency_bundle():
     index = pd.date_range("2026-09-17T10:00:00Z", periods=4, freq="5min")
     frame = pd.DataFrame({
@@ -558,12 +567,10 @@ def test_simulator_can_open_two_independent_concurrent_positions(monkeypatch):
 
     bundle = _install_concurrency_fakes(monkeypatch, simulator)
     result = run_simulation(
-        _definition(),
+        _stacking_definition(2, 2.0),
         bundle,
         "EURUSD",
         10000.0,
-        max_concurrent_positions=2,
-        max_combined_open_risk_percent=2.0,
     )
 
     resolved = [item for item in result["trades"] if item.get("resolved") is True]
@@ -574,6 +581,7 @@ def test_simulator_can_open_two_independent_concurrent_positions(monkeypatch):
     assert result["diagnostics"]["signals_emitted"] == 2
     assert result["diagnostics"]["max_simultaneous_positions"] == 2
     assert result["diagnostics"]["max_open_risk_dollars"] == pytest.approx(200.0)
+    assert result["diagnostics"]["overlapping_entries_opened"] == 1
     assert result["metrics"]["ending_balance"] == pytest.approx(10400.0)
     assert result["execution_options"] == {
         "max_concurrent_positions": 2,
@@ -586,12 +594,10 @@ def test_combined_open_risk_cap_blocks_second_position(monkeypatch):
 
     bundle = _install_concurrency_fakes(monkeypatch, simulator)
     result = run_simulation(
-        _definition(),
+        _stacking_definition(2, 1.5),
         bundle,
         "EURUSD",
         10000.0,
-        max_concurrent_positions=2,
-        max_combined_open_risk_percent=1.5,
     )
 
     resolved = [item for item in result["trades"] if item.get("resolved") is True]
@@ -649,9 +655,7 @@ def test_multiple_open_positions_survive_chunk_continuation(monkeypatch):
     first_frame = frame.iloc[:2]
     first_bundle = {"5m": first_frame, "15m": first_frame.iloc[:0], "1h": first_frame.iloc[:0], "4h": first_frame.iloc[:0]}
     first = run_simulation(
-        _definition(), first_bundle, "EURUSD", 10000.0,
-        max_concurrent_positions=2,
-        max_combined_open_risk_percent=2.0,
+        _stacking_definition(2, 2.0), first_bundle, "EURUSD", 10000.0,
         finalize_open_trade=False,
     )
     assert len(first["continuation"]["active_trades"]) == 2
@@ -660,9 +664,7 @@ def test_multiple_open_positions_survive_chunk_continuation(monkeypatch):
     second_frame = frame.iloc[2:]
     second_bundle = {"5m": second_frame, "15m": second_frame.iloc[:0], "1h": second_frame.iloc[:0], "4h": second_frame.iloc[:0]}
     second = run_simulation(
-        _definition(), second_bundle, "EURUSD", 10000.0,
-        max_concurrent_positions=2,
-        max_combined_open_risk_percent=2.0,
+        _stacking_definition(2, 2.0), second_bundle, "EURUSD", 10000.0,
         continuation=first["continuation"],
         finalize_open_trade=True,
     )

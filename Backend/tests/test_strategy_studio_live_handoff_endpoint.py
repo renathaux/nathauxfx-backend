@@ -287,3 +287,95 @@ def test_live_handoff_busy_reports_admission_without_changing_state(monkeypatch,
     assert response.status_code == 429
     assert response.json()['detail'] == 'HEAVY_BACKTEST_BUSY'
     setter.assert_not_called()
+
+
+def test_readiness_blocks_saved_multi_position_rule_from_live(monkeypatch):
+    definition = {
+        "schema_version": 1,
+        "symbols": ["EURUSD"],
+        "trading_timeframe": "5m",
+        "structure_timeframe": "15m",
+        "trend": {"timeframe": None, "methods": []},
+        "structure": {
+            "trigger": "BOS_CHOCH",
+            "break_validation": ["CLOSE_BEYOND"],
+            "minimum_body_percent": None,
+            "minimum_distance_pips": None,
+        },
+        "confirmation": {
+            "rules": ["MIN_BODY_PERCENT"],
+            "minimum_body_percent": 30,
+            "max_setup_age_bars": None,
+        },
+        "entry": {
+            "method": "CONFIRMATION_CLOSE",
+            "remember_bos_on_confirmation_failure": False,
+        },
+        "stop_loss": {
+            "method": "LAST_SWING",
+            "buffer_pips": 5,
+            "fixed_distance": None,
+            "distance_filter": {
+                "enabled": False,
+                "mode": "PERCENT_ENTRY",
+                "minimum": None,
+                "maximum": None,
+            },
+        },
+        "tp1": {
+            "enabled": False,
+            "target_r": None,
+            "target_basis": "SL_DISTANCE",
+            "close_percent": None,
+            "protection_r": None,
+            "protection_mode": "FIXED",
+            "protection_trigger_method": "CANDLE_CLOSE",
+            "protection_steps": [],
+        },
+        "tp2": {"method": "FIXED_R", "value": 1.9},
+        "risk": {
+            "method": "PERCENT_BALANCE",
+            "value": 1,
+            "max_concurrent_positions": 2,
+            "max_combined_open_risk_percent": 2,
+        },
+        "fundamentals": {"mode": "REQUIRE_ALIGNMENT"},
+        "session_filter": {
+            "enabled": False,
+            "timezone": "UTC",
+            "blocked_start": "08:00",
+            "blocked_end": "13:00",
+        },
+        "seasonal_filter": {
+            "enabled": False,
+            "timezone": "UTC",
+            "blocked_start": "12-01",
+            "blocked_end": "12-20",
+        },
+    }
+    monkeypatch.setattr(
+        route_module,
+        "_active_strategy",
+        lambda owner: {
+            "strategy_id": "strat_multi",
+            "definition": definition,
+        },
+    )
+    monkeypatch.setattr(
+        route_module,
+        "has_unresolved_studio_reconciliation",
+        lambda owner: False,
+    )
+    monkeypatch.setattr(
+        route_module,
+        "selected_identity",
+        lambda: pytest.fail("multi-position LIVE must fail before account/history access"),
+    )
+
+    readiness = route_module._evaluate_live_handoff_readiness("user:1")
+
+    assert readiness["ready"] is False
+    assert readiness["active_strategy_id"] == "strat_multi"
+    assert readiness["reason"] == "STRATEGY_STUDIO_LIVE_MULTI_POSITION_NOT_SUPPORTED"
+    assert readiness["reports"]["position_stacking"]["max_concurrent_positions"] == 2
+    assert readiness["reports"]["position_stacking"]["live_supported"] is False
