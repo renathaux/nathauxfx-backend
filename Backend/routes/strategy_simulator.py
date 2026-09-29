@@ -220,8 +220,8 @@ def strategy_simulation_run(payload: SimulationRequest, request: Request):
             "slippage": False,
             "ambiguous_intrabar_excluded": True,
             "live_trading_enabled": False,
-            "max_concurrent_positions": payload.max_concurrent_positions,
-            "max_combined_open_risk_percent": payload.max_combined_open_risk_percent,
+            "max_concurrent_positions": (result.get("execution_options") or {}).get("max_concurrent_positions", 1),
+            "max_combined_open_risk_percent": (result.get("execution_options") or {}).get("max_combined_open_risk_percent"),
         },
         **result,
     }
