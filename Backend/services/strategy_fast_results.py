@@ -26,7 +26,17 @@ def aggregate_results(results, starting_balance):
     metrics['average_r'] = r_sum / r_count if r_count else 0
     first = results[0]['diagnostics']
     diagnostics = {key: sum(r['diagnostics'].get(key, 0) for r in results)
-                   for key in ('candles_analyzed', 'evaluations', 'signals_emitted', 'trades_opened')}
+                   for key in ('candles_analyzed', 'evaluations', 'signals_emitted', 'trades_opened',
+                               'capacity_blocked_candles', 'combined_risk_blocked_signals',
+                               'overlapping_entries_opened')}
+    diagnostics['max_simultaneous_positions'] = max(
+        (r['diagnostics'].get('max_simultaneous_positions', 0) for r in results),
+        default=0,
+    )
+    diagnostics['max_open_risk_dollars'] = max(
+        (r['diagnostics'].get('max_open_risk_dollars', 0) for r in results),
+        default=0,
+    )
     setups, no_setup = {}, {}
     for result in results:
         for reason, count in result['diagnostics'].get('no_setup_reasons', {}).items():
