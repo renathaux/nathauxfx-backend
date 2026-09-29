@@ -599,6 +599,12 @@ def strategy_summary(definition: dict) -> str:
         parts.append(f"risk {_fmt(risk['value'])}% balance")
     else:
         parts.append(f"risk ${_fmt(risk['value'])}")
+    if int(risk.get("max_concurrent_positions") or 1) > 1:
+        parts.append(f"max {int(risk['max_concurrent_positions'])} concurrent positions")
+        if risk.get("max_combined_open_risk_percent") is not None:
+            parts.append(
+                f"combined open risk <= {_fmt(risk['max_combined_open_risk_percent'])}%"
+            )
 
     fundamental_mode = value["fundamentals"]["mode"]
     if fundamental_mode == "REQUIRE_ALIGNMENT":
