@@ -389,8 +389,7 @@ def _evaluation_reason(evaluation) -> tuple[str | None, str | None]:
 
 def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_override=None,
                    include_replay=False, evaluation_start=None, evaluation_end=None,
-                   continuation=None, finalize_open_trade=True, timeline=None, progress=None, is_cancelled=None,
-                   max_concurrent_positions=None, max_combined_open_risk_percent=None) -> dict:
+                   continuation=None, finalize_open_trade=True, timeline=None, progress=None, is_cancelled=None) -> dict:
     value = normalize_definition(definition)
     timeline = timeline or build_market_facts(
         market_bundle,
@@ -403,23 +402,17 @@ def run_simulation(definition, market_bundle, symbol, start_balance, *, risk_ove
     if base_balance <= 0:
         raise ValueError("SIMULATION_BALANCE_INVALID")
 
-    # Position stacking is a saved Strategy Studio rule. Request-level values
-    # are retained only as a backwards-compatible fallback for clients that
-    # have not reloaded the strategy yet.
+    # Position stacking is part of the saved Strategy Studio definition.
+    # Simulator requests cannot override it independently.
     risk_definition = value.get("risk") or {}
-    configured_positions = risk_definition.get("max_concurrent_positions")
-    if configured_positions is None:
-        configured_positions = max_concurrent_positions if max_concurrent_positions is not None else 1
     try:
-        max_positions = int(configured_positions)
+        max_positions = int(risk_definition.get("max_concurrent_positions") or 1)
     except (TypeError, ValueError):
         raise ValueError("SIMULATION_MAX_CONCURRENT_POSITIONS_INVALID")
     if max_positions < 1 or max_positions > 3:
         raise ValueError("SIMULATION_MAX_CONCURRENT_POSITIONS_INVALID")
 
     configured_cap = risk_definition.get("max_combined_open_risk_percent")
-    if configured_cap is None and max_concurrent_positions is not None:
-        configured_cap = max_combined_open_risk_percent
     risk_cap_percent = None
     if configured_cap is not None:
         try:
