@@ -89,8 +89,6 @@ def _execute(payload, *, progress, cancelled, history_dir, results):
                 evaluation_start=start, evaluation_end=end, timeline=facts,
                 progress=window_progress, is_cancelled=cancelled,
                 continuation=continuation, finalize_open_trade=index == len(windows) - 1,
-                max_concurrent_positions=payload.get('max_concurrent_positions', 1),
-                max_combined_open_risk_percent=payload.get('max_combined_open_risk_percent'),
             )
             continuation = result['continuation']
             results.append(result)
