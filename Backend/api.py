@@ -2178,6 +2178,39 @@ def refresh_live_strategy_display(panel_data):
     return LIVE_STRATEGY_DISPLAY_BY_SYMBOL
 
 
+def schedule_live_strategy_display_refresh():
+    """Start a non-blocking strategy display refresh.
+
+    Broker execution must never wait for dashboard presentation work. If one
+    display refresh is already running, keep its last published snapshot and
+    skip starting a second worker.
+    """
+    global LIVE_STRATEGY_DISPLAY_REFRESH_THREAD
+    with LIVE_STRATEGY_DISPLAY_REFRESH_LOCK:
+        if (
+            LIVE_STRATEGY_DISPLAY_REFRESH_THREAD is not None
+            and LIVE_STRATEGY_DISPLAY_REFRESH_THREAD.is_alive()
+        ):
+            return False
+
+        def worker():
+            try:
+                refresh_live_strategy_display(None)
+            except Exception as exc:
+                print("STRATEGY_LIVE_DISPLAY_ERROR =", {
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                })
+
+        LIVE_STRATEGY_DISPLAY_REFRESH_THREAD = threading.Thread(
+            target=worker,
+            name="strategy-live-display",
+            daemon=True,
+        )
+        LIVE_STRATEGY_DISPLAY_REFRESH_THREAD.start()
+        return True
+
+
 def get_strategy_studio_closed_5m_prices(panel_data):
     """Return latest completed 5m closes from the same panel candle stream."""
     result = {}
@@ -2288,15 +2321,6 @@ def refresh_live_panel_meta(panel_data):
         return False
 
     try:
-        refresh_live_strategy_display(panel_data)
-    except Exception as exc:
-        # Strategy display must never block execution or position management.
-        print("STRATEGY_LIVE_DISPLAY_ERROR =", {
-            "error_type": type(exc).__name__,
-            "error": str(exc),
-        })
-
-    try:
         apply_trade_signal_lifecycle(panel_data)
     except Exception as exc:
         LIVE_PANEL_META_CACHE["last_error"] = str(exc)
@@ -2398,6 +2422,11 @@ def refresh_live_panel_meta(panel_data):
         "history": len(live_recent_history or []),
         "trade_management_error": trade_management_error,
     })
+
+    # Presentation work is last and asynchronous so it cannot delay entry,
+    # position protection, or broker/history synchronization.
+    schedule_live_strategy_display_refresh()
+
     return trade_management_error is None
 
 
@@ -3863,6 +3892,9 @@ LIVE_STRATEGY_DISPLAY_BY_SYMBOL = {
     "EURUSD": None,
     "XAUUSD": None,
 }
+
+LIVE_STRATEGY_DISPLAY_REFRESH_LOCK = threading.Lock()
+LIVE_STRATEGY_DISPLAY_REFRESH_THREAD = None
 
 LIVE_BACKUP_FILE = os.path.join(
     DATA_DIR,
