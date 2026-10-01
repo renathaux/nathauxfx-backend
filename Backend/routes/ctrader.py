@@ -31,6 +31,9 @@ from services.ctrader_service import get_health_snapshot
 
 router = APIRouter()
 
+from routes.ctrader_symbol_metadata import router as symbol_metadata_router
+router.include_router(symbol_metadata_router)
+
 _ALLOWED_SYMBOLS = {"EURUSD", "XAUUSD"}
 _TIMEFRAME_MINUTES = {"5m": 5, "15m": 15, "1h": 60}
 _CHART_HISTORY_TIMEFRAME_MINUTES = {"1m": 1, **_TIMEFRAME_MINUTES}

@@ -250,6 +250,8 @@ PAYLOAD_AMEND_POSITION_SLTP_REQ = 2110
 PAYLOAD_CLOSE_POSITION_REQ = 2111
 PAYLOAD_SYMBOLS_LIST_REQ = 2114
 PAYLOAD_SYMBOLS_LIST_RES = 2115
+PAYLOAD_SYMBOL_BY_ID_REQ = 2116
+PAYLOAD_SYMBOL_BY_ID_RES = 2117
 PAYLOAD_TRADER_REQ = 2121
 PAYLOAD_TRADER_RES = 2122
 PAYLOAD_RECONCILE_REQ = 2124
@@ -5457,6 +5459,46 @@ def fetch_ctrader_accounts(refresh=True):
         except Exception:
             pass
 
+def fetch_ctrader_full_symbols(sock, account_id, symbol_ids):
+    """Read full symbols on a caller-owned, exclusively read authenticated socket.
+
+    IDs must come from the same account's symbols list. This helper does not
+    authenticate, refresh tokens, select accounts, subscribe, or place orders.
+    The raw payload preserves broker schedule/holiday fields without defaults.
+    Do not use a socket concurrently consumed by the live stream.
+    """
+    def positive_id(value):
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ValueError("cTrader ID must be a positive integer")
+        if not str(value).isdigit() or not 0 < int(value) < 2**63:
+            raise ValueError("cTrader ID must be a positive int64")
+        return int(value)
+
+    account_id = positive_id(account_id)
+    if not isinstance(symbol_ids, (list, tuple)) or not symbol_ids:
+        raise ValueError("Explicit broker symbol IDs are required")
+    ids = [positive_id(value) for value in symbol_ids]
+    if len(set(ids)) != len(ids):
+        raise ValueError("Duplicate requested symbol IDs")
+    response = send_ctrader_request(
+        sock, PAYLOAD_SYMBOL_BY_ID_REQ,
+        {"ctidTraderAccountId": account_id, "symbolId": ids},
+        PAYLOAD_SYMBOL_BY_ID_RES,
+    )
+    if not isinstance(response, dict) or response.get("payloadType") != PAYLOAD_SYMBOL_BY_ID_RES:
+        raise ValueError("Unexpected full-symbol response type")
+    payload = response.get("payload")
+    if not isinstance(payload, dict) or positive_id(payload.get("ctidTraderAccountId")) != account_id:
+        raise ValueError("Full-symbol response account mismatch")
+    symbols = payload.get("symbol")
+    if not isinstance(symbols, list) or any(not isinstance(row, dict) for row in symbols):
+        raise ValueError("Malformed full-symbol response")
+    returned_ids = [positive_id(row.get("symbolId")) for row in symbols]
+    if len(returned_ids) != len(ids) or set(returned_ids) != set(ids):
+        raise ValueError("Full-symbol response missing, duplicate, or unexpected symbol IDs")
+    return payload
+
+
 def fetch_ctrader_symbol_details(sock, account_id):
     response = send_ctrader_request(
         sock,
@@ -6087,47 +6129,59 @@ def normalize_trade_side(side):
         return "SELL"
     return str(side or "").upper()
 
-def open_ctrader_json_socket(host, port):
+def open_ctrader_json_socket(host, port, *, close_on_error=False):
     import certifi
 
     raw = socket.create_connection((host, port), timeout=8)
 
-    context = ssl.create_default_context(
-        cafile=certifi.where()
-    )
-
-    sock = context.wrap_socket(
-        raw,
-        server_hostname=host
-    )
-    sock.settimeout(8)
-
-    key = base64.b64encode(os.urandom(16)).decode("ascii")
-    request = (
-        "GET / HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        f"Sec-WebSocket-Key: {key}\r\n"
-        "Sec-WebSocket-Version: 13\r\n"
-        "\r\n"
-    )
-
-    sock.sendall(request.encode("ascii"))
-    response = b""
-
-    while b"\r\n\r\n" not in response:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        response += chunk
-
-    if b" 101 " not in response.split(b"\r\n", 1)[0]:
-        raise RuntimeError(
-            f"cTrader WebSocket handshake failed: {response[:120]!r}"
+    sock = None
+    try:
+        context = ssl.create_default_context(
+            cafile=certifi.where()
         )
 
-    return sock
+        sock = context.wrap_socket(
+            raw,
+            server_hostname=host
+        )
+        sock.settimeout(8)
+
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = (
+            "GET / HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+
+        sock.sendall(request.encode("ascii"))
+        response = b""
+
+        while b"\r\n\r\n" not in response:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+
+        if b" 101 " not in response.split(b"\r\n", 1)[0]:
+            raise RuntimeError(
+                f"cTrader WebSocket handshake failed: {response[:120]!r}"
+            )
+
+        return sock
+    except BaseException:
+        # Opt-in for the diagnostic only; existing callers retain their behavior.
+        if close_on_error:
+            for opened in (sock, raw):
+                if opened is not None:
+                    try:
+                        opened.close()
+                    except Exception:
+                        pass
+        raise
 
 def send_ctrader_request(sock, payload_type, payload, expected_payload_type):
     client_msg_id = str(uuid.uuid4())
