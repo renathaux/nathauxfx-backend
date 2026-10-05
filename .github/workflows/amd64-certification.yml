@@ -39,7 +39,7 @@ jobs:
       EXPECTED_SOURCE_MANIFEST_SHA256: 51e8540b1b2be9804ce2cbccbf753aa41c4f1eb041d7329312c29968a940af1b
       EXPECTED_LOCK_SHA256: 1d8e368b5645db69cab33479c56d7db0827155898368a419fc80ab9819ee5736
       EXPECTED_METADATA_SHA256: 8e24bda82fa3cc5bdcf21f19c86eec85eae74e24e115a402066bfafe884e5e89
-      DATABASE_URL: sqlite:///:memory:
+      DATABASE_URL: "sqlite:///:memory:"
       VERIFIER_TEST_PG_DSN: postgresql+psycopg2://postgres:certification-test-only@127.0.0.1:5432/postgres
       CUTOVER_DATABASE_URL: postgresql+psycopg2://postgres:certification-test-only@127.0.0.1:5432/postgres
       PYTHON_DOTENV_DISABLED: "1"
