@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: certification/security-clean-167d1e3-amd64
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Prove runner architecture and source ancestry
         shell: bash
