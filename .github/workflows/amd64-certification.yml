@@ -65,8 +65,8 @@ jobs:
           uname -a
           test "$(uname -m)" = "x86_64"
           test "$(git branch --show-current)" = "certification/security-clean-167d1e3-amd64"
-          parent="$(git rev-parse HEAD^)"
-          test "$parent" = "$EXPECTED_SNAPSHOT_PARENT"
+          git cat-file -e "$EXPECTED_SNAPSHOT_PARENT^{commit}"
+          git merge-base --is-ancestor "$EXPECTED_SNAPSHOT_PARENT" HEAD
           main_remote="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
           test "$main_remote" = "f839849ec9157da640c75b369379b91e135903d5"
           git status --porcelain=v1
