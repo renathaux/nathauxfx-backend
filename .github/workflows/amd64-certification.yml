@@ -262,12 +262,87 @@ jobs:
           print("application_import=ok")
           PY
 
+      - name: Prepare disposable UID 501 access
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v setfacl
+          getent group 1000 >/dev/null || sudo groupadd --gid 1000 certcutovergroup
+          if ! getent passwd 501 >/dev/null; then
+            sudo useradd --uid 501 --gid 1000 --no-create-home --shell /usr/sbin/nologin certcutover501
+          fi
+          cert_user=$(getent passwd 501 | cut -d: -f1)
+          # Existing fixtures need only sudo unshare for private read-only bind mounts.
+          printf '%s ALL=(root) NOPASSWD: /usr/bin/unshare\n' "$cert_user" | sudo tee /etc/sudoers.d/certification-uid501 >/dev/null
+          sudo chmod 440 /etc/sudoers.d/certification-uid501
+          sudo visudo -cf /etc/sudoers.d/certification-uid501
+          export CERT_RUNNER_UID=$(id -u)
+          python - <<'PY'
+          import os,pathlib,subprocess
+          root=pathlib.Path.cwd().resolve()
+          # Traverse ancestors only; do not grant listing/access to unrelated home state.
+          targets=[root,root/'.venv-cert1',pathlib.Path(os.environ['pythonLocation'])]
+          parents=set(p for target in targets for p in target.parents if p!=pathlib.Path('/'))
+          for p in sorted(parents,key=lambda p:len(p.parts)):
+              subprocess.run(['sudo','setfacl','-m','u:501:--x',str(p)],check=True)
+          for p in [root/'Backend',root/'.venv-cert1',pathlib.Path(os.environ['pythonLocation'])]:
+              subprocess.run(['sudo','setfacl','-R','-P','-m','u:501:rX',str(p)],check=True)
+          subprocess.run(['sudo','setfacl','-m','u:501:--x',str(root)],check=True)
+          # Never recurse into PostgreSQL's data directory.
+          pg=pathlib.Path(os.environ['CERT_PG_ROOT'])
+          subprocess.run(['setfacl','-m','u:501:--x',str(pg)],check=True)
+          assert (pg/'data').stat().st_mode & 0o077 == 0
+          PY
+          cert_root=$(mktemp -d /tmp/fs-certification-uid501.XXXXXXXX)
+          sudo chown 501:1000 "$cert_root"
+          sudo chmod 700 "$cert_root"
+          sudo setfacl -m "u:$(id -u):r-x" "$cert_root"
+          sudo setpriv --reuid=501 --regid=1000 --clear-groups mkdir -m 700 "$cert_root/state" "$cert_root/cache" "$cert_root/tmp"
+          echo "CERT_UID_ROOT=$cert_root" >> "$GITHUB_ENV"
+
+      - name: UID 501 access preflight
+        working-directory: Backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          cert_python=$(realpath -s ../.venv-cert1/bin/python)
+          sudo setpriv --reuid=501 --regid=1000 --clear-groups env -i \
+            PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC PYTHONDONTWRITEBYTECODE=1 PYTHON_DOTENV_DISABLED=1 \
+            CUTOVER_DATABASE_URL="$CUTOVER_DATABASE_URL" VERIFIER_TEST_PG_DSN="$VERIFIER_TEST_PG_DSN" \
+            CERT_PG_ROOT="$CERT_PG_ROOT" "$cert_python" -B - <<'PY'
+          import importlib,os,pathlib,sys
+          assert os.getuid()==501 and os.getgid()==1000 and os.getgroups()==[]
+          assert os.access(sys.executable,os.X_OK) and sys.version_info[:3]==(3,14,3)
+          assert not os.access(pathlib.Path('startup_recovery/cutover.py'),os.W_OK)
+          for name in ('startup_recovery.cutover','startup_recovery.cutover_service','startup_recovery.cutover_validation'):
+              importlib.import_module(name)
+          assert not os.access(pathlib.Path(os.environ['CERT_PG_ROOT'])/'data',os.R_OK)
+          from sqlalchemy import create_engine,text
+          assert os.environ['CUTOVER_DATABASE_URL']==os.environ['VERIFIER_TEST_PG_DSN']
+          engine=create_engine(os.environ['VERIFIER_TEST_PG_DSN'])
+          with engine.connect() as c:
+              assert c.execute(text('select current_database()')).scalar_one()=='verifier_test'
+              assert c.execute(text('select inet_server_addr()')).scalar_one() is None
+          engine.dispose()
+          print('UID_501_PYTHON_ACCESS=PASS')
+          print('UID_501_SOURCE_ACCESS=PASS')
+          print('UID_501_POSTGRES_SOCKET_ACCESS=PASS')
+          print('POSTGRES_DATA_REMAINS_PRIVATE=PASS')
+          PY
+          sudo setpriv --reuid=501 --regid=1000 --clear-groups sudo -n unshare --mount --propagation private -- true
+
       - name: Safe Recovery and cutover behavioral recertification
         working-directory: Backend
         shell: bash
         run: |
           set -euo pipefail
-          ../.venv-cert1/bin/python -m pytest -q --junitxml=certification-behavioral.xml             tests/test_binding_decimal.py             tests/test_runtime_paths.py             tests/test_runtime_paths_postgres.py             tests/test_recovery_acceptance_crash.py             tests/test_recovery_accepted_execution.py             tests/test_recovery_entry_gate.py             tests/test_recovery_position_repair.py             tests/test_recovery_management_readiness.py             tests/test_recovery_explicit_context.py             tests/test_recovery_fencing.py             tests/test_recovery_lock_order.py             tests/test_recovery_combined_matrix.py             tests/test_task3_entry_integration.py             tests/test_cutover_manifest.py             tests/test_cutover_files.py             tests/test_cutover_postgres.py             tests/test_cutover_service.py             tests/test_cutover_cli.py             tests/test_cutover_first_start.py
+          cert_python=$(realpath -s ../.venv-cert1/bin/python)
+          sudo setpriv --reuid=501 --regid=1000 --clear-groups env -i \
+            PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC PYTHONDONTWRITEBYTECODE=1 PYTHON_DOTENV_DISABLED=1 \
+            DATABASE_URL="$DATABASE_URL" VERIFIER_TEST_PG_DSN="$VERIFIER_TEST_PG_DSN" CUTOVER_DATABASE_URL="$CUTOVER_DATABASE_URL" \
+            TMPDIR="$CERT_UID_ROOT/tmp" FLOWSIGNAL_STATE_ROOT="$CERT_UID_ROOT/state" FLOWSIGNAL_CACHE_ROOT="$CERT_UID_ROOT/cache" \
+            STRATEGY_LIVE_INTEGRITY_VERIFY_ENABLED=0 \
+            "$cert_python" -B -m pytest -q -p no:cacheprovider --junitxml="$CERT_UID_ROOT/certification-behavioral.xml" tests/test_binding_decimal.py tests/test_runtime_paths.py tests/test_runtime_paths_postgres.py tests/test_recovery_acceptance_crash.py tests/test_recovery_accepted_execution.py tests/test_recovery_entry_gate.py tests/test_recovery_position_repair.py tests/test_recovery_management_readiness.py tests/test_recovery_explicit_context.py tests/test_recovery_fencing.py tests/test_recovery_lock_order.py tests/test_recovery_combined_matrix.py tests/test_task3_entry_integration.py tests/test_cutover_manifest.py tests/test_cutover_files.py tests/test_cutover_postgres.py tests/test_cutover_service.py tests/test_cutover_cli.py tests/test_cutover_first_start.py
 
       - name: Assert behavioral certification has no required skips
         working-directory: Backend
@@ -276,8 +351,9 @@ jobs:
           set -euo pipefail
           ../.venv-cert1/bin/python - <<'PY'
           import xml.etree.ElementTree as ET
-          doc=ET.parse('certification-behavioral.xml')
-          assert doc.findall('.//testcase')
+          import os
+          doc=ET.parse(os.environ['CERT_UID_ROOT']+'/certification-behavioral.xml')
+          assert len(doc.findall('.//testcase'))==567
           assert not doc.findall('.//failure') and not doc.findall('.//error') and not doc.findall('.//skipped')
           print('behavioral_tests_passed=' + str(len(doc.findall('.//testcase'))))
           PY
@@ -315,6 +391,9 @@ jobs:
             test ! -f "$CERT_PG_ROOT/data/postmaster.pid"
             test ! -S "$CERT_PG_ROOT/.s.PGSQL.55443"
             echo "disposable_pg_cleanup=PASS"
+          fi
+          if [ -f /etc/sudoers.d/certification-uid501 ]; then
+            sudo unlink /etc/sudoers.d/certification-uid501
           fi
 
       - name: Final certification summary
