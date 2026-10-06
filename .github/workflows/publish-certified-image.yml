@@ -1,0 +1,53 @@
+name: Publish preserved certified OCI without rebuilding
+on:
+  push:
+    branches: [publication/certified-image-37505453177]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  packages: write
+concurrency:
+  group: publish-certified-image-37505453177
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Retrieve only preserved certified artifact and verify every blob
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -B verify.py retrieve
+          python3 -B verify.py verify image-1.oci.tar > pre-push.json
+      - name: Provision registry-copy tooling on disposable runner only
+        run: |
+          if ! command -v skopeo; then
+            sudo apt-get update -qq
+            sudo apt-get install -y skopeo
+          fi
+          skopeo --version
+      - name: Publish exact certified bytes and retrieve by immutable digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_ACTOR: ${{ github.actor }}
+        run: |
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$GH_ACTOR" --password-stdin
+          trap 'skopeo logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          skopeo copy --preserve-digests oci-archive:image-1.oci.tar docker://ghcr.io/renathaux/nathauxfx-backend:certified-37505453177
+          skopeo copy --preserve-digests docker://ghcr.io/renathaux/nathauxfx-backend@sha256:4f11f091d8ba77192a81569b3e85e101dcccc329c641eddeabd160b13be6fb49 oci-archive:registry-copy.oci.tar
+          python3 -B verify.py verify registry-copy.oci.tar > post-push.json
+          python3 -B verify.py release > release-evidence.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: certified-image-publication-${{ github.run_id }}
+          path: |
+            pre-push.json
+            post-push.json
+            release-evidence.json
+          retention-days: 90
