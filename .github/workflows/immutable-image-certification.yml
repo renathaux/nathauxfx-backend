@@ -1,0 +1,33 @@
+name: Immutable AMD64 image certification
+on:
+  push:
+    branches: [certification/immutable-image-0dbbef6]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: immutable-image-0dbbef6
+  cancel-in-progress: false
+jobs:
+  certify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Native AMD64 packaging and isolated certification
+        run: bash packaging/certify.sh
+      - name: Preserve local OCI artifacts and sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: immutable-image-certification-${{ github.run_id }}
+          path: |
+            evidence/*.json
+            evidence/*.txt
+            evidence/*.log
+            evidence/*.xml
+            evidence/*.oci.tar
+          retention-days: 14
+          compression-level: 0
