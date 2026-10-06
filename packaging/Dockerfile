@@ -18,7 +18,7 @@ COPY app/ /app/
 COPY release/build-record.json /app/build-record.json
 COPY release/expectations.json /opt/flowsignal-release/expectations.json
 COPY start.sh /usr/local/bin/flowsignal-start
-RUN groupadd --gid 1000 flowsignal && useradd --uid 501 --gid 1000 --no-create-home --home-dir /nonexistent flowsignal && \
+RUN /usr/sbin/groupadd --gid 1000 flowsignal && /usr/sbin/useradd --uid 501 --gid 1000 --no-create-home --home-dir /nonexistent flowsignal && \
     mkdir -p /state /cache/tmp && chown -R 501:1000 /state /cache && chmod 0700 /state /cache /cache/tmp && \
     chown -R 0:0 /app /opt/flowsignal-release /opt/venv /usr/local/bin/flowsignal-start && \
     find /app /opt/flowsignal-release /opt/venv -type d -exec chmod 0555 '{}' + && \
