@@ -18,21 +18,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
-    services:
-      postgres:
-        image: postgres:16-bookworm
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: certification-test-only
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres -d postgres"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
-
     env:
       EXPECTED_SNAPSHOT_PARENT: 2f3c933c35c4e0deaf0de97971b3ec9bf7b1d936
       EXPECTED_PACKAGING_SOURCE_SHA: 167d1e3a50de99a56fcb471c1c67b15838bc284b
@@ -40,8 +25,6 @@ jobs:
       EXPECTED_LOCK_SHA256: 1d8e368b5645db69cab33479c56d7db0827155898368a419fc80ab9819ee5736
       EXPECTED_METADATA_SHA256: 8e24bda82fa3cc5bdcf21f19c86eec85eae74e24e115a402066bfafe884e5e89
       DATABASE_URL: "sqlite:///:memory:"
-      VERIFIER_TEST_PG_DSN: postgresql+psycopg2://postgres:certification-test-only@127.0.0.1:5432/postgres
-      CUTOVER_DATABASE_URL: postgresql+psycopg2://postgres:certification-test-only@127.0.0.1:5432/postgres
       PYTHON_DOTENV_DISABLED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
       TZ: UTC
@@ -209,6 +192,33 @@ jobs:
             fi
           done < <(find .venv-cert1 -type f -name '*.so' -print)
 
+      - name: Start job-owned disposable PostgreSQL Unix socket
+        shell: bash
+        run: |
+          set -euo pipefail
+          pg_bin=/usr/lib/postgresql/16/bin
+          test -x "$pg_bin/initdb"
+          test "$(id -u)" -ne 0
+          pg_root=$(mktemp -d /tmp/fs-verifier-pg.XXXXXXXX)
+          test "$(realpath "$pg_root")" = "$pg_root"
+          test ! -L /tmp
+          test -z "$(find "$pg_root" -mindepth 1 -print -quit)"
+          chmod 700 "$pg_root"
+          echo "CERT_PG_ROOT=$pg_root" >> "$GITHUB_ENV"
+          echo "CERT_PG_BIN=$pg_bin" >> "$GITHUB_ENV"
+          "$pg_bin/initdb" -D "$pg_root/data" -U verifier_test -A trust --no-locale >/dev/null
+          "$pg_bin/pg_ctl" -D "$pg_root/data" -o "-k $pg_root -p 55443 -h ''" -l "$pg_root/server.log" start -w
+          "$pg_bin/createdb" -h "$pg_root" -p 55443 -U verifier_test verifier_test
+          pg_pid=$(head -n 1 "$pg_root/data/postmaster.pid")
+          test "$(ps -o uid= -p "$pg_pid" | tr -d ' ')" = "$(id -u)"
+          test -S "$pg_root/.s.PGSQL.55443"
+          dsn="postgresql+psycopg2://verifier_test@/verifier_test?host=$pg_root&port=55443"
+          echo "VERIFIER_TEST_PG_DSN=$dsn" >> "$GITHUB_ENV"
+          echo "CUTOVER_DATABASE_URL=$dsn" >> "$GITHUB_ENV"
+          echo "disposable_pg_fresh_root=$pg_root"
+          echo "disposable_pg_job_owner_uid=$(id -u)"
+          echo "disposable_pg_pid=$pg_pid"
+
       - name: SQLAlchemy, greenlet, and disposable PostgreSQL smoke
         shell: bash
         run: |
@@ -221,8 +231,16 @@ jobs:
           assert greenlet.__version__ == "3.5.6"
           assert asyncio.run(greenlet_spawn(lambda: 42)) == 42
           engine = create_engine(os.environ["VERIFIER_TEST_PG_DSN"])
+          assert os.environ["CUTOVER_DATABASE_URL"] == os.environ["VERIFIER_TEST_PG_DSN"]
+          assert 'host=/tmp/fs-verifier-pg.' in os.environ['VERIFIER_TEST_PG_DSN']
+          assert '/verifier_test?' in os.environ['VERIFIER_TEST_PG_DSN']
           with engine.begin() as conn:
               assert conn.execute(text("select 1")).scalar_one() == 1
+              assert conn.execute(text("select current_database()")).scalar_one() == 'verifier_test'
+              assert conn.execute(text("select current_user")).scalar_one() == 'verifier_test'
+              assert conn.execute(text("select inet_server_addr()")).scalar_one() is None
+              assert conn.execute(text("show listen_addresses")).scalar_one() == ''
+              assert conn.execute(text("show data_directory")).scalar_one() == os.environ['CERT_PG_ROOT'] + '/data'
           engine.dispose()
           print("sqlalchemy_greenlet_postgres=ok")
           PY
@@ -249,7 +267,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ../.venv-cert1/bin/python -m pytest -q             tests/test_binding_decimal.py             tests/test_runtime_paths.py             tests/test_runtime_paths_postgres.py             tests/test_recovery_acceptance_crash.py             tests/test_recovery_accepted_execution.py             tests/test_recovery_entry_gate.py             tests/test_recovery_position_repair.py             tests/test_recovery_management_readiness.py             tests/test_recovery_explicit_context.py             tests/test_recovery_fencing.py             tests/test_recovery_lock_order.py             tests/test_recovery_combined_matrix.py             tests/test_task3_entry_integration.py             tests/test_cutover_manifest.py             tests/test_cutover_files.py             tests/test_cutover_postgres.py             tests/test_cutover_service.py             tests/test_cutover_cli.py             tests/test_cutover_first_start.py
+          ../.venv-cert1/bin/python -m pytest -q --junitxml=certification-behavioral.xml             tests/test_binding_decimal.py             tests/test_runtime_paths.py             tests/test_runtime_paths_postgres.py             tests/test_recovery_acceptance_crash.py             tests/test_recovery_accepted_execution.py             tests/test_recovery_entry_gate.py             tests/test_recovery_position_repair.py             tests/test_recovery_management_readiness.py             tests/test_recovery_explicit_context.py             tests/test_recovery_fencing.py             tests/test_recovery_lock_order.py             tests/test_recovery_combined_matrix.py             tests/test_task3_entry_integration.py             tests/test_cutover_manifest.py             tests/test_cutover_files.py             tests/test_cutover_postgres.py             tests/test_cutover_service.py             tests/test_cutover_cli.py             tests/test_cutover_first_start.py
+
+      - name: Assert behavioral certification has no required skips
+        working-directory: Backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          ../.venv-cert1/bin/python - <<'PY'
+          import xml.etree.ElementTree as ET
+          doc=ET.parse('certification-behavioral.xml')
+          assert doc.findall('.//testcase')
+          assert not doc.findall('.//failure') and not doc.findall('.//error') and not doc.findall('.//skipped')
+          print('behavioral_tests_passed=' + str(len(doc.findall('.//testcase'))))
+          PY
 
       - name: Second clean hash-only install
         shell: bash
@@ -273,6 +304,18 @@ jobs:
           print("second_clean_install=match")
           PY
           cmp installed-profile-1.json installed-profile-2.json
+
+      - name: Clean up job-owned disposable PostgreSQL
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${CERT_PG_ROOT:-}" ] && [ -f "$CERT_PG_ROOT/data/postmaster.pid" ]; then
+            "$CERT_PG_BIN/pg_ctl" -D "$CERT_PG_ROOT/data" stop -m fast -w
+            test ! -f "$CERT_PG_ROOT/data/postmaster.pid"
+            test ! -S "$CERT_PG_ROOT/.s.PGSQL.55443"
+            echo "disposable_pg_cleanup=PASS"
+          fi
 
       - name: Final certification summary
         shell: bash
