@@ -1,0 +1,41 @@
+"""Allowlisted operator diagnostics; never serialize arbitrary exception text."""
+from enum import Enum
+
+
+class BlockerCode(str, Enum):
+    INVALID_REQUEST = 'INVALID_REQUEST'
+    SELECTED_ACCOUNT_MISMATCH = 'SELECTED_ACCOUNT_MISMATCH'
+    DEMO_PROOF_REQUIRED = 'DEMO_PROOF_REQUIRED'
+    INVALID_BROKER_VOLUME = 'INVALID_BROKER_VOLUME'
+    EXISTING_EXPOSURE = 'EXISTING_EXPOSURE'
+    CLEANUP_UNAVAILABLE = 'CLEANUP_UNAVAILABLE'
+    HISTORY_INCOMPLETE = 'HISTORY_INCOMPLETE'
+    HISTORY_IDENTITY_UNRESOLVED = 'HISTORY_IDENTITY_UNRESOLVED'
+    UNRESOLVED_CLOSE = 'UNRESOLVED_CLOSE'
+    IDENTITY_MISMATCH = 'IDENTITY_MISMATCH'
+    SYMBOL_METADATA_INVALID = 'SYMBOL_METADATA_INVALID'
+    QUOTE_INVALID = 'QUOTE_INVALID'
+    PROTECTION_UNSUPPORTED = 'PROTECTION_UNSUPPORTED'
+    ACCOUNT_PERMISSIONS_UNSUPPORTED = 'ACCOUNT_PERMISSIONS_UNSUPPORTED'
+    CREDENTIALS_UNAVAILABLE = 'CREDENTIALS_UNAVAILABLE'
+    BROKER_REJECTED = 'BROKER_REJECTED'
+    BROKER_RESPONSE_INVALID = 'BROKER_RESPONSE_INVALID'
+    BROKER_IO_FAILURE = 'BROKER_IO_FAILURE'
+    RECOVERY_ID_UNKNOWN = 'RECOVERY_ID_UNKNOWN'
+    EXECUTION_FENCED = 'EXECUTION_FENCED'
+    UNEXPECTED_FAILURE = 'UNEXPECTED_FAILURE'
+
+
+class BrokerTestBlocked(ValueError):
+    def __init__(self, code: BlockerCode):
+        self.code = BlockerCode(code)
+        super().__init__(self.code.value)
+
+
+def safe_error_code(exc):
+    code = getattr(exc, 'code', None)
+    if isinstance(code, BlockerCode):
+        return code.value
+    if isinstance(exc, (TimeoutError, OSError)):
+        return BlockerCode.BROKER_IO_FAILURE.value
+    return BlockerCode.UNEXPECTED_FAILURE.value

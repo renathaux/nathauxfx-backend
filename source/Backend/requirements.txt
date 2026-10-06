@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy==2.0.54
+alembic
+psycopg2-binary
+cryptography
+passlib[bcrypt]
+python-jose[cryptography]
+python-multipart
+pydantic
+requests
+pandas
+numpy
+python-dotenv
+certifi
+websockets

@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!.dockerignore
+!app/
+!app/**
+!release/
+!release/build-record.json
+!release/expectations.json
+!start.sh
