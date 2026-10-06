@@ -6,7 +6,9 @@ RUN test "$(python -c 'import platform; print(platform.python_version())')" = 3.
     echo '1d8e368b5645db69cab33479c56d7db0827155898368a419fc80ab9819ee5736  /build/requirements.production.lock' | sha256sum -c - && \
     python -m venv /opt/venv && \
     /opt/venv/bin/python -m pip install --require-hashes --only-binary=:all: --no-deps --no-compile --no-cache-dir -r /build/requirements.production.lock && \
-    /opt/venv/bin/python -m pip check
+    /opt/venv/bin/python -m pip check && \
+    find /opt/venv -type f -name '*.pyc' -delete && \
+    find /opt/venv -type d -name '__pycache__' -empty -delete
 
 FROM docker.io/library/python:3.14.3-slim-bookworm@sha256:c6f0b5b3a167963de3cc7cd97fe1a5d07105c8d27f47507ab31d648b533b05c7
 ENV PATH=/opt/venv/bin:/usr/local/bin:/usr/bin:/bin \
