@@ -16,9 +16,14 @@ def sha(raw):return hashlib.sha256(raw).hexdigest()
 def canonical(obj):return json.dumps(obj,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
 
 def retrieve():
+    class ArtifactRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            redirected=super().redirect_request(req,fp,code,msg,headers,newurl)
+            redirected.remove_header('Authorization')
+            return redirected
     req=urllib.request.Request('https://api.github.com/repos/renathaux/nathauxfx-backend/actions/artifacts/11431930860/zip',
         headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
-    with urllib.request.urlopen(req) as src,open('evidence.zip','xb') as dst:
+    with urllib.request.build_opener(ArtifactRedirect()).open(req) as src,open('evidence.zip','xb') as dst:
         while chunk:=src.read(1024*1024):dst.write(chunk)
 
 def extract():
