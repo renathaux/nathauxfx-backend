@@ -298,6 +298,12 @@ jobs:
           sudo chmod 700 "$cert_root"
           sudo setfacl -m "u:$(id -u):r-x" "$cert_root"
           sudo setpriv --reuid=501 --regid=1000 --clear-groups mkdir -m 700 "$cert_root/state" "$cert_root/cache" "$cert_root/tmp"
+          # Two unchanged negative fixtures deliberately create foreign-owned files.
+          # Grant chown only for their exact fresh-run paths, not directories or PG data.
+          foreign="$cert_root/tmp/pytest-of-$cert_user/pytest-0/test_foreign_owned_source_is_r0/source/foreign"
+          wrong_owner="$cert_root/tmp/pytest-of-$cert_user/pytest-0/test_copy_whole_set_destinatio9/state/visits.json"
+          printf '%s ALL=(root) NOPASSWD: /usr/bin/chown 0\\:0 %s, /usr/bin/chown 0 %s\n' "$cert_user" "$foreign" "$wrong_owner" | sudo tee -a /etc/sudoers.d/certification-uid501 >/dev/null
+          sudo visudo -cf /etc/sudoers.d/certification-uid501
           echo "CERT_UID_ROOT=$cert_root" >> "$GITHUB_ENV"
 
       - name: UID 501 access preflight
