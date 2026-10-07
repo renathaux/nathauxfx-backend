@@ -20,10 +20,10 @@ if [[ "${V3B_STREAM_RECOVERY_ON_STARTUP:-}" == "48869794" ]]; then
   do
     read -r symbol storage_key <<< "$spec"
     echo "V3B_STREAM_RECOVERY_DRY_RUN symbol=$symbol storage_key=$storage_key"
-    if python scripts/v3b_5m_stream_recovery.py       --account-id 48869794       --symbol "$symbol"       --timeframe 15m       --storage-key "$storage_key"       --dry-run       --lookback-candles 250
+    if python -m scripts.v3b_5m_stream_recovery       --account-id 48869794       --symbol "$symbol"       --timeframe 15m       --storage-key "$storage_key"       --dry-run       --lookback-candles 250
     then
       echo "V3B_STREAM_RECOVERY_APPLY symbol=$symbol storage_key=$storage_key"
-      if ! python scripts/v3b_5m_stream_recovery.py         --account-id 48869794         --symbol "$symbol"         --timeframe 15m         --storage-key "$storage_key"         --apply         --lookback-candles 250
+      if ! python -m scripts.v3b_5m_stream_recovery         --account-id 48869794         --symbol "$symbol"         --timeframe 15m         --storage-key "$storage_key"         --apply         --lookback-candles 250
       then
         echo "V3B_STREAM_RECOVERY_APPLY_FAILED symbol=$symbol"
         recovery_failed=1
