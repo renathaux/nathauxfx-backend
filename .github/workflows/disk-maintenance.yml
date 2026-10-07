@@ -1,0 +1,57 @@
+name: Certify and publish temporary disk maintenance
+on:
+  push:
+    branches: [certification/disk-maintenance-20261006]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: disk-maintenance-20261006
+  cancel-in-progress: false
+jobs:
+  certify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Native AMD64 double build and offline certification
+        run: bash certify.sh
+      - name: Provision registry copy tooling on disposable runner only
+        run: |
+          if ! command -v skopeo; then
+            sudo apt-get update -qq
+            sudo apt-get install -y skopeo
+          fi
+      - name: Publish tested OCI without rebuild and verify registry bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$GH_ACTOR" --password-stdin
+          trap 'skopeo logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          digest=$(python3 -c 'import json; print(json.load(open("evidence/oci-1.json"))["manifest_digest"])')
+          skopeo copy --preserve-digests oci-archive:evidence/image-1.oci.tar docker://ghcr.io/renathaux/nathauxfx-backend:disk-maintenance-20261006
+          skopeo copy --preserve-digests "docker://ghcr.io/renathaux/nathauxfx-backend@$digest" oci-archive:evidence/registry-copy.oci.tar
+          python3 -B certify.py oci evidence/registry-copy.oci.tar > evidence/registry.json
+          cmp evidence/oci-1.json evidence/registry.json
+          python3 - <<'PY'
+          import json,pathlib
+          p=pathlib.Path('evidence');x=json.loads((p/'summary.json').read_text())
+          x.update(publication='PASS',registry_reference='ghcr.io/renathaux/nathauxfx-backend@'+x['image']['manifest_digest'])
+          (p/'release.json').write_text(json.dumps(x,sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: disk-maintenance-${{ github.run_id }}
+          path: |
+            evidence/*.json
+            evidence/*.log
+            evidence/*.txt
+            evidence/*.oci.tar
+          retention-days: 14
+          compression-level: 0
