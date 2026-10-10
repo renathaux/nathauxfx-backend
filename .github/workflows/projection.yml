@@ -67,7 +67,7 @@ jobs:
 
           docker pull "$IMAGE" > /dev/null
 
-          docker run \
+                    if ! docker run \
             --rm \
             --network none \
             --read-only \
@@ -80,7 +80,14 @@ jobs:
             "$IMAGE" \
             -B -m alembic -c alembic.ini upgrade 20261001_0029 \
             > "$EVIDENCE_ROOT/migrations.log" 2>&1
-
+          then
+            echo "DISPOSABLE_MIGRATION_FAILED"
+            sed -E \
+              -e 's#postgresql[^ ]*#postgresql://REDACTED#g' \
+              -e 's#postgres[^ ]*#postgres://REDACTED#g' \
+              "$EVIDENCE_ROOT/migrations.log" | tail -n 80
+            exit 1
+          fi
           python3 - <<'PY'
           import urllib.request, os, pathlib
 
