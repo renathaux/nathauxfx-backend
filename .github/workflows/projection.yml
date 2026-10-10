@@ -40,6 +40,7 @@ jobs:
           EVIDENCE_ROOT="$RUNNER_TEMP/projection-evidence"
 
           mkdir -m 700 "$PRIVATE_ROOT" "$EVIDENCE_ROOT"
+          mkdir -m 700 "$PRIVATE_ROOT/runtime-state" "$PRIVATE_ROOT/runtime-cache"
           export PRIVATE_ROOT EVIDENCE_ROOT
 
           PG_BIN="$(pg_config --bindir)"
@@ -67,13 +68,15 @@ jobs:
 
           docker pull "$IMAGE" > /dev/null
 
-                    if ! docker run \
+                              if ! docker run \
             --rm \
             --network none \
             --read-only \
             --user "$(id -u):$(id -g)" \
             -v "$PRIVATE_ROOT:$PRIVATE_ROOT" \
             -e DATABASE_URL="$CUTOVER_DATABASE_URL" \
+            -e FLOWSIGNAL_STATE_ROOT="$PRIVATE_ROOT/runtime-state" \
+            -e FLOWSIGNAL_CACHE_ROOT="$PRIVATE_ROOT/runtime-cache" \
             -e PYTHON_DOTENV_DISABLED=1 \
             -e PYTHONDONTWRITEBYTECODE=1 \
             --entrypoint /opt/venv/bin/python \
@@ -121,6 +124,8 @@ jobs:
             -e PRIVATE_ROOT \
             -e EVIDENCE_ROOT \
             -e CUTOVER_DATABASE_URL \
+            -e FLOWSIGNAL_STATE_ROOT="$PRIVATE_ROOT/runtime-state" \
+            -e FLOWSIGNAL_CACHE_ROOT="$PRIVATE_ROOT/runtime-cache" \
             -e PROJECTION_KEY \
             -e PYTHON_DOTENV_DISABLED=1 \
             -e PYTHONDONTWRITEBYTECODE=1 \
