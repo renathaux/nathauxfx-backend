@@ -1,0 +1,158 @@
+name: Private-input projection inventory certification
+
+on:
+  push:
+    branches:
+      - certification/projection-20261008-private-input
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    if: github.ref == 'refs/heads/certification/projection-20261008-private-input'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      IMAGE: ghcr.io/renathaux/nathauxfx-backend@sha256:4f11f091d8ba77192a81569b3e85e101dcccc329c641eddeabd160b13be6fb49
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Isolated inventory only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECTION_KEY: ${{ secrets.CUTOVER_PROJECTION_20261008_KEY }}
+          ENCRYPTED_ASSET_ID: ${{ vars.CUTOVER_PROJECTION_20261008_ASSET_ID }}
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+
+          test "$(uname -m)" = x86_64
+          test -n "$PROJECTION_KEY"
+
+          PRIVATE_ROOT="$RUNNER_TEMP/projection-private"
+          EVIDENCE_ROOT="$RUNNER_TEMP/projection-evidence"
+
+          mkdir -m 700 "$PRIVATE_ROOT" "$EVIDENCE_ROOT"
+          export PRIVATE_ROOT EVIDENCE_ROOT
+
+          PG_BIN="$(pg_config --bindir)"
+
+          "$PG_BIN/initdb" \
+            -D "$PRIVATE_ROOT/pgdata" \
+            -U verifier_test \
+            -A trust > /dev/null
+
+          mkdir -m 700 "$PRIVATE_ROOT/socket"
+
+          "$PG_BIN/pg_ctl" \
+            -D "$PRIVATE_ROOT/pgdata" \
+            -l "$PRIVATE_ROOT/pg.log" \
+            -o "-k $PRIVATE_ROOT/socket -p 55443 -c listen_addresses=''" \
+            start > /dev/null
+
+          "$PG_BIN/createdb" \
+            -h "$PRIVATE_ROOT/socket" \
+            -p 55443 \
+            -U verifier_test \
+            verifier_test
+
+          export CUTOVER_DATABASE_URL="postgresql://verifier_test@/verifier_test?host=$PRIVATE_ROOT/socket&port=55443"
+
+          docker pull "$IMAGE" > /dev/null
+
+          docker run \
+            --rm \
+            --network none \
+            --read-only \
+            --user "$(id -u):$(id -g)" \
+            -v "$PRIVATE_ROOT:$PRIVATE_ROOT" \
+            -e DATABASE_URL="$CUTOVER_DATABASE_URL" \
+            -e PYTHON_DOTENV_DISABLED=1 \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            --entrypoint /opt/venv/bin/python \
+            "$IMAGE" \
+            -B -m alembic -c alembic.ini upgrade 20261001_0029 \
+            > "$EVIDENCE_ROOT/migrations.log" 2>&1
+
+          python3 - <<'PY'
+          import urllib.request, os, pathlib
+
+          asset = os.environ['ENCRYPTED_ASSET_ID']
+          assert asset.isascii() and asset.isdecimal()
+
+          req = urllib.request.Request(
+              f'https://api.github.com/repos/renathaux/nathauxfx-backend/releases/assets/{asset}',
+              headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/octet-stream'
+              }
+          )
+
+          with urllib.request.urlopen(req, timeout=60) as resp:
+              raw = resp.read()
+
+          (pathlib.Path(os.environ['PRIVATE_ROOT']) / 'input.enc').write_bytes(raw)
+          PY
+
+          unset GH_TOKEN
+
+          docker run \
+            --rm \
+            --network none \
+            --read-only \
+            --user "$(id -u):$(id -g)" \
+            -v "$PRIVATE_ROOT:$PRIVATE_ROOT" \
+            -v "$EVIDENCE_ROOT:$EVIDENCE_ROOT" \
+            -v "$GITHUB_WORKSPACE:/cert:ro" \
+            -e PRIVATE_ROOT \
+            -e EVIDENCE_ROOT \
+            -e CUTOVER_DATABASE_URL \
+            -e PROJECTION_KEY \
+            -e PYTHON_DOTENV_DISABLED=1 \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            --entrypoint /opt/venv/bin/python \
+            "$IMAGE" \
+            -B /cert/certify.py
+
+      - name: Remove private runner files
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          set -eu
+
+          PG_BIN="$(pg_config --bindir)"
+
+          if test -f "$RUNNER_TEMP/projection-private/pgdata/postmaster.pid"; then
+            "$PG_BIN/pg_ctl" \
+              -D "$RUNNER_TEMP/projection-private/pgdata" \
+              stop -m fast > /dev/null || true
+          fi
+
+          python3 - <<'PY'
+          import os, pathlib, shutil
+
+          p = pathlib.Path(os.environ['RUNNER_TEMP']) / 'projection-private'
+
+          if p.exists():
+              for root, dirs, files in os.walk(p):
+                  os.chmod(root, 0o700)
+              shutil.rmtree(p)
+
+          assert not p.exists()
+          print('PRIVATE_RUNNER_FILES_REMOVED')
+          PY
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sanitized-projection-certification
+          path: ${{ runner.temp }}/projection-evidence/result.json
+          if-no-files-found: error
+          retention-days: 3
