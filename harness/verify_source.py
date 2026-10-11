@@ -34,6 +34,7 @@ def verify(root):
     assert {p.relative_to(root).as_posix() for p in paths if p.is_file()} == expected, 'EXPORT_EXTRA_FILES'
     assert not any(p.name in ('.git', '__pycache__') or p.name.startswith('.env') for p in paths)
     assert not (root/'Backend/database/flowsignal.db').exists()
+    assert not (root/'Backend/scripts/migrate_sqlite_to_neon.py').exists()
     assert not list((root/'Backend/data').glob('*.json'))
     for name, pin in [('requirements.production.lock', LOCK), ('requirements.production.metadata.json', METADATA)]:
         assert hashlib.sha256((root/'Backend'/name).read_bytes()).hexdigest() == pin

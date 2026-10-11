@@ -26,3 +26,16 @@ the approved manifest. No fixture database is an artifact or build input.
 Backend suites are the first certification gate. Production/maintenance builds
 and container certification remain subsequent gates; backend success alone is
 not a release certification or authorization to publish images.
+
+## Pinned syntax-only input
+
+harness/test-only-inputs/migrate_sqlite_to_neon.py is copied verbatim from the
+same original path under Backend/scripts at composite
+63b42795ca26bdecb1be6d7758c8ae757eee90d4, Git blob
+cc969a9814e3ee3d6c7c8ebbc34df7eb567be7f4. Length 5788 bytes; SHA256
+944d6cfd065d9f893344d0a28860813c694655706177f7b2c261de245f68480a.
+The independent pin is in fixture.py, not read from the script itself.
+The plugin materializes it exclusively during the database configuration
+syntax test call, which only reads UTF-8 and ast.parse. No import or execution.
+Unconditional deletion precedes exact source verification. No script bytes
+enter release source, build context, images or evidence artifacts.

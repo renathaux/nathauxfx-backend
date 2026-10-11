@@ -3,9 +3,29 @@ import tempfile
 import unittest
 from pathlib import Path
 import fixture
+import ast
 
 
 class FixtureTests(unittest.TestCase):
+    def test_script_exact_bytes_and_exception_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'migrate_sqlite_to_neon.py'
+            with self.assertRaisesRegex(RuntimeError, 'syntax-test interruption'):
+                with fixture.temporary_script(path):
+                    self.assertEqual(path.read_bytes(), fixture.SCRIPT.read_bytes())
+                    ast.parse(path.read_text(encoding='utf-8'))
+                    raise RuntimeError('syntax-test interruption')
+            self.assertFalse(path.exists())
+
+    def test_script_existing_path_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'migrate_sqlite_to_neon.py'
+            path.write_bytes(b'preserve')
+            with self.assertRaises(FileExistsError):
+                with fixture.temporary_script(path):
+                    pass
+            self.assertEqual(path.read_bytes(), b'preserve')
+
     def test_empty_fixed_legacy_contract_and_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
