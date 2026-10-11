@@ -1,11 +1,11 @@
-name: Recovery deadline AMD64 recertification
+name: PRE-ENABLE verifier AMD64 recertification
 on:
   push:
-    branches: [certification/amd64-deadline-20261011]
+    branches: [certification/amd64-preenable-20261011]
 permissions:
   contents: read
 concurrency:
-  group: deadline-release-amd64-20261011
+  group: preenable-release-amd64-20261011
   cancel-in-progress: false
 jobs:
   backend:

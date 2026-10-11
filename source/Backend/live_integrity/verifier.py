@@ -71,14 +71,24 @@ def verify(connection,owner,strategy_id,symbol,runtime,deadline,*,reader_factory
     # This gate precedes metadata/socket activity and never edits v11.
     if int(saved['definition']['risk'].get('max_concurrent_positions',1))>1:
         raise ValueError('STRATEGY_STUDIO_LIVE_MULTI_POSITION_NOT_SUPPORTED')
-    if runtime.get('live_auto_enabled') is not True:
-        raise ValueError('LIVE_AUTO_DISABLED')
+    actual_live = runtime.get('live_auto_enabled') if isinstance(runtime,dict) else None
+    if actual_live is True:
+        raise ValueError('LIVE_AUTO_ALREADY_ENABLED_DURING_PREENABLE_VERIFY')
+    if actual_live is not False:
+        raise ValueError('LIVE_AUTO_STATE_UNVERIFIED_DURING_PREENABLE_VERIFY')
     handoff = snapshots.handoff(connection,owner,strategy_id)
     selection = snapshots.selected(connection)
     policy_state=snapshots.admission_state(connection)
+    if policy_state['live_enabled'] is True:
+        raise ValueError('LIVE_AUTO_ALREADY_ENABLED_DURING_PREENABLE_VERIFY')
+    if policy_state['live_enabled'] is not False:
+        raise ValueError('LIVE_AUTO_STATE_UNVERIFIED_DURING_PREENABLE_VERIFY')
     # File IO stays in the killable worker, never in the application snapshot.
     # Missing private server evidence cannot be replaced by caller risk values.
     runtime=copy.deepcopy(runtime)
+    # Hypothetical switch only: parent evidence and durable policy stay OFF.
+    # Every other input still passes through the unchanged admission gates.
+    runtime['live_auto_enabled']=True
     runtime.pop('risk_settings',None)
     risk_state=risk_snapshot.read(runtime['risk_settings_path']) if runtime.get('risk_settings_path') else None
     if risk_state is not None:
@@ -143,15 +153,14 @@ def verify(connection,owner,strategy_id,symbol,runtime,deadline,*,reader_factory
         admission=validate_admission(runtime,news_mode=policy_state['news_mode'],symbol=symbol,
             side=binding['frozen_plan']['side'],fundamental_policy=binding['frozen_plan']['fundamental_policy'],
             now=time.time(),monotonic_now=time.monotonic())
-        if admission['ok'] and not policy_state['live_enabled']:
-            admission={'ok':False,'reason':'LIVE_AUTO_DISABLED'}
         # Validate freshness after all potentially slow DB/file rechecks, not
         # before them. This is the snapshot decision boundary, never dispatch.
         intent,validation = project_verified(binding,current,current_metadata,quote,owner=owner)
         if time.monotonic()>=deadline:
             raise TimeoutError('DIAGNOSTIC_TIMEOUT')
     identity = dict(binding['strategy_identity']); del identity['owner_id']
-    return dict(decision='WOULD_ALLOW' if admission['ok'] else 'WOULD_BLOCK',decision_scope='SNAPSHOT_INTEGRITY_ONLY',block_reasons=[] if admission['ok'] else [admission['reason']],
+    return dict(decision='WOULD_ALLOW' if admission['ok'] else 'WOULD_BLOCK',decision_scope='PRE_ENABLE_SNAPSHOT_INTEGRITY_ONLY',block_reasons=[] if admission['ok'] else [admission['reason']],
+        live_auto_currently_enabled=False,live_auto_simulated_for_pre_enable_check=True,
         REAL_ORDER_DISPATCH_AVAILABLE=False,owner_reference=hashlib.sha256(owner.encode()).hexdigest(),
         strategy=dict(name=saved['name'],**identity),setup_id=setup,setup_persisted=False,
         frozen_plan_hash=binding['frozen_plan_hash'],order_intent=intent.safe_projection(),

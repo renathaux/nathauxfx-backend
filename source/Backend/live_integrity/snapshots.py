@@ -62,7 +62,11 @@ def admission_state(connection):
     rows=connection.execute(text("SELECT setting_name,setting_value,updated_at FROM runtime_settings WHERE setting_name IN ('live_auto_trade_enabled','news_trading_mode') ORDER BY setting_name")).mappings().all()
     values={r['setting_name']:r['setting_value'] for r in rows}
     # Missing/invalid durable switches are unknown, never a guessed permission.
-    return dict(live_enabled=str(values.get('live_auto_trade_enabled','')).strip().lower() in ('true','1','yes','on'),
+    raw=values.get('live_auto_trade_enabled')
+    normalized=raw.strip().lower() if isinstance(raw,str) else None
+    live_enabled=(True if normalized in ('true','1','yes','on') else
+                  False if normalized in ('false','0','no','off') else None)
+    return dict(live_enabled=live_enabled,
                 news_mode=str(values.get('news_trading_mode','UNKNOWN')).strip().upper(),revisions=[dict(r) for r in rows])
 
 

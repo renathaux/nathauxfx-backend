@@ -5886,7 +5886,8 @@ def capture_integrity_runtime():
     shared=sys.modules.get('strategies.shared')
     fetches={} if shared is None else {s+':'+tf:shared.CTRADER_LAST_SUCCESS_TIMES.get(s+':'+tf) for s in ('EURUSD','XAUUSD') for tf in ('5min','15min','1h')}
     fetches={k:v.timestamp() if isinstance(v,datetime) and v.tzinfo is not None else None for k,v in fetches.items()}
-    return {'live_auto_enabled':LIVE_AUTO_TRADE_ENABLED.get('enabled') is True,
+    actual_live=LIVE_AUTO_TRADE_ENABLED.get('enabled') if isinstance(LIVE_AUTO_TRADE_ENABLED,dict) else None
+    return {'live_auto_enabled':actual_live if type(actual_live) is bool else None,
             'active_orders':any(bool(v) for v in tuple(LIVE_ACTIVE_ORDERS.values())),
             'inflight':bool(LIVE_ORDER_IN_FLIGHT),
             'risk_settings_path':str(settings.SETTINGS_PATH) if settings is not None else None,

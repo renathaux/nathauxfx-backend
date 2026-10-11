@@ -33,6 +33,8 @@ def current_case(pg,monkeypatch):
         session.merge(StrategyStudioSelection(owner_id=owner,strategy_id=strategy_id,activated_at=now,updated_at=now))
         session.merge(StrategyStudioLiveState(owner_id=owner,enabled=True,enabled_strategy_id=strategy_id,enabled_at=now,updated_at=now))
         session.merge(RuntimeSetting(setting_name='ctrader_active_account',setting_value=json.dumps({'account_id':'7','env':'demo'}),updated_at=now,updated_by='fixture'))
+        session.merge(RuntimeSetting(setting_name='live_auto_trade_enabled',setting_value='false',updated_at=now,updated_by='fixture'))
+        session.merge(RuntimeSetting(setting_name='news_trading_mode',setting_value='OFF',updated_at=now,updated_by='fixture'))
         session.commit()
     timeline=MarketFactsTimeline(candles={T0:candle(T0,1.099,1.101,1.098,1.1001)},events={T0:event(invalidation=1.0951,trigger_close=1.1001)},trends={},timestamps=[T0],trading_swings=[])
     bundle={'5m':pd.DataFrame({'Close':[1.1001]},index=[T0])}
@@ -75,7 +77,7 @@ def test_real_owner_evaluator_intent_no_database_or_shared_mutations(current_cas
     shared=copy.deepcopy((evaluator.PIP_SIZE,market_facts.POINT_SIZE,api.LIVE_AUTO_TRADE_ENABLED,api.LIVE_ACCOUNT_STATE,api.LIVE_ACTIVE_ORDERS,ctrader_connector.CTRADER_CANDLE_CACHE))
     with read_only(c['pg']) as conn:
         with single_flight(conn):
-            result=verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':True},time.monotonic()+10,reader_factory=c['Broker'])
+            result=verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':False},time.monotonic()+10,reader_factory=c['Broker'])
     assert result['snapshot_integrity']=='PASS'
     assert result['decision']=='WOULD_BLOCK'  # Full production admission is not inferred.
     assert result['REAL_ORDER_DISPATCH_AVAILABLE'] is False
@@ -105,7 +107,7 @@ def test_controlled_blocks_without_strategy_or_lifecycle_mutation(current_case,c
     before=database_digest(c['pg'])
     with read_only(c['pg']) as conn:
         with pytest.raises(ValueError,match={'stale_quote':'QUOTE_STALE','metadata_change':'METADATA_CHANGED','unsupported':'MULTI_POSITION_NOT_SUPPORTED'}[case]):
-            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':True},time.monotonic()+10,reader_factory=c['Broker'])
+            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':False},time.monotonic()+10,reader_factory=c['Broker'])
     assert database_digest(c['pg'])==before
     assert c['state']['opened']==c['state']['closed']
 
@@ -172,7 +174,7 @@ def test_existing_consumed_setup_cannot_be_recreated(current_case,monkeypatch):
     monkeypatch.setattr(snapshots,'existing_setup',lambda *args:{'status':'CONSUMED'},raising=False)
     with read_only(c['pg']) as conn:
         with pytest.raises(ValueError,match='SETUP_NOT_ELIGIBLE'):
-            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':True},time.monotonic()+10,reader_factory=c['Broker'])
+            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':False},time.monotonic()+10,reader_factory=c['Broker'])
 
 
 def test_generation_cutover_during_evaluation_blocks(current_case,monkeypatch):
@@ -185,7 +187,7 @@ def test_generation_cutover_during_evaluation_blocks(current_case,monkeypatch):
     monkeypatch.setattr(snapshots,'generation_state',generation,raising=False)
     with read_only(c['pg']) as conn:
         with pytest.raises(ValueError,match='GENERATION_CHANGED'):
-            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':True},time.monotonic()+10,reader_factory=c['Broker'])
+            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':False},time.monotonic()+10,reader_factory=c['Broker'])
 
 
 def test_missing_production_admission_state_never_claims_final_authorization(current_case):
@@ -193,7 +195,7 @@ def test_missing_production_admission_state_never_claims_final_authorization(cur
     from live_integrity.read_store import read_only
     c=current_case
     with read_only(c['pg']) as conn:
-        result=verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':True},time.monotonic()+10,reader_factory=c['Broker'])
+        result=verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':False},time.monotonic()+10,reader_factory=c['Broker'])
     assert result['decision']=='WOULD_BLOCK'
     assert result['block_reasons']==['PRODUCTION_ADMISSION_STATE_UNAVAILABLE']
     assert result['final_integrity_authorization']=='NOT_PROVEN'
@@ -217,7 +219,7 @@ def test_existing_frozen_metadata_is_not_upgraded(current_case,monkeypatch):
         row=dict(owner_id=c['owner'],strategy_id=c['strategy_id'],account_id='7',account_scope=selection['scope'],symbol='EURUSD',direction='BUY',status='ELIGIBLE',entry_binding=binding,definition_snapshot=c['config'])
         monkeypatch.setattr(snapshots,'existing_setup',lambda *args:copy.deepcopy(row))
         with pytest.raises(ValueError,match='METADATA_STALE'):
-            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':True},time.monotonic()+10,reader_factory=c['Broker'])
+            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':False},time.monotonic()+10,reader_factory=c['Broker'])
 
 
 def test_confirmation_requires_persisted_ready_watermark(current_case):
@@ -236,9 +238,9 @@ def test_complete_owner_bound_read_only_admission_reaches_nonexecuting_allow(cur
     from test_live_integrity_admission import evidence
     c=current_case
     with c['pg'].begin() as conn:
-        conn.execute(text("INSERT INTO runtime_settings(setting_name,setting_value,updated_at,updated_by) VALUES ('live_auto_trade_enabled','true',NOW(),'fixture') ON CONFLICT(setting_name) DO UPDATE SET setting_value='true'"))
+        conn.execute(text("INSERT INTO runtime_settings(setting_name,setting_value,updated_at,updated_by) VALUES ('live_auto_trade_enabled','false',NOW(),'fixture') ON CONFLICT(setting_name) DO UPDATE SET setting_value='false'"))
         conn.execute(text("INSERT INTO runtime_settings(setting_name,setting_value,updated_at,updated_by) VALUES ('news_trading_mode','OFF',NOW(),'fixture') ON CONFLICT(setting_name) DO UPDATE SET setting_value='OFF'"))
-    before=database_digest(c['pg']); runtime=evidence()
+    before=database_digest(c['pg']); runtime=evidence(); runtime['live_auto_enabled']=False
     path=tmp_path/'settings.json'; path.write_text(json.dumps({'risk':runtime.pop('risk_settings')}))
     runtime['risk_settings_path']=str(path)
     original=copy.deepcopy(runtime)
@@ -262,7 +264,7 @@ def test_existing_definition_snapshot_must_match_binding(current_case,monkeypatc
         row=dict(owner_id=c['owner'],strategy_id=c['strategy_id'],account_id='7',account_scope=selection['scope'],symbol='EURUSD',direction='BUY',status='ELIGIBLE',entry_binding=binding,definition_snapshot={})
         monkeypatch.setattr(snapshots,'existing_setup',lambda *args:copy.deepcopy(row))
         with pytest.raises(ValueError,match='STRATEGY_VERSION_CHANGED'):
-            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':True},time.monotonic()+10,reader_factory=c['Broker'])
+            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':False},time.monotonic()+10,reader_factory=c['Broker'])
 
 
 @pytest.mark.parametrize('generation',[None,1])
@@ -281,7 +283,7 @@ def test_risk_settings_change_during_broker_reads_blocks(current_case,tmp_path,m
     from live_integrity import verifier
     from live_integrity.read_store import read_only
     from test_live_integrity_admission import evidence
-    c=current_case; runtime=evidence()
+    c=current_case; runtime=evidence(); runtime['live_auto_enabled']=False
     path=tmp_path/'settings.json';path.write_text(json.dumps({'risk':runtime.pop('risk_settings')}))
     runtime['risk_settings_path']=str(path)
     original=c['Broker'].quote
@@ -312,7 +314,7 @@ def test_existing_generation_links_rechecked_after_validation(current_case,monke
             return [] if len(calls)==1 else [{'unexpected':'new link'}]
         monkeypatch.setattr(snapshots,'existing_generations',links)
         with pytest.raises(ValueError,match='SETUP_GENERATION_INVALID'):
-            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':True},time.monotonic()+10,reader_factory=c['Broker'])
+            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':False},time.monotonic()+10,reader_factory=c['Broker'])
 
 
 def test_quote_expiry_during_final_database_rechecks_blocks(current_case,monkeypatch):
@@ -327,4 +329,4 @@ def test_quote_expiry_during_final_database_rechecks_blocks(current_case,monkeyp
     monkeypatch.setattr(snapshots,'admission_state',policy)
     with read_only(c['pg']) as conn:
         with pytest.raises(ValueError,match='BROKER_QUOTE_STALE'):
-            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':True},time.monotonic()+10,reader_factory=c['Broker'])
+            verifier.verify(conn,c['owner'],c['strategy_id'],'EURUSD',{'live_auto_enabled':False},time.monotonic()+10,reader_factory=c['Broker'])
