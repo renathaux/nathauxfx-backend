@@ -93,6 +93,7 @@ assert actual==expected and len(actual)==39 and actual['greenlet']=='3.5.6'
 print(json.dumps({'packages':actual,'installer_tooling':tooling},sort_keys=True))
 PY
 "$cert_root/venv/bin/python" -B -m pip install --target "$cert_root/test-tools" --only-binary=:all: --no-compile --no-cache-dir pytest==8.4.2
+"$cert_root/venv/bin/python" -B -m pip install --target "$cert_root/test-tools" --require-hashes --no-deps --only-binary=:all: --no-compile --no-cache-dir -r harness/test-client.lock
 cp -R source "$cert_root/source"
 cp -R harness "$cert_root/harness"
 # Only disposable job paths change ownership; the frozen checkout is untouched.
