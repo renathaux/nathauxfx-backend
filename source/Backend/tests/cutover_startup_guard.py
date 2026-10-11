@@ -1,29 +1,148 @@
-"""Executable architecture rule for startup's deliberately narrow RO boundary."""
+"""Startup has no cutover command capability.
+
+Legacy adoption retains its exact reviewed read-only call sites. Terminated
+ready-owner handoff has a separate, explicit administrative read-only boundary;
+it is not callable by ordinary startup. Neither exception grants cutover commands
+or filesystem/checkpoint writers. The sole administrative DB mutation remains
+the already-reviewed store.relinquish call, not acquisition or recovery startup.
+Ordinary startup cannot import the administrative module at all: resolving a
+local alias is not a substitute for excluding the capability at its import.
+"""
 import ast
+
+
+def _static_string(node):
+    """Fold only literal strings; never execute or resolve runtime values."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _static_string(node.left), _static_string(node.right)
+        return left + right if left is not None and right is not None else None
+    if isinstance(node, ast.JoinedStr):
+        # No FormattedValue, even if its expression happens to look constant.
+        if all(isinstance(part, ast.Constant) and isinstance(part.value, str)
+               for part in node.values):
+            return ''.join(part.value for part in node.values)
+    return None
 
 
 def check_startup(source, module):
     allowed = {
         ('legacy_adoption', '_transport'): {'read_original_transport', '_destination_preflight'},
         ('legacy_adoption', 'adopt_verified_cutover'): {'_VerificationTree'},
+        ('owner_handoff', '_ready_authority'): {'_verify_coverage', 'decode_manifest'},
+        ('owner_handoff', 'relinquish_terminated_ready_owner'): {'_VerificationTree'},
     }
     commands = {'inventory_state', 'copy_state', 'verify_state'}
+    admin = {'_ready_authority', 'relinquish_terminated_ready_owner'}
+    # Closed import/call capabilities for these two functions only. In
+    # particular, an unrelated symbol from checkpoints/store is NOT permission
+    # to import a writer or ownership-acquisition function from that module.
+    admin_imports = {
+        '_ready_authority': {
+            'sqlalchemy': {'select', 'or_'},
+            'models': {'RecoveryLegacyAdoption'},
+            'startup_recovery.adoption_evidence': {'KINDS', 'AdoptedEnvelope',
+                'validate_adoption_receipt', 'checked_adopted_envelope'},
+            'startup_recovery.legacy_adoption': {'_receipt', '_heads', 'classify_retry'},
+            'startup_recovery.cutover_manifest': {'decode_manifest'},
+            'startup_recovery.cutover_evidence': {'_verify_coverage'},
+        },
+        'relinquish_terminated_ready_owner': {
+            'pathlib': {'Path'},
+            'startup_recovery.cutover_evidence': {'_VerificationTree'},
+        },
+    }
+    common_calls = {'require', '_digest', '_encoded', '_parse', '_valid_hash', 'asdict', 'dict'}
+    admin_calls = {
+        '_ready_authority': common_calls | {'select', 'or_', 'len', 'set', 'sorted', 'str',
+            '_receipt', '_heads', 'AdoptedEnvelope', 'validate_adoption_receipt',
+            'checked_adopted_envelope', 'classify_retry', 'decode_manifest', '_verify_coverage'},
+        'relinquish_terminated_ready_owner': common_calls | {'isinstance', 'type', 'bool',
+            'callable', 'getattr', 'safety_reader', 'safety', 'ManagerToken', 'Path',
+            '_VerificationTree', 'reconciliation_uow', '_ready_authority',
+            'HandoffEvidence', 'RelinquishmentResult', 'RecoveryError'},
+    }
+    admin_methods = {
+        '_ready_authority': {'tree': {'entries', 'read'}, 'store': {'scope_key'},
+            'session': {'scalars', 'all'}, 'select': {'where', 'execution_options'},
+            'envelopes': {'items'}, 'projections': {'append'}, 'token': {'upper'}},
+        'relinquish_terminated_ready_owner': {'tree': {'shared'}, 'doc': {'get'},
+            'root': {'is_absolute'}, 'safety_reader': {'database'},
+            'store': {'require_owner', '_unsettled', 'relinquish'}},
+    }
+    protected_names = set().union(*admin_calls.values())
+
+    def receiver_root(node):
+        while isinstance(node, (ast.Call, ast.Attribute)):
+            node = node.func if isinstance(node, ast.Call) else node.value
+        return node.id if isinstance(node, ast.Name) else None
+
     class Guard(ast.NodeVisitor):
         function = None
 
         def visit_FunctionDef(self, node):
             previous = self.function
-            self.function = node.name
+            assert not self.administrative()  # no hidden nested capability scope
+            if module == 'owner_handoff' and node.name in admin:
+                assert type(node) is ast.FunctionDef
+            self.function = previous+'.'+node.name if previous else node.name
             self.generic_visit(node)
             self.function = previous
 
         visit_AsyncFunctionDef = visit_FunctionDef
+        visit_ClassDef = visit_FunctionDef
+
+        def administrative(self):
+            return module == 'owner_handoff' and self.function in admin
+
+        def visit_Name(self, node):
+            if module == 'owner_handoff' and (self.function is None or self.administrative()) and isinstance(node.ctx, ast.Store):
+                # Do not alias a forbidden capability under an approved name.
+                assert node.id not in protected_names
+
+        def visit_Constant(self, node):
+            # Also inspect folded literal targets stored before a dynamic import.
+            value = _static_string(node)
+            if module != 'owner_handoff' and value is not None:
+                assert 'startup_recovery.owner_handoff' not in value
+                assert value not in {'owner_handoff', '.owner_handoff',
+                    'relinquish_terminated_owner', 'relinquish_terminated_ready_owner'}
+            self.generic_visit(node)
+
+        visit_BinOp = visit_Constant
+        visit_JoinedStr = visit_Constant
+
+        def visit_Attribute(self, node):
+            if self.administrative() and isinstance(node.value, ast.Name) and node.value.id == 'store':
+                assert node.attr in admin_methods[self.function]['store']
+                assert isinstance(node.ctx, ast.Load)
+            self.generic_visit(node)
 
         def visit_Import(self, node):
+            assert not self.administrative()  # no module-wide capabilities
             assert not any('cutover' in n.name for n in node.names), (module, node.lineno)
+            assert not any(n.name == 'startup_recovery.owner_handoff'
+                           or n.name.startswith('startup_recovery.owner_handoff.')
+                           for n in node.names), (module, node.lineno)
 
         def visit_ImportFrom(self, node):
             name = node.module or ''
+            # Resolve the imported capability, never its local alias. Relative
+            # imports in the scanned startup_recovery package count identically.
+            assert not (name == 'startup_recovery.owner_handoff'
+                        or name.startswith('startup_recovery.owner_handoff.')
+                        or (node.level and name.split('.')[0] == 'owner_handoff'))
+            if name == 'startup_recovery' or (node.level and not name):
+                assert not any(n.name in {'owner_handoff', '*'} for n in node.names)
+            if module == 'owner_handoff':
+                assert not any(n.asname in protected_names for n in node.names)
+            if self.administrative():
+                assert node.level == 0
+                assert {n.name for n in node.names} <= admin_imports[self.function].get(name, set())
+                assert all(n.asname is None for n in node.names)
+            # Administrative callables may not leak into startup through aliases.
+            assert not any(n.name in admin for n in node.names)
             if name == 'startup_recovery.cutover_evidence':
                 assert {n.name for n in node.names} <= allowed.get((module, self.function), set())
                 assert all(n.asname is None for n in node.names)
@@ -33,7 +152,10 @@ def check_startup(source, module):
                     'startup_recovery.cutover_manifest': {'CutoverError'},
                     'startup_recovery.cutover_db': {'read_heads'},
                 }
-                assert module == 'legacy_adoption' and self.function == 'adopt_verified_cutover'
+                if module == 'owner_handoff' and self.function == '_ready_authority':
+                    symbols = {'startup_recovery.cutover_manifest': {'decode_manifest'}}
+                else:
+                    assert module == 'legacy_adoption' and self.function == 'adopt_verified_cutover'
                 assert {n.name for n in node.names} <= symbols.get(name, set())
                 assert all(n.asname is None for n in node.names)
             else:
@@ -42,11 +164,31 @@ def check_startup(source, module):
         def visit_Call(self, node):
             name = getattr(node.func, 'id', getattr(node.func, 'attr', ''))
             assert name not in commands
-            if name in {'read_original_transport', '_destination_preflight', '_VerificationTree'}:
+            if name in admin:
+                assert module == 'owner_handoff' and self.function == 'relinquish_terminated_ready_owner'
+                assert name == '_ready_authority'  # no automatic administrative drain
+            if self.administrative():
+                if isinstance(node.func, ast.Name):
+                    assert name in admin_calls[self.function]
+                    if name == 'getattr':
+                        assert ast.unparse(node) == "getattr(safety_reader, 'database', None)"
+                else:
+                    assert isinstance(node.func, ast.Attribute)
+                    root = receiver_root(node.func.value)
+                    allowed_get = (self.function == 'relinquish_terminated_ready_owner'
+                        and ast.unparse(node.func) == '(account.handoff_evidence or {}).get')
+                    assert allowed_get or name in admin_methods[self.function].get(root, set())
+            if name in {'read_original_transport', '_destination_preflight', '_VerificationTree',
+                        '_verify_coverage', 'decode_manifest'}:
                 assert name in allowed.get((module, self.function), set())
             # Generic CLI / dynamic command-module access is forbidden as well.
-            assert not any(isinstance(x, ast.Constant) and isinstance(x.value, str)
-                           and 'startup_recovery.cutover' in x.value for x in ast.walk(node))
+            assert not any(value is not None
+                           and ('startup_recovery.cutover' in value
+                                or 'startup_recovery.owner_handoff' in value
+                                or value in {'owner_handoff', '.owner_handoff',
+                                    'relinquish_terminated_owner',
+                                    'relinquish_terminated_ready_owner'})
+                           for value in (_static_string(x) for x in ast.walk(node)))
             self.generic_visit(node)
     Guard().visit(ast.parse(source))
 

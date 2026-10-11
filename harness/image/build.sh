@@ -122,7 +122,7 @@ chmod -R a+rX test-tools
 docker run "${common[@]}" -v "$pg_root:$pg_root:ro" -v "$PWD/test-tools:/test-tools:ro" \
  -e DATABASE_URL="$dsn" -e MIGRATION_DATABASE_URL="$dsn" -e VERIFIER_TEST_PG_DSN="$dsn" \
  -e PYTHONPATH=/test-tools:/app/Backend --entrypoint /bin/sh "$maint" -c \
- 'mkdir /cache/tmp; python -B -m pytest -q -p no:cacheprovider --junitxml=/cache/owner.xml tests/test_owner_handoff.py tests/test_owner_handoff_submissions.py; result=$?; cat /cache/owner.xml; exit "$result"' \
+ 'mkdir /cache/tmp; python -B -m pytest -q -p no:cacheprovider --junitxml=/cache/owner.xml tests/test_owner_handoff.py tests/test_owner_handoff_submissions.py tests/test_owner_handoff_ready.py; result=$?; cat /cache/owner.xml; exit "$result"' \
  > evidence/maintenance-owner.log 2>&1
 python3 -B harness/image/finalize.py
 python3 -B harness/verify_source.py source > evidence/image-source-after.json

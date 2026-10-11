@@ -35,8 +35,8 @@ class PackageTest(unittest.TestCase):
     def test_record_exact_identity(self):
         mod=self.api()
         record=mod.build_record()
-        self.assertEqual(record['packaging_source_sha'],'1a664174dfcc8b42da12718244c581aebfdb54f2')
-        self.assertEqual(record['source_manifest_sha256'],'1550749d73db81400014682c8d3eb5a4cea94964b01174d83907738fc268f4ef')
+        self.assertEqual(record['packaging_source_sha'],'35a3c763de242a1671d9902b8c450d06a059faa4')
+        self.assertEqual(record['source_manifest_sha256'],'37c5ba049b5c06de3291cb5789b880ddb5a3bc5cb9b60695feb9f61ea030a31a')
         self.assertEqual(record['python_version'],'3.14.3')
         self.assertEqual(record['certified_dependency_run_id'],'37414992580')
         self.assertEqual(len(record),9)

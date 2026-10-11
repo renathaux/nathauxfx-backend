@@ -49,18 +49,21 @@ engine.dispose()
 
 def expand(*patterns):
     return sorted({f for pattern in patterns for f in glob.glob(pattern)})
-cutover = ['tests/test_cutover_'+name+'.py' for name in ['cli','files','first_start','manifest','postgres','service']]
+cutover = expand('tests/test_cutover_*.py')
 recovery = expand('tests/test_recovery_*.py','tests/test_strategy_live_version_binding.py')
 bounded = sorted(set(recovery + cutover + ['tests/test_runtime_paths.py','tests/test_runtime_paths_postgres.py','tests/test_database_configuration.py']))
 suites = [
+    ('architecture',['tests/test_cutover_first_start.py','-k','not first_start_transport and not first_start_management and not first_start_failed'],349),
+    ('owner-adoption',expand('tests/test_owner_handoff*.py','tests/test_legacy_adoption*.py'),356),
+    ('recovery-runtime',expand('tests/test_recovery*.py','tests/test_runtime_paths*.py'),412),
     ('hosted-verifier',expand('tests/test_live_integrity_*.py','tests/test_hosted_live_integrity_integration.py','tests/test_strategy_live_integrity_verifier.py'),127),
     ('broader-affected',['tests/'+name+'.py' for name in ['test_live_order_intent','test_live_decimal_prices','test_live_identity_metadata_integration','test_broker_execution_metadata','test_strategy_studio_live_candidate','test_fundamental_execution_guard','test_strategy_engine_evaluator']],157),
     ('database-config',['tests/test_database_configuration.py'],7),
-    ('owner',expand('tests/test_owner_handoff*.py'),71),
-    ('focused',expand('tests/test_cutover_evidence.py','tests/test_cutover_first_start.py','tests/test_legacy_adoption_*.py','tests/test_owner_handoff*.py'),281),
+    ('owner',expand('tests/test_owner_handoff*.py'),172),
+    ('focused',expand('tests/test_cutover_evidence.py','tests/test_cutover_first_start.py','tests/test_legacy_adoption_*.py','tests/test_owner_handoff*.py'),730),
     ('safe-recovery',recovery,444),
-    ('cutover',cutover,321),
-    ('bounded',bounded,792),
+    ('cutover',cutover,691),
+    ('bounded',bounded,1162),
 ]
 results = {}
 try:
@@ -68,7 +71,7 @@ try:
     verify(ROOT)
     for name, paths, count in suites:
         verify(ROOT)
-        adapter=temporary_git_shim(ROOT) if name=='bounded' else nullcontext(None)
+        adapter=temporary_git_shim(ROOT) if name in {'bounded','recovery-runtime'} else nullcontext(None)
         with adapter as test_env:
             if name=='bounded':
                 (EVIDENCE/'git-shim-before.json').write_text(json.dumps(prove_git_shim(ROOT,test_env),sort_keys=True))

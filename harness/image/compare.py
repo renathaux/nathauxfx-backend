@@ -5,7 +5,8 @@ import sys
 import os
 
 def validate_backend(backend):
-    expected={'hosted-verifier':127,'broader-affected':157,'database-config':7,'owner':71,'focused':281,'safe-recovery':444,'cutover':321,'bounded':792}
+    expected={'architecture':349,'owner-adoption':356,'recovery-runtime':412,
+        'hosted-verifier':127,'broader-affected':157,'database-config':7,'owner':172,'focused':730,'safe-recovery':444,'cutover':691,'bounded':1162}
     assert set(backend)==set(expected)
     for name,n in expected.items():
         assert backend[name]==dict(tests=n,failures=0,errors=0,skipped=0)
@@ -38,13 +39,14 @@ if __name__=='__main__':
     assert all(n==0 for phase in ('before','after') for n in migration[phase]['rows'].values())
     result['backend_migration']=migration
     result['source_after_cleanup']=json.loads((backend/'source-after.json').read_text())
-    assert result['source_after_cleanup']['source_files']==370
-    assert result['source_after_cleanup']['manifest_sha256']=='1550749d73db81400014682c8d3eb5a4cea94964b01174d83907738fc268f4ef'
+    assert result['source_after_cleanup']['source_files']==371
+    assert result['source_after_cleanup']['manifest_sha256']=='37c5ba049b5c06de3291cb5789b880ddb5a3bc5cb9b60695feb9f61ea030a31a'
     result['origins']={'application':'c8c82ece5856c2e040b75070bad7888beedd2f60',
         'maintenance':'d223082822bd209858ce4c699e5fa907e654dc29',
         'composite':'63b42795ca26bdecb1be6d7758c8ae757eee90d4',
         'deadline_patch':'faa946a8ea52a1654371f95a1f88ca56fdb3a73a',
-        'preenable_patch':'1a664174dfcc8b42da12718244c581aebfdb54f2'}
+        'preenable_patch':'1a664174dfcc8b42da12718244c581aebfdb54f2',
+        'ready_owner_patch':'35a3c763de242a1671d9902b8c450d06a059faa4'}
     result['base_digest']='sha256:c6f0b5b3a167963de3cc7cd97fe1a5d07105c8d27f47507ab31d648b533b05c7'
     result['oci_artifacts']=['tested-oci-'+str(n)+'-'+os.environ['GITHUB_RUN_ID'] for n in (1,2)]
     result['protected_paths']=[]

@@ -7,7 +7,7 @@ class ReproducibilityTests(unittest.TestCase):
     def inputs(self):
         image=dict(image_digest='manifest',manifest_digest='manifest',config_digest='config',
             layers=['one','two'],diff_ids=['raw1','raw2'],architecture='linux/amd64',artifact_sha256='archive')
-        return dict(source_sha='source',manifest_sha256='pin',source_files=370,dependency_lock='lock',
+        return dict(source_sha='source',manifest_sha256='pin',source_files=371,dependency_lock='lock',
             build_identity='identity',production=image,maintenance=copy.deepcopy(image))
 
     def test_identical_full_identity_passes(self):
@@ -26,7 +26,7 @@ class ReproducibilityTests(unittest.TestCase):
 
     def test_backend_gate_required_in_final_report(self):
         backend={name:dict(tests=n,failures=0,errors=0,skipped=0) for name,n in
-            [('hosted-verifier',127),('broader-affected',157),('database-config',7),('owner',71),('focused',281),('safe-recovery',444),('cutover',321),('bounded',792)]}
+            [('architecture',349),('owner-adoption',356),('recovery-runtime',412),('hosted-verifier',127),('broader-affected',157),('database-config',7),('owner',172),('focused',730),('safe-recovery',444),('cutover',691),('bounded',1162)]}
         self.assertTrue(hasattr(report,'validate_backend'),'backend evidence validation missing')
         self.assertEqual(report.validate_backend(backend),backend)
         backend['bounded']['errors']=1
