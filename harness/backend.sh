@@ -6,6 +6,7 @@ test "$(python -c 'import platform; print(platform.python_version())')" = 3.14.3
 test "$(docker info --format '{{.Architecture}}')" = x86_64
 python -B harness/verify_source.py source
 python -B harness/test_fixture.py
+python -B harness/test_git_shim.py
 cert_root=$(mktemp -d /tmp/fs-amd64-cert.XXXXXXXX)
 pg_root=$(mktemp -d /tmp/fs-verifier-pg.cert.XXXXXXXX)
 pg_bin=$(pg_config --bindir)

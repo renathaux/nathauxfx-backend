@@ -7,6 +7,8 @@ import platform
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from contextlib import nullcontext
+from git_shim import temporary_git_shim, prove as prove_git_shim
 from verify_source import verify
 
 ROOT = Path(sys.argv[1]).resolve()
@@ -61,9 +63,15 @@ results = {}
 try:
     for name, paths, count in suites:
         verify(ROOT)
-        result = subprocess.run([sys.executable,'-B','-m','pytest','-q','-p','no:cacheprovider',
-            '-p','fixture_plugin','--junitxml='+str(EVIDENCE/(name+'.xml')),*paths],
-            stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+        adapter=temporary_git_shim(ROOT) if name=='bounded' else nullcontext(None)
+        with adapter as test_env:
+            if name=='bounded':
+                (EVIDENCE/'git-shim-before.json').write_text(json.dumps(prove_git_shim(ROOT,test_env),sort_keys=True))
+            result = subprocess.run([sys.executable,'-B','-m','pytest','-q','-p','no:cacheprovider',
+                '-p','fixture_plugin','--junitxml='+str(EVIDENCE/(name+'.xml')),*paths],
+                stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,env=test_env)
+        if name=='bounded':
+            (EVIDENCE/'git-shim-after.json').write_text(json.dumps({'shim_removed':True,'source':verify(ROOT)},sort_keys=True))
         (EVIDENCE/(name+'.log')).write_text(result.stdout)
         verify(ROOT)
         xml = ET.parse(EVIDENCE/(name+'.xml'))
