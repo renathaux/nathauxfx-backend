@@ -1,11 +1,11 @@
-name: Frozen release AMD64 backend gate
+name: Recovery deadline AMD64 recertification
 on:
   push:
-    branches: [certification/amd64-20261010]
+    branches: [certification/amd64-deadline-20261011]
 permissions:
   contents: read
 concurrency:
-  group: frozen-release-amd64-20261010
+  group: deadline-release-amd64-20261011
   cancel-in-progress: false
 jobs:
   backend:

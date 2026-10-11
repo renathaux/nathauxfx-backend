@@ -26,7 +26,7 @@ class ReproducibilityTests(unittest.TestCase):
 
     def test_backend_gate_required_in_final_report(self):
         backend={name:dict(tests=n,failures=0,errors=0,skipped=0) for name,n in
-            [('database-config',7),('owner',71),('focused',281),('safe-recovery',439),('cutover',321),('bounded',787)]}
+            [('database-config',7),('owner',71),('focused',281),('safe-recovery',444),('cutover',321),('bounded',792)]}
         self.assertTrue(hasattr(report,'validate_backend'),'backend evidence validation missing')
         self.assertEqual(report.validate_backend(backend),backend)
         backend['bounded']['errors']=1

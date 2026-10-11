@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 import sys
 
-SOURCE = '63b42795ca26bdecb1be6d7758c8ae757eee90d4'
-MANIFEST = '693da082978200be0c6c21bfc3a7ca52a6b0e4b018dcdf682dfd8a91bf6d7ce8'
+SOURCE = 'faa946a8ea52a1654371f95a1f88ca56fdb3a73a'
+MANIFEST = 'a71df9c86e9a5aabb7cd624b79dfd3c77d5bf79b09cf34a5b0cf5be713091f43'
 LOCK = '1d8e368b5645db69cab33479c56d7db0827155898368a419fc80ab9819ee5736'
 METADATA = '8e24bda82fa3cc5bdcf21f19c86eec85eae74e24e115a402066bfafe884e5e89'
 GENERATED = {'certification-source-manifest.json', 'Backend/requirements.production.lock',

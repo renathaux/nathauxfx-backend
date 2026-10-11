@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from contextlib import nullcontext
 from git_shim import temporary_git_shim, prove as prove_git_shim
 from verify_source import verify
+from deadline_regression import prove as prove_deadline_regression
 
 ROOT = Path(sys.argv[1]).resolve()
 EVIDENCE = Path(sys.argv[2]).resolve()
@@ -55,12 +56,14 @@ suites = [
     ('database-config',['tests/test_database_configuration.py'],7),
     ('owner',expand('tests/test_owner_handoff*.py'),71),
     ('focused',expand('tests/test_cutover_evidence.py','tests/test_cutover_first_start.py','tests/test_legacy_adoption_*.py','tests/test_owner_handoff*.py'),281),
-    ('safe-recovery',recovery,439),
+    ('safe-recovery',recovery,444),
     ('cutover',cutover,321),
-    ('bounded',bounded,787),
+    ('bounded',bounded,792),
 ]
 results = {}
 try:
+    prove_deadline_regression(ROOT, EVIDENCE)
+    verify(ROOT)
     for name, paths, count in suites:
         verify(ROOT)
         adapter=temporary_git_shim(ROOT) if name=='bounded' else nullcontext(None)

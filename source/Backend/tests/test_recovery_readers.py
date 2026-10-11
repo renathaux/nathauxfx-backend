@@ -115,3 +115,86 @@ def test_authentication_adapter_is_fixed_account_read_only_and_closes(db):
     readers.database.credentials = lambda scope: {'access_token': 'private-fixture'}
     assert readers.authenticate(SCOPE) == dict(authenticated=True, account_id='7', environment='demo')
     assert closed == [True]
+
+
+@pytest.fixture
+def timed_readers(monkeypatch):
+    """Keep adapter/discovery/deadline enforcement real; replace external IO."""
+    import copy
+    from test_recovery_reconciliation import empty
+    api = readers_api()
+    clock = {'now': 100.0, 'auth': 1.0, 'snapshot': 11.0,
+             'submission': 11.0, 'snapshots': 0, 'closed': 0}
+    monkeypatch.setattr(api.time, 'monotonic', lambda: clock['now'])
+    database, broker = empty()
+
+    class TimedBroker(api.BrokerReader):
+        def spend(self, duration):
+            # Two reads in one operation share Reader.remaining(), not two budgets.
+            self.remaining()
+            clock['now'] += duration
+            self.remaining()
+
+        def __enter__(self):
+            assert (self.account, self.environment) == ('7', 'demo')
+            self.spend(clock['auth'])
+            return self
+
+        def __exit__(self, *_):
+            clock['closed'] += 1
+
+        def snapshot(self, history_from):
+            assert history_from == 1000
+            clock['snapshots'] += 1
+            self.spend(clock['snapshot'] / 2)
+            self.spend(clock['snapshot'] / 2)
+            return copy.deepcopy(broker)
+
+        def submission_records(self, start, end):
+            assert start == 1000 and end >= start
+            self.spend(clock['submission'])
+            return []
+
+    class Database:
+        def __call__(self, scope):
+            assert scope == SCOPE
+            return copy.deepcopy(database)
+
+        def credentials(self, scope):
+            assert scope == SCOPE
+            return {}
+
+    adapters = api.ReadAdapters(None, history_from=1000, broker_factory=TimedBroker)
+    adapters.database = Database()
+    return adapters, clock
+
+
+def test_independent_discovery_snapshots_get_fresh_deadlines(timed_readers):
+    from startup_recovery.reconcile import discover, reconcile
+    from test_recovery_reconciliation import TOKEN
+    adapters, clock = timed_readers
+    assert adapters.authenticate(SCOPE)['authenticated'] is True
+    # Authentication and two healthy ~11s snapshots must not share 20s.
+    result = discover(adapters, SCOPE, TOKEN)
+    assert reconcile(result, {}).ok
+    assert clock['snapshots'] == 2
+    assert clock['now'] == 125.0
+
+
+def test_submission_reads_and_idle_time_do_not_spend_next_operation_budget(timed_readers):
+    adapters, clock = timed_readers
+    clock['now'] += 30
+    stamp = datetime.fromtimestamp(1000, timezone.utc)
+    assert adapters.submissions(SCOPE, stamp) == {'ok': True, 'complete': True, 'records': []}
+    assert adapters.submissions(SCOPE, stamp)['complete'] is True
+    assert adapters.authenticate(SCOPE)['authenticated'] is True
+    assert adapters.broker(SCOPE)['history_complete'] is True
+
+
+@pytest.mark.parametrize('operation', ['authenticate', 'submissions', 'broker'])
+def test_one_broker_operation_cannot_renew_its_twenty_second_budget(timed_readers, operation):
+    adapters, clock = timed_readers
+    clock[{'authenticate': 'auth', 'submissions': 'submission', 'broker': 'snapshot'}[operation]] = 21
+    args = (SCOPE, datetime.fromtimestamp(1000, timezone.utc)) if operation == 'submissions' else (SCOPE,)
+    with pytest.raises(RecoveryError, match='^RECOVERY_DISCOVERY_TIMEOUT$'):
+        getattr(adapters, operation)(*args)

@@ -5,7 +5,7 @@ import sys
 import os
 
 def validate_backend(backend):
-    expected={'database-config':7,'owner':71,'focused':281,'safe-recovery':439,'cutover':321,'bounded':787}
+    expected={'database-config':7,'owner':71,'focused':281,'safe-recovery':444,'cutover':321,'bounded':792}
     assert set(backend)==set(expected)
     for name,n in expected.items():
         assert backend[name]==dict(tests=n,failures=0,errors=0,skipped=0)
@@ -27,6 +27,11 @@ if __name__=='__main__':
     result=compare(*(json.loads(p.read_text()) for p in paths))
     backend=root/'backend'
     result['backend_suites']=validate_backend(json.loads((backend/'backend-results.json').read_text()))
+    deadline=json.loads((backend/'deadline-regression.json').read_text())
+    assert deadline['old']==dict(tests=1,failures=1,errors=0,skipped=0)
+    assert deadline['fixed']==dict(tests=5,failures=0,errors=0,skipped=0)
+    assert deadline['timeout_seconds']==20
+    result['deadline_regression']=deadline
     migration=json.loads((backend/'migration.json').read_text())
     assert migration['before']['revision']=='20261001_0030'
     assert migration['after']['revision']=='20261010_0031' and migration['noop'] is True
@@ -34,10 +39,11 @@ if __name__=='__main__':
     result['backend_migration']=migration
     result['source_after_cleanup']=json.loads((backend/'source-after.json').read_text())
     assert result['source_after_cleanup']['source_files']==369
-    assert result['source_after_cleanup']['manifest_sha256']=='693da082978200be0c6c21bfc3a7ca52a6b0e4b018dcdf682dfd8a91bf6d7ce8'
+    assert result['source_after_cleanup']['manifest_sha256']=='a71df9c86e9a5aabb7cd624b79dfd3c77d5bf79b09cf34a5b0cf5be713091f43'
     result['origins']={'application':'c8c82ece5856c2e040b75070bad7888beedd2f60',
         'maintenance':'d223082822bd209858ce4c699e5fa907e654dc29',
-        'composite':'63b42795ca26bdecb1be6d7758c8ae757eee90d4'}
+        'composite':'63b42795ca26bdecb1be6d7758c8ae757eee90d4',
+        'deadline_patch':'faa946a8ea52a1654371f95a1f88ca56fdb3a73a'}
     result['base_digest']='sha256:c6f0b5b3a167963de3cc7cd97fe1a5d07105c8d27f47507ab31d648b533b05c7'
     result['oci_artifacts']=['tested-oci-'+str(n)+'-'+os.environ['GITHUB_RUN_ID'] for n in (1,2)]
     result['protected_paths']=[]

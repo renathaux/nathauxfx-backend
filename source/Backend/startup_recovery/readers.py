@@ -248,52 +248,67 @@ class BrokerReader(Reader):
             observed_at=history_to)
 
 
+def _fresh_deadline():
+    """One IO budget per independent broker operation, not per startup."""
+    return time.monotonic() + 20
+
+
 class ReadAdapters:
-    """One bounded discovery operation, using only selected-account credentials."""
+    """Independently bounded reads using only selected-account credentials."""
     def __init__(self, engine, *, history_from, broker_factory=BrokerReader):
         self.database = DatabaseReader(engine, history_from=history_from)
         self.history_from = history_from
-        self.deadline = time.monotonic() + 20
         self._factory = broker_factory
 
     def authenticate(self, scope):
-        if time.monotonic() >= self.deadline:
-            raise RecoveryError('RECOVERY_DISCOVERY_TIMEOUT')
+        deadline = _fresh_deadline()
         try:
             credentials = self.database.credentials(scope)
+            if time.monotonic() >= deadline:
+                raise RecoveryError('RECOVERY_DISCOVERY_TIMEOUT')
             # Reader.__enter__ authenticates only this fixed selected account.
             # No discovery, selection repair, token refresh or order operation.
-            with self._factory(scope.account_id, scope.environment, credentials, self.deadline):
+            with self._factory(scope.account_id, scope.environment, credentials, deadline):
                 credentials = None
                 return dict(authenticated=True, account_id=scope.account_id,
                             environment=scope.environment)
         except RecoveryError:
             raise
+        except TimeoutError:
+            raise RecoveryError('RECOVERY_DISCOVERY_TIMEOUT') from None
         except Exception:
             raise RecoveryError('RECOVERY_BROKER_AUTHENTICATION_FAILED') from None
 
     def submissions(self,scope,claimed_at):
         if claimed_at is None: raise RecoveryError('RECOVERY_HISTORY_BOUND_UNVERIFIED')
         if claimed_at.tzinfo is None: claimed_at=claimed_at.replace(tzinfo=timezone.utc)
+        deadline = _fresh_deadline()
         try:
             credentials=self.database.credentials(scope)
-            with self._factory(scope.account_id,scope.environment,credentials,self.deadline) as reader:
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            with self._factory(scope.account_id,scope.environment,credentials,deadline) as reader:
                 credentials=None
                 records=reader.submission_records(claimed_at.timestamp(),time.time())
                 return {'ok':True,'complete':True,'records':records}
+        except TimeoutError:
+            raise RecoveryError('RECOVERY_DISCOVERY_TIMEOUT') from None
         except Exception:
             raise RecoveryError('RECOVERY_BROKER_READ_FAILED') from None
 
     def broker(self, scope):
-        if time.monotonic() >= self.deadline:
-            raise RecoveryError('RECOVERY_DISCOVERY_TIMEOUT')
+        deadline = _fresh_deadline()
         try:
             credentials = self.database.credentials(scope)
-            with self._factory(scope.account_id, scope.environment, credentials, self.deadline) as reader:
+            if time.monotonic() >= deadline:
+                raise RecoveryError('RECOVERY_DISCOVERY_TIMEOUT')
+            with self._factory(scope.account_id, scope.environment, credentials, deadline) as reader:
                 credentials = None
                 return reader.snapshot(self.history_from)
         except RecoveryError:
             raise
+        except TimeoutError:
+            raise RecoveryError('RECOVERY_DISCOVERY_TIMEOUT') from None
         except Exception:
             # Broker exceptions may include raw frames; never emit them or put
             # credential-bearing causes into the public recovery result.
