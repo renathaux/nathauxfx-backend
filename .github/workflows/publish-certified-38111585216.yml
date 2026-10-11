@@ -1,0 +1,70 @@
+name: Publish exact certified OCI 38111585216 without build
+on:
+  push:
+    branches: [publication/certified-38111585216]
+permissions:
+  contents: read
+  actions: read
+  packages: write
+concurrency:
+  group: publish-certified-38111585216
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Native AMD64 and copy tool
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          sudo apt-get update -qq
+          sudo apt-get install -y skopeo
+          mkdir evidence
+      - uses: actions/download-artifact@v4
+        with:
+          name: tested-oci-1-38111585216
+          run-id: 38111585216
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/certified-oci-38111585216
+      - name: Verify both certified archives before registry authentication
+        run: python3 -B harness/publication/verify.py pre "$RUNNER_TEMP/certified-oci-38111585216" evidence/pre.json
+      - name: Authenticate, preserve digests, and read back by digest
+        env:
+          PUBLICATION_TOKEN: ${{ github.token }}
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          auth="$RUNNER_TEMP/publication-38111585216-auth.json"
+          trap 'rm -f -- "$auth"' EXIT
+          printf '%s' "$PUBLICATION_TOKEN" | skopeo login --authfile "$auth" --username "${{ github.actor }}" --password-stdin ghcr.io
+          unset PUBLICATION_TOKEN
+          mkdir "$RUNNER_TEMP/registry-readback-38111585216"
+          for kind in production maintenance; do
+            digest=$(python3 -c 'import json,sys; print(json.load(open("evidence/pre.json"))[sys.argv[1]]["manifest_digest"])' "$kind")
+            skopeo copy --authfile "$auth" --preserve-digests \
+              "oci-archive:$RUNNER_TEMP/certified-oci-38111585216/$kind.oci.tar" \
+              "docker://ghcr.io/renathaux/nathauxfx-backend:certified-38111585216-$kind"
+            skopeo copy --authfile "$auth" --preserve-digests \
+              "docker://ghcr.io/renathaux/nathauxfx-backend@$digest" \
+              "oci-archive:$RUNNER_TEMP/registry-readback-38111585216/$kind.oci.tar"
+          done
+      - name: Independently verify registry bytes
+        run: python3 -B harness/publication/verify.py post "$RUNNER_TEMP/registry-readback-38111585216" evidence/publication.json
+      - name: Sanitized publication evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publication-38111585216-${{ github.run_id }}
+          path: evidence/*.json
+          retention-days: 14
+      - name: Remove disposable archives and credentials
+        if: always()
+        run: |
+          rm -f -- "$RUNNER_TEMP/publication-38111585216-auth.json"
+          rm -rf -- "$RUNNER_TEMP/certified-oci-38111585216" "$RUNNER_TEMP/registry-readback-38111585216"
