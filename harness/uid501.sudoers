@@ -1,0 +1,2 @@
+# Disposable GitHub certification runner only. Never copied into any image.
+flowsignal-cert-501 ALL=(root) NOPASSWD: /usr/bin/chown, /usr/bin/unshare
