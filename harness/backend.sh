@@ -52,7 +52,9 @@ sudo unshare --net -- setpriv --reuid=501 --regid=1000 --clear-groups env -i \
 status=$?
 set -e
 sudo test ! -e "$cert_root/source/Backend/database/flowsignal.db"
-sudo cp "$cert_root/evidence/"* evidence/
+# Expand no wildcard as the runner: the private directory belongs to UID501.
+# Copy only the explicitly created textual-evidence directory as root.
+sudo cp -R "$cert_root/evidence/." evidence/
 sudo chown -R "$(id -u):$(id -g)" evidence
 python -B harness/verify_source.py source > evidence/checkout-after.json
 exit "$status"
