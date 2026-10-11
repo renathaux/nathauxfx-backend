@@ -62,8 +62,8 @@ if ! getent group 1000 >/dev/null; then
   sudo groupadd --gid 1000 flowsignal-cert-1000
 fi
 identity_created=1
-sudo useradd --uid 501 --gid 1000 --no-create-home --no-user-group --no-log-init \
- --home-dir /nonexistent --shell /usr/sbin/nologin -K CREATE_MAIL_SPOOL=no flowsignal-cert-501
+sudo useradd --system --uid 501 --gid 1000 --no-create-home --no-user-group --no-log-init \
+ --home-dir /nonexistent --shell /usr/sbin/nologin flowsignal-cert-501
 sudo visudo -cf harness/uid501.sudoers
 sudoers_created=1
 # Dotted names are ignored by sudo's includedir. Validate before atomic activation.
