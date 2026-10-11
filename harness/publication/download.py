@@ -8,16 +8,16 @@ import subprocess
 import sys
 import zipfile
 
-ZIP_SHA='42dccfa49d7c8b95934252e51ff47b7ebfe8a913a1db9691420c2ac60b80b493'
-API='repos/renathaux/nathauxfx-backend/actions/artifacts/11702605089'
+ZIP_SHA='12da2c5e31b18cacd2828c47c43eea8981919d07969aad70288063aeaaf90ea8'
+API='repos/renathaux/nathauxfx-backend/actions/artifacts/11717090533'
 
 def validate_metadata(value):
-    assert value['id']==11702605089
-    assert value['name']=='tested-oci-1-38138306120'
+    assert value['id']==11717090533
+    assert value['name']=='tested-oci-1-38176383880'
     assert value['digest']=='sha256:'+ZIP_SHA
     assert value['expired'] is False
-    assert value['workflow_run']['id']==38138306120
-    assert value['workflow_run']['head_sha']=='cc606bea123afdaa9639b750df736a41e623df7b'
+    assert value['workflow_run']['id']==38176383880
+    assert value['workflow_run']['head_sha']=='28ce458f71ce4a13a2e6038cd798872ef47e8e96'
 
 def validate_digest(value):
     assert value==ZIP_SHA,'ARTIFACT_ZIP_HASH_MISMATCH'
@@ -40,7 +40,7 @@ def main(root,out):
             with bundle.open(name) as source,(root/name).open('xb') as destination:
                 shutil.copyfileobj(source,destination)
     Path(out).write_text(json.dumps(dict(artifact_id=metadata['id'],artifact_name=metadata['name'],
-        certification_run=38138306120,artifact_zip_digest='sha256:'+ZIP_SHA,
+        certification_run=38176383880,artifact_zip_digest='sha256:'+ZIP_SHA,
         downloaded_zip_verified=True),sort_keys=True))
 
 if __name__=='__main__':
