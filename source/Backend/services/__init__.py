@@ -1,0 +1,352 @@
+"""Shared service-package bootstrap policies.
+
+Phase 1.2 keeps the indicator stream strict by default. cTrader Open API is a
+provider-specific exception: its OHLCV trendbar history can legitimately omit
+a time bucket when no tick arrived, so cTrader-shaped frames are allowed to be
+sparse without inventing replacement candles. Duplicate/conflicting candle
+checks and all immutable-event safeguards still run normally.
+
+cTrader can also revise a just-closed 15m trendbar for a few minutes after the
+nominal close. The authoritative stream therefore waits one 5m confirmation
+slot before accepting a 15m provider candle. This keeps immutable candles truly
+final without changing BOS/CHoCH, risk, or execution rules.
+
+The connector may append a synthetic current candle for display and strategy
+visibility. That synthetic row must never become the durable provider cache or
+the authoritative indicator input. The cache guard below preserves only the
+last provider-fetched frame while still returning the synthetic copy to legacy
+callers, and the 15m maturity filter reads back that provider-only snapshot.
+"""
+from datetime import datetime, timezone
+from functools import wraps
+
+
+CTRADER_15M_SETTLE_SECONDS = 5 * 60
+
+
+def _install_ctrader_provider_cache_guard():
+    """Keep cTrader's shared cache provider-only while callers see live candles.
+
+    ``get_ctrader_market_data`` intentionally returns a copy with the current
+    live-tick candle appended. On a cache hit the legacy implementation also
+    writes that returned copy back into ``CTRADER_CANDLE_CACHE``. Preserve the
+    provider snapshot whenever no new provider fetch occurred so a synthetic
+    candle can never age into the authoritative closed-candle stream.
+    """
+    try:
+        import ctrader_connector as _ctrader
+    except Exception:
+        return False
+
+    if getattr(_ctrader, "_PROVIDER_ONLY_CANDLE_CACHE_GUARD_INSTALLED", False):
+        return True
+
+    original_get = _ctrader.get_ctrader_market_data
+
+    @wraps(original_get)
+    @_ctrader.account_operation
+    def get_ctrader_market_data(symbol, timeframe, *args, **kwargs):
+        cache_key = _ctrader.get_ctrader_candle_cache_key(symbol, timeframe)
+        cached_before = _ctrader.CTRADER_CANDLE_CACHE.get(cache_key)
+        provider_snapshot = None
+        fetched_at_before = None
+        if isinstance(cached_before, dict):
+            before_data = cached_before.get("data")
+            if before_data is not None:
+                try:
+                    provider_snapshot = before_data.copy(deep=True)
+                except TypeError:
+                    provider_snapshot = before_data.copy()
+            fetched_at_before = cached_before.get("fetched_at")
+
+        result = original_get(symbol, timeframe, *args, **kwargs)
+
+        cached_after = _ctrader.CTRADER_CANDLE_CACHE.get(cache_key)
+        if isinstance(cached_after, dict) and provider_snapshot is not None:
+            # A changed fetched_at means a real provider refresh replaced the
+            # cache and must be kept. If it is unchanged, any data mutation came
+            # from append_current_forming_candle/cache fallback and is synthetic.
+            if cached_after.get("fetched_at") == fetched_at_before:
+                cached_after["data"] = provider_snapshot
+
+        return result
+
+    _ctrader.get_ctrader_market_data = get_ctrader_market_data
+    _ctrader._PROVIDER_ONLY_CANDLE_CACHE_GUARD_INSTALLED = True
+    _ctrader._PROVIDER_ONLY_CANDLE_CACHE_ORIGINAL_GET = original_get
+
+    # api.py imports the connector function by value before app_bootstrap runs.
+    # Update that already-bound alias too once api is fully importable.
+    try:
+        import api as _api
+        if getattr(_api, "get_ctrader_market_data", None) is original_get:
+            _api.get_ctrader_market_data = get_ctrader_market_data
+    except Exception:
+        pass
+
+    return True
+
+
+def _install_ctrader_sparse_trendbar_policy():
+    from . import indicator_event_stream_service as _stream
+
+    if getattr(_stream, "_CTRADER_SPARSE_POLICY_INSTALLED", False):
+        return
+
+    original_initialize = _stream.initialize_indicator_stream
+    original_get = _stream.get_authoritative_structure
+
+    def _ctrader_sparse_frame_allowed(frame, _symbol, timeframe):
+        columns = getattr(frame, "columns", None)
+        if columns is None:
+            return False
+        if not {"Open", "High", "Low", "Close", "Volume"}.issubset(set(columns)):
+            return False
+        normalized_timeframe = _stream._normal_timeframe(timeframe)
+        return normalized_timeframe in _stream.SUPPORTED_TIMEFRAMES
+
+    def _ctrader_now():
+        return datetime.now(timezone.utc)
+
+    def _ctrader_provider_snapshot(frame, symbol, timeframe, now=None):
+        """Prefer the provider-only cache over a legacy synthetic return frame."""
+        try:
+            import ctrader_connector as _ctrader
+
+            cache_key = _ctrader.get_ctrader_candle_cache_key(symbol, timeframe)
+            frame_scope = getattr(frame, "attrs", {}).get("ctrader_stream_scope")
+            if frame_scope and not cache_key.startswith(frame_scope + ":"):
+                return frame
+            cached = _ctrader.CTRADER_CANDLE_CACHE.get(cache_key)
+            provider_data = cached.get("data") if isinstance(cached, dict) else None
+            if provider_data is not None and not provider_data.empty:
+                return _ctrader._safe_cached_provider_data(
+                    cached, timeframe, now if now is not None else _ctrader_now()
+                )
+        except Exception:
+            pass
+        return frame
+
+    def _ctrader_mature_frame(frame, symbol, timeframe, now=None):
+        """Use provider-only 5m/15m data; preserve the existing 15m settle delay."""
+        if not _ctrader_sparse_frame_allowed(frame, symbol, timeframe):
+            return frame
+        normalized_timeframe = _stream._normal_timeframe(timeframe)
+        if normalized_timeframe not in {"5m", "15m"}:
+            return frame
+        try:
+            provider_frame = _ctrader_provider_snapshot(frame, symbol, timeframe, now=now)
+            current = _stream._utc(
+                now if now is not None else _stream._ctrader_now()
+            )
+            maturity_delay = _stream.pd.Timedelta(
+                minutes=_stream.SUPPORTED_TIMEFRAMES[normalized_timeframe],
+                seconds=CTRADER_15M_SETTLE_SECONDS if normalized_timeframe == "15m" else 0,
+            )
+            latest_mature_open = current - maturity_delay
+            keep = [
+                _stream._utc(value) <= latest_mature_open
+                for value in provider_frame.index
+            ]
+            return provider_frame.loc[keep].copy()
+        except Exception as exc:
+            raise _stream.IndicatorStreamUnavailable(
+                f"cTrader {normalized_timeframe} closed provider filter unavailable: {exc}"
+            ) from exc
+
+    def _durable_origin(symbol, timeframe, session_factory=None):
+        """Read the immutable replay boundary for an already-created stream."""
+        factory = session_factory or _stream.SessionLocal
+        session = factory()
+        try:
+            state = session.query(_stream.IndicatorStreamState).filter(
+                _stream.IndicatorStreamState.symbol == _stream._normal_symbol(symbol),
+                _stream.IndicatorStreamState.timeframe == _stream._normal_timeframe(timeframe),
+            ).one_or_none()
+            if state is None or state.origin_candle is None:
+                return None
+            return _stream._utc(state.origin_candle)
+        except Exception as exc:
+            raise _stream.IndicatorStreamUnavailable(
+                f"durable indicator origin unavailable: {exc}"
+            ) from exc
+        finally:
+            session.close()
+
+    def _anchor_existing_stream_to_origin(frame, symbol, timeframe, kwargs):
+        """Never let a deeper restart fetch expand an existing stream backwards."""
+        origin = _durable_origin(
+            symbol,
+            timeframe,
+            session_factory=kwargs.get("session_factory"),
+        )
+        if origin is None:
+            return frame, kwargs
+        try:
+            keep = [_stream._utc(value) >= origin for value in frame.index]
+            anchored_frame = frame.loc[keep].copy()
+        except Exception as exc:
+            raise _stream.IndicatorStreamUnavailable(
+                f"durable indicator origin filter unavailable: {exc}"
+            ) from exc
+
+        anchored_kwargs = dict(kwargs)
+        analyzer = anchored_kwargs.get("analyzer", _stream.legacy_analyze_structure)
+
+        @wraps(analyzer)
+        def analyzer_from_durable_origin(canonical, *args, **analyzer_kwargs):
+            try:
+                canonical_keep = [
+                    _stream._utc(value) >= origin
+                    for value in canonical.index
+                ]
+                canonical = canonical.loc[canonical_keep].copy()
+            except Exception as exc:
+                raise _stream.IndicatorStreamUnavailable(
+                    f"durable indicator replay origin filter unavailable: {exc}"
+                ) from exc
+            return analyzer(canonical, *args, **analyzer_kwargs)
+
+        anchored_kwargs["analyzer"] = analyzer_from_durable_origin
+        return anchored_frame, anchored_kwargs
+
+    @wraps(original_initialize)
+    def initialize_indicator_stream(frame, symbol, timeframe, point_size, *args, **kwargs):
+        # V3B uses 5m only and the chart/execution authority still uses 15m.
+        # The 1h durable stream is unused, so do not read or write its Neon
+        # candle/event state during startup. This saves DB transfer without
+        # changing market-data collection or any trading-critical timeframe.
+        normalized_timeframe = _stream._normal_timeframe(timeframe)
+        if normalized_timeframe == "1h":
+            return {
+                "status": "DISABLED_UNUSED_TIMEFRAME",
+                "symbol": str(symbol or "").upper().replace("/", ""),
+                "timeframe": "1h",
+                "durable_persistence": False,
+            }
+
+        # The first startup fetch is force-refreshed provider data. Install the
+        # cache guard before any later cache hit can persist a synthetic row.
+        _install_ctrader_provider_cache_guard()
+        is_ctrader = _ctrader_sparse_frame_allowed(frame, symbol, timeframe)
+        if "allow_sparse_trendbars" not in kwargs:
+            kwargs["allow_sparse_trendbars"] = is_ctrader
+        provider_frame = (
+            _ctrader_mature_frame(frame, symbol, timeframe)
+            if is_ctrader
+            else frame
+        )
+        return original_initialize(
+            provider_frame,
+            symbol,
+            timeframe,
+            point_size,
+            *args,
+            **kwargs,
+        )
+
+    @wraps(original_get)
+    def get_authoritative_structure(frame, symbol, timeframe, point_size, *args, **kwargs):
+        _install_ctrader_provider_cache_guard()
+        is_ctrader = _ctrader_sparse_frame_allowed(frame, symbol, timeframe)
+        if "allow_sparse_trendbars" not in kwargs:
+            kwargs["allow_sparse_trendbars"] = is_ctrader
+        provider_frame = (
+            _ctrader_mature_frame(frame, symbol, timeframe)
+            if is_ctrader
+            else frame
+        )
+        provider_frame, kwargs = _anchor_existing_stream_to_origin(
+            provider_frame,
+            symbol,
+            timeframe,
+            kwargs,
+        )
+        return original_get(
+            provider_frame,
+            symbol,
+            timeframe,
+            point_size,
+            *args,
+            **kwargs,
+        )
+
+    _stream.initialize_indicator_stream = initialize_indicator_stream
+    _stream.get_authoritative_structure = get_authoritative_structure
+    _stream._CTRADER_SPARSE_POLICY_INSTALLED = True
+    _stream._ctrader_sparse_frame_allowed = _ctrader_sparse_frame_allowed
+    _stream._ctrader_now = _ctrader_now
+    _stream._ctrader_provider_snapshot = _ctrader_provider_snapshot
+    _stream._ctrader_mature_frame = _ctrader_mature_frame
+    _stream._durable_origin = _durable_origin
+    _stream._anchor_existing_stream_to_origin = _anchor_existing_stream_to_origin
+    _stream.CTRADER_15M_SETTLE_SECONDS = CTRADER_15M_SETTLE_SECONDS
+
+
+def _install_paper_entry_shape_guard():
+    """Normalize legacy WAIT strings before PAPER reads nested setup fields."""
+    from . import paper_live_entry_service as _paper
+
+    if getattr(_paper, "_PAPER_ENTRY_SHAPE_GUARD_INSTALLED", False):
+        return
+
+    original_build = _paper.build_paper_entry_result
+
+    @wraps(original_build)
+    def build_paper_entry_result(symbol, live_plan, *args, **kwargs):
+        safe_plan = dict(live_plan) if isinstance(live_plan, dict) else live_plan
+        if isinstance(safe_plan, dict):
+            if not isinstance(safe_plan.get("fifteen_m_swing_break"), dict):
+                safe_plan["fifteen_m_swing_break"] = {}
+            if not isinstance(safe_plan.get("confirmation_5m"), dict):
+                safe_plan["confirmation_5m"] = {}
+        return original_build(symbol, safe_plan, *args, **kwargs)
+
+    _paper.build_paper_entry_result = build_paper_entry_result
+    _paper._PAPER_ENTRY_SHAPE_GUARD_INSTALLED = True
+
+
+# Legacy Strategy V2 shadow/research is not part of the V3B trading path.
+# Keep its read-only summary/history endpoints available, but allow production
+# to disable all new shadow evaluation/link writes. The switch defaults ON so
+# existing tests and non-production environments retain their prior behavior.
+def _install_v2_shadow_observer_policy():
+    enabled = str(
+        __import__("os").getenv("V2_SHADOW_OBSERVER_ENABLED", "true")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if enabled:
+        return False
+
+    from . import v2_shadow_service as _shadow
+
+    def _disabled_evaluate_cycle_safely(symbol, result, data_5m=None, data_15m=None, *, now=None):
+        return {
+            "ok": True,
+            "shadow_only": True,
+            "disabled": True,
+            "reason": "V2_SHADOW_OBSERVER_DISABLED",
+            "symbol": str(symbol or "").upper(),
+        }
+
+    def _disabled_link_v1_execution_safely(symbol, setup_fingerprint, broker_result, trade_payload=None):
+        return False
+
+    _shadow.evaluate_cycle_safely = _disabled_evaluate_cycle_safely
+    _shadow.link_v1_execution_safely = _disabled_link_v1_execution_safely
+    _shadow._V2_SHADOW_OBSERVER_DISABLED = True
+    return True
+
+
+def assemble_runtime_policies():
+    """Explicit code-only assembly; no configuration restoration or workers."""
+    _install_ctrader_sparse_trendbar_policy()
+    _install_paper_entry_shape_guard()
+    try:
+        from .neon_observer_optimization import install_neon_lifecycle_observer_throttle
+        install_neon_lifecycle_observer_throttle()
+    except Exception as exc:
+        print('NEON_OBSERVER_OPTIMIZATION_WARNING =', type(exc).__name__)
+    try:
+        _install_v2_shadow_observer_policy()
+    except Exception as exc:
+        print('V2_SHADOW_OBSERVER_POLICY_WARNING =', type(exc).__name__)

@@ -1,0 +1,128 @@
+"""Closed-market dashboard compatibility layer.
+
+Keep historical chart/panel data usable when cTrader has no live tick (for
+example over the weekend). This only supplies a display price from the latest
+stored candle before the existing panel-cache validator runs; trading and
+execution freshness gates remain unchanged.
+"""
+from __future__ import annotations
+
+import math
+
+api = None
+_ORIGINAL_PANEL_CACHE_VALIDITY = None
+_assembled = False
+
+# The legacy panel fallback still filtered local LIVE history to the current
+# week. Keep broker history/month fallback aligned to the calendar-month window.
+def _get_live_recent_history_for_panel_monthly():
+    from services.monthly_history_window import trade_is_current_month
+    api.run_weekly_live_reset()
+    broker_history = api.get_live_broker_closed_history()
+    if broker_history:
+        return broker_history[: api.MAX_LIVE_TRADE_HISTORY]
+
+    active_ids = {
+        str(api.get_live_trade_match_key(trade))
+        for trade in api.LIVE_ACTIVE_ORDERS.values()
+        if trade and api.get_live_trade_match_key(trade)
+    }
+    cleaned = []
+    for trade in api.LIVE_TRADE_HISTORY:
+        if str(api.get_live_trade_match_key(trade)) in active_ids:
+            continue
+        if not api.is_usable_local_live_history_trade(trade):
+            continue
+        if not trade_is_current_month(trade, api.get_live_month_start_ts()):
+            continue
+        cleaned.append(trade)
+    return cleaned[: api.MAX_LIVE_TRADE_HISTORY]
+
+
+def _positive_finite(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _latest_stored_close(panel_data, symbol):
+    candles = panel_data.get("candles") if isinstance(panel_data, dict) else None
+    if not isinstance(candles, dict):
+        return None
+    symbol_candles = candles.get(symbol)
+    if not isinstance(symbol_candles, dict):
+        return None
+
+    # Prefer the shortest timeframe so the fallback is the most recent known
+    # market price, but accept any stored history if one timeframe is missing.
+    for timeframe in ("5m", "15m", "1h"):
+        rows = symbol_candles.get(timeframe)
+        if not isinstance(rows, list):
+            continue
+        for row in reversed(rows):
+            if isinstance(row, dict):
+                close = _positive_finite(row.get("close"))
+            elif isinstance(row, (list, tuple)) and len(row) >= 5:
+                close = _positive_finite(row[4])
+            else:
+                close = None
+            if close is not None:
+                return close
+    return None
+
+
+def _panel_cache_validity_with_closed_market_fallback(panel_data):
+    if isinstance(panel_data, dict):
+        for symbol in ("EURUSD", "XAUUSD"):
+            plan = panel_data.get(symbol)
+            if not isinstance(plan, dict):
+                continue
+            if _positive_finite(plan.get("price")) is not None:
+                continue
+            fallback_price = _latest_stored_close(panel_data, symbol)
+            if fallback_price is None:
+                continue
+            plan["price"] = fallback_price
+            plan["price_source"] = "LAST_STORED_CANDLE"
+            plan["live_price_available"] = False
+
+    return _ORIGINAL_PANEL_CACHE_VALIDITY(panel_data)
+
+
+def create_app():
+    """Explicit policy assembly in the original order; startup is separately gated."""
+    global api, _ORIGINAL_PANEL_CACHE_VALIDITY, _assembled
+    if _assembled:
+        return api.app
+    from startup_recovery.configuration import initialize
+    initialize()
+    from services import assemble_runtime_policies
+    from services.indicator_stream_account_scope import install_account_scoped_indicator_stream
+    from services.monthly_history_window import install_monthly_history_window
+    from services.v3b_dashboard_state import install_v3b_dashboard_state_middleware
+    assemble_runtime_policies()
+    install_account_scoped_indicator_stream()
+    import api as api_module
+    import app_bootstrap
+    from strategies import shared as paper_shared
+    api = api_module
+    app_bootstrap.assemble_runtime()
+    install_monthly_history_window(api, paper_shared)
+    api.get_live_recent_history_for_panel = _get_live_recent_history_for_panel_monthly
+    _ORIGINAL_PANEL_CACHE_VALIDITY = api._panel_cache_validity
+    api._panel_cache_validity = _panel_cache_validity_with_closed_market_fallback
+    import production_panel_compat
+    production_panel_compat.assemble_runtime()
+    install_v3b_dashboard_state_middleware(api.app, api)
+    from startup_recovery.paper import install as install_paper_admission
+    from startup_recovery.asgi import install as install_recovery_startup
+    install_paper_admission(paper_shared)
+    # The coordinator alone invokes the assembled engine callback after all
+    # recovery phases. Do not run it as an independent framework startup hook.
+    api.app.router.on_startup = [handler for handler in api.app.router.on_startup
+        if handler is not app_bootstrap._start_forex_background_task]
+    install_recovery_startup(api)
+    _assembled = True
+    return api.app

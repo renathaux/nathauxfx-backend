@@ -1,0 +1,38 @@
+name: Frozen release AMD64 backend gate
+on:
+  push:
+    branches: [certification/amd64-20261010]
+permissions:
+  contents: read
+concurrency:
+  group: frozen-release-amd64-20261010
+  cancel-in-progress: false
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHON_DOTENV_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.3'
+          architecture: x64
+      - name: Frozen source, synthetic fixture, disposable PostgreSQL and backend gates
+        run: bash harness/backend.sh
+      - name: Retain sanitized textual gate evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: amd64-backend-gate-${{ github.run_id }}
+          path: |
+            evidence/*.json
+            evidence/*.jsonl
+            evidence/*.txt
+            evidence/*.xml
+            evidence/*.log
+          retention-days: 3

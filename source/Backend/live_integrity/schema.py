@@ -1,0 +1,615 @@
+"""Canonical saved-definition schema for Strategy Studio.
+
+This module is deliberately broker/LIVE independent.  It owns only the persisted
+vocabulary, structural validation, normalization, and human-readable summary.
+"""
+from __future__ import annotations
+
+import math
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+SYMBOLS = {"EURUSD", "XAUUSD"}
+TRADING_TIMEFRAMES = {"5m", "15m", "1h"}
+TREND_METHODS = {"BOS_CHOCH", "EMA_50", "EMA_200", "SWING_STRUCTURE"}
+BREAK_RULES = {"CLOSE_BEYOND", "MIN_BODY_PERCENT", "MIN_DISTANCE"}
+CONFIRMATION_RULES = {"NEXT_SAME_DIRECTION", "SECOND_CLOSE_BEYOND", "RETEST_LEVEL", "MIN_BODY_PERCENT"}
+ENTRY_METHODS = {"BOS_CHOCH_CLOSE", "CONFIRMATION_CLOSE", "RETEST"}
+STOP_METHODS = {"LAST_SWING", "FIXED_DISTANCE"}
+TP2_METHODS = {"FIXED_R", "FIXED_DISTANCE", "OPPOSITE_SWING"}
+RISK_METHODS = {"PERCENT_BALANCE", "FIXED_DOLLARS"}
+FUNDAMENTAL_MODES = {"BLOCK_OPPOSITE", "REQUIRE_ALIGNMENT"}
+TIMEFRAME_RANK = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class TrendDefinition(_StrictModel):
+    timeframe: Literal["15m", "1h", "4h"] | None = None
+    methods: list[Literal["BOS_CHOCH", "EMA_50", "EMA_200", "SWING_STRUCTURE"]] = Field(default_factory=list)
+
+
+class StructureDefinition(_StrictModel):
+    trigger: Literal["BOS_CHOCH"]
+    break_validation: list[Literal["CLOSE_BEYOND", "MIN_BODY_PERCENT", "MIN_DISTANCE"]] = Field(default_factory=list)
+    minimum_body_percent: float | None = None
+    minimum_distance_pips: float | None = None
+
+
+class ConfirmationDefinition(_StrictModel):
+    max_setup_age_bars: int | None = Field(default=None, ge=1, strict=True)
+    rules: list[Literal["NEXT_SAME_DIRECTION", "SECOND_CLOSE_BEYOND", "RETEST_LEVEL", "MIN_BODY_PERCENT"]] = Field(default_factory=list)
+    minimum_body_percent: float | None = None
+
+
+class EntryDefinition(_StrictModel):
+    method: Literal["BOS_CHOCH_CLOSE", "CONFIRMATION_CLOSE", "RETEST"]
+    remember_bos_on_confirmation_failure: bool = False
+
+
+class StopDistanceFilter(_StrictModel):
+    enabled: bool = False
+    mode: Literal["PERCENT_ENTRY", "PIPS"] = "PERCENT_ENTRY"
+    minimum: float | None = None
+    maximum: float | None = None
+
+
+class StopLossDefinition(_StrictModel):
+    distance_filter: StopDistanceFilter = Field(default_factory=StopDistanceFilter)
+    method: Literal["LAST_SWING", "FIXED_DISTANCE"]
+    buffer_pips: float | None = None
+    fixed_distance: float | None = None
+
+
+class TP1ProtectionStep(_StrictModel):
+    trigger_percent: float
+    secure_percent: float
+
+
+class TP1Definition(_StrictModel):
+    enabled: bool
+    target_r: float | None = None
+    target_basis: Literal["SL_DISTANCE", "TP2_DISTANCE"] = "SL_DISTANCE"
+    close_percent: float | None = None
+    protection_r: float | None = None
+    protection_mode: Literal["FIXED", "TP2_STEPS"] = "FIXED"
+    protection_trigger_method: Literal["CANDLE_CLOSE", "PRICE_TOUCH"] = "CANDLE_CLOSE"
+    protection_steps: list[TP1ProtectionStep] = Field(default_factory=list)
+
+
+class TP2Definition(_StrictModel):
+    method: Literal["FIXED_R", "FIXED_DISTANCE", "OPPOSITE_SWING"]
+    value: float | None = None
+
+
+class RiskDefinition(_StrictModel):
+    method: Literal["PERCENT_BALANCE", "FIXED_DOLLARS"]
+    value: float
+    max_concurrent_positions: int = Field(default=1, ge=1, le=3, strict=True)
+    max_combined_open_risk_percent: float | None = Field(default=None, gt=0, le=10)
+
+
+class FundamentalDefinition(_StrictModel):
+    mode: Literal["BLOCK_OPPOSITE", "REQUIRE_ALIGNMENT"] = "BLOCK_OPPOSITE"
+
+
+class SessionFilterDefinition(_StrictModel):
+    enabled: bool = False
+    timezone: Literal["UTC"] = "UTC"
+    blocked_start: str = "17:00"
+    blocked_end: str = "20:00"
+
+
+class SeasonalFilterDefinition(_StrictModel):
+    enabled: bool = False
+    timezone: Literal["UTC"] = "UTC"
+    blocked_start: str = "12-01"
+    blocked_end: str = "12-15"
+
+
+class StrategyDefinition(_StrictModel):
+    schema_version: Literal[1]
+    symbols: list[Literal["EURUSD", "XAUUSD"]]
+    trading_timeframe: Literal["5m", "15m", "1h"]
+    structure_timeframe: Literal["5m", "15m", "1h"] | None = None
+    trend: TrendDefinition
+    structure: StructureDefinition
+    confirmation: ConfirmationDefinition
+    entry: EntryDefinition
+    stop_loss: StopLossDefinition
+    tp1: TP1Definition
+    tp2: TP2Definition
+    risk: RiskDefinition
+    fundamentals: FundamentalDefinition = Field(default_factory=FundamentalDefinition)
+    session_filter: SessionFilterDefinition = Field(default_factory=SessionFilterDefinition)
+    seasonal_filter: SeasonalFilterDefinition = Field(default_factory=SeasonalFilterDefinition)
+
+    @model_validator(mode="after")
+    def validate_cross_fields(self):
+        if self.structure_timeframe is None:
+            self.structure_timeframe = self.trading_timeframe
+        errors = _cross_field_errors(self)
+        if errors:
+            joined = "; ".join(f"{path}: {message}" for path, message in errors.items())
+            raise ValueError(joined)
+        return self
+
+
+def _is_finite_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _valid_positive(value) -> bool:
+    return _is_finite_number(value) and float(value) > 0
+
+
+def _valid_nonnegative(value) -> bool:
+    return _is_finite_number(value) and float(value) >= 0
+
+
+def _valid_percent(value) -> bool:
+    return _is_finite_number(value) and 0 < float(value) <= 100
+
+
+def _duplicates(values: list[str]) -> bool:
+    return len(values) != len(set(values))
+
+
+def _cross_field_errors(value: StrategyDefinition) -> dict[str, str]:
+    errors: dict[str, str] = {}
+
+    if not value.symbols:
+        errors["symbols"] = "Select at least one symbol"
+    elif _duplicates(value.symbols):
+        errors["symbols"] = "Symbols cannot contain duplicates"
+
+    structure_tf = value.structure_timeframe or value.trading_timeframe
+    if TIMEFRAME_RANK.get(structure_tf, 0) < TIMEFRAME_RANK.get(value.trading_timeframe, 0):
+        errors["structure_timeframe"] = "Structure timeframe must be equal to or higher than trading timeframe"
+
+    session_filter = value.session_filter
+    if session_filter.enabled:
+        time_pattern = r"^(?:[01]\d|2[0-3]):[0-5]\d$"
+        import re
+        if not re.fullmatch(time_pattern, str(session_filter.blocked_start or "")):
+            errors["session_filter.blocked_start"] = "Use UTC time in HH:MM format"
+        if not re.fullmatch(time_pattern, str(session_filter.blocked_end or "")):
+            errors["session_filter.blocked_end"] = "Use UTC time in HH:MM format"
+        if (
+            "session_filter.blocked_start" not in errors
+            and "session_filter.blocked_end" not in errors
+            and session_filter.blocked_start == session_filter.blocked_end
+        ):
+            errors["session_filter.blocked_end"] = "Blocked start and end times must be different"
+
+    seasonal_filter = value.seasonal_filter
+    if seasonal_filter.enabled:
+        import re
+        from datetime import datetime as _datetime
+        date_pattern = r"^(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$"
+        for field, raw in (
+            ("blocked_start", seasonal_filter.blocked_start),
+            ("blocked_end", seasonal_filter.blocked_end),
+        ):
+            path = f"seasonal_filter.{field}"
+            text = str(raw or "")
+            if not re.fullmatch(date_pattern, text):
+                errors[path] = "Use UTC month-day in MM-DD format"
+                continue
+            try:
+                _datetime.strptime(f"2000-{text}", "%Y-%m-%d")
+            except ValueError:
+                errors[path] = "Use a valid calendar month and day"
+        if (
+            "seasonal_filter.blocked_start" not in errors
+            and "seasonal_filter.blocked_end" not in errors
+            and seasonal_filter.blocked_start == seasonal_filter.blocked_end
+        ):
+            errors["seasonal_filter.blocked_end"] = "Blocked start and end dates must be different"
+
+    distance_filter = value.stop_loss.distance_filter
+    if distance_filter.enabled:
+        if not _valid_nonnegative(distance_filter.minimum):
+            errors["stop_loss.distance_filter.minimum"] = "Minimum must be a finite number zero or greater"
+        if not _valid_nonnegative(distance_filter.maximum):
+            errors["stop_loss.distance_filter.maximum"] = "Maximum must be a finite number zero or greater"
+        elif _valid_nonnegative(distance_filter.minimum) and distance_filter.maximum < distance_filter.minimum:
+            errors["stop_loss.distance_filter.maximum"] = "Maximum must be at least the minimum"
+
+    if _duplicates(value.trend.methods):
+        errors["trend.methods"] = "Trend methods cannot contain duplicates"
+    if value.trend.methods:
+        if value.trend.timeframe is None:
+            errors["trend.timeframe"] = "Trend timeframe is required when trend filters are selected"
+        elif TIMEFRAME_RANK[value.trend.timeframe] <= TIMEFRAME_RANK[value.trading_timeframe]:
+            errors["trend.timeframe"] = "Trend timeframe must be higher than trading timeframe"
+    elif value.trend.timeframe is not None:
+        errors["trend.methods"] = "Select at least one trend method or clear trend timeframe"
+
+    if _duplicates(value.structure.break_validation):
+        errors["structure.break_validation"] = "Break validation rules cannot contain duplicates"
+    if "MIN_BODY_PERCENT" in value.structure.break_validation:
+        if not _valid_percent(value.structure.minimum_body_percent):
+            errors["structure.minimum_body_percent"] = "Minimum candle body must be greater than 0 and no more than 100"
+    elif value.structure.minimum_body_percent is not None:
+        errors["structure.minimum_body_percent"] = "Minimum candle body requires the Minimum candle body rule"
+    if "MIN_DISTANCE" in value.structure.break_validation:
+        if not _valid_positive(value.structure.minimum_distance_pips):
+            errors["structure.minimum_distance_pips"] = "Minimum distance must be greater than 0"
+    elif value.structure.minimum_distance_pips is not None:
+        errors["structure.minimum_distance_pips"] = "Minimum distance requires the Minimum distance rule"
+
+    if _duplicates(value.confirmation.rules):
+        errors["confirmation.rules"] = "Confirmation rules cannot contain duplicates"
+    if "MIN_BODY_PERCENT" in value.confirmation.rules:
+        if not _valid_percent(value.confirmation.minimum_body_percent):
+            errors["confirmation.minimum_body_percent"] = "Minimum candle body must be greater than 0 and no more than 100"
+    elif value.confirmation.minimum_body_percent is not None:
+        errors["confirmation.minimum_body_percent"] = "Minimum candle body requires the Minimum candle body rule"
+
+    if value.entry.method == "CONFIRMATION_CLOSE" and not value.confirmation.rules:
+        errors["entry.method"] = "Confirmation-close entry requires at least one confirmation rule"
+    elif value.entry.method == "RETEST" and "RETEST_LEVEL" not in value.confirmation.rules:
+        errors["entry.method"] = "Retest entry requires Retest broken level confirmation"
+    elif value.entry.method == "BOS_CHOCH_CLOSE" and value.confirmation.rules:
+        errors["entry.method"] = "BOS/CHOCH-close entry cannot depend on future confirmation rules"
+
+    if value.entry.remember_bos_on_confirmation_failure:
+        if value.entry.method != "CONFIRMATION_CLOSE":
+            errors["entry.remember_bos_on_confirmation_failure"] = (
+                "Remember BOS requires confirmation-close entry"
+            )
+        elif "NEXT_SAME_DIRECTION" not in value.confirmation.rules:
+            errors["entry.remember_bos_on_confirmation_failure"] = (
+                "Remember BOS requires Next candle closes same direction confirmation"
+            )
+
+    if value.stop_loss.method == "LAST_SWING":
+        if value.stop_loss.fixed_distance is not None:
+            errors["stop_loss.fixed_distance"] = "Fixed distance is not used with Last Swing"
+        if value.stop_loss.buffer_pips is not None and not _valid_nonnegative(value.stop_loss.buffer_pips):
+            errors["stop_loss.buffer_pips"] = "Swing buffer must be zero or greater"
+    else:
+        if not _valid_positive(value.stop_loss.fixed_distance):
+            errors["stop_loss.fixed_distance"] = "Fixed stop distance must be greater than 0"
+        if value.stop_loss.buffer_pips is not None:
+            errors["stop_loss.buffer_pips"] = "Swing buffer is only used with Last Swing"
+
+    if value.tp2.method == "OPPOSITE_SWING":
+        if value.tp2.value is not None:
+            errors["tp2.value"] = "Opposite Swing TP2 does not use a numeric value"
+    elif not _valid_positive(value.tp2.value):
+        errors["tp2.value"] = "TP2 value must be greater than 0"
+
+    if value.tp1.enabled:
+        if not _valid_positive(value.tp1.target_r):
+            errors["tp1.target_r"] = "TP1 target must be greater than 0"
+        elif value.tp1.target_basis == "TP2_DISTANCE" and float(value.tp1.target_r) > 1:
+            errors["tp1.target_r"] = "TP1 based on TP2 must be between 0% and 100% of the Entry-to-TP2 distance"
+        if not _valid_percent(value.tp1.close_percent):
+            errors["tp1.close_percent"] = "TP1 close percent must be greater than 0 and no more than 100"
+
+        if value.tp1.protection_mode == "FIXED":
+            if not _is_finite_number(value.tp1.protection_r):
+                errors["tp1.protection_r"] = "TP1 protection is required"
+            elif value.tp1.target_basis == "TP2_DISTANCE" and not (0 <= float(value.tp1.protection_r) <= 1):
+                errors["tp1.protection_r"] = "TP2-based protection must be between 0% and 100%"
+        else:
+            if value.tp1.target_basis != "TP2_DISTANCE":
+                errors["tp1.protection_mode"] = "Step protection requires TP1 to be based on the Entry-to-TP2 distance"
+            steps = list(value.tp1.protection_steps or [])
+            if not steps:
+                errors["tp1.protection_steps"] = "Add at least one TP2 progress protection step"
+            else:
+                previous_trigger = -1.0
+                previous_secure = -1.0
+                for index, step in enumerate(steps):
+                    trigger = float(step.trigger_percent)
+                    secure = float(step.secure_percent)
+                    path = f"tp1.protection_steps.{index}"
+                    if not _valid_percent(trigger):
+                        errors[path] = "Trigger must be greater than 0% and no more than 100%"
+                        continue
+                    if not _is_finite_number(secure) or secure < 0 or secure > 100:
+                        errors[path] = "Secure level must be between 0% and 100%"
+                        continue
+                    if secure >= trigger:
+                        errors[path] = "Secure level must stay below its trigger level"
+                        continue
+                    if trigger <= previous_trigger:
+                        errors[path] = "Protection triggers must increase"
+                        continue
+                    if secure < previous_secure:
+                        errors[path] = "Secure levels must not move backward"
+                        continue
+                    previous_trigger = trigger
+                    previous_secure = secure
+
+    if not _valid_positive(value.risk.value):
+        errors["risk.value"] = "Risk value must be a finite number greater than 0"
+
+    if value.risk.max_concurrent_positions > 1:
+        if value.risk.max_combined_open_risk_percent is None:
+            errors["risk.max_combined_open_risk_percent"] = (
+                "Combined open risk is required when multiple positions are allowed"
+            )
+        elif (
+            value.risk.method == "PERCENT_BALANCE"
+            and float(value.risk.max_combined_open_risk_percent) + 1e-12 < float(value.risk.value)
+        ):
+            errors["risk.max_combined_open_risk_percent"] = (
+                "Combined open risk must be at least the per-trade risk"
+            )
+
+    return errors
+
+
+def _normalize_tp1(payload: dict) -> dict:
+    normalized = dict(payload or {})
+    tp1 = normalized.get("tp1")
+    if not isinstance(tp1, dict):
+        return normalized
+
+    value = dict(tp1)
+    value.setdefault("target_basis", "SL_DISTANCE")
+    value.setdefault("protection_mode", "FIXED")
+    value.setdefault("protection_trigger_method", "CANDLE_CLOSE")
+    value.setdefault("protection_steps", [])
+
+    if value.get("enabled") is False:
+        value.update({
+            "target_r": None,
+            "close_percent": None,
+            "protection_r": None,
+            "target_basis": "SL_DISTANCE",
+            "protection_mode": "FIXED",
+            "protection_trigger_method": "CANDLE_CLOSE",
+            "protection_steps": [],
+        })
+    elif value.get("protection_mode") == "TP2_STEPS":
+        value["protection_r"] = None
+    else:
+        value["protection_trigger_method"] = "CANDLE_CLOSE"
+        value["protection_steps"] = []
+
+    normalized["tp1"] = value
+    return normalized
+
+
+def _pydantic_error_path(loc: tuple) -> str:
+    return ".".join(str(part) for part in loc if part != "__root__") or "strategy"
+
+
+def validation_errors(payload: dict) -> dict[str, str]:
+    """Return field-addressable validation errors for inline builder rendering."""
+    normalized = _normalize_tp1(payload if isinstance(payload, dict) else {})
+    try:
+        candidate = StrategyDefinition.model_validate(normalized)
+    except Exception as exc:
+        if hasattr(exc, "errors"):
+            result: dict[str, str] = {}
+            for item in exc.errors():
+                path = _pydantic_error_path(tuple(item.get("loc") or ()))
+                message = str(item.get("msg") or "Invalid value")
+                if message.startswith("Value error, "):
+                    # Cross-field validator encodes path/message pairs.  Recover
+                    # them below via a construct-only parse when possible.
+                    continue
+                result.setdefault(path, message)
+            # Re-parse nested models without the top-level validator so we can
+            # report cross-field locations deterministically.
+            try:
+                bare = _parse_without_cross_validation(normalized)
+                result.update(_cross_field_errors(bare))
+            except Exception:
+                pass
+            return result
+        return {"strategy": str(exc)}
+    return _cross_field_errors(candidate)
+
+
+def _parse_without_cross_validation(payload: dict) -> StrategyDefinition:
+    """Parse all fields using nested schemas while bypassing only top-level cross validation."""
+    data = {
+        "schema_version": payload["schema_version"],
+        "symbols": payload["symbols"],
+        "trading_timeframe": payload["trading_timeframe"],
+        "structure_timeframe": payload.get("structure_timeframe") or payload["trading_timeframe"],
+        "trend": TrendDefinition.model_validate(payload["trend"]),
+        "structure": StructureDefinition.model_validate(payload["structure"]),
+        "confirmation": ConfirmationDefinition.model_validate(payload["confirmation"]),
+        "entry": EntryDefinition.model_validate(payload["entry"]),
+        "stop_loss": StopLossDefinition.model_validate(payload["stop_loss"]),
+        "tp1": TP1Definition.model_validate(payload["tp1"]),
+        "tp2": TP2Definition.model_validate(payload["tp2"]),
+        "risk": RiskDefinition.model_validate(payload["risk"]),
+        "fundamentals": FundamentalDefinition.model_validate(
+            payload.get("fundamentals") or {"mode": "BLOCK_OPPOSITE"}
+        ),
+        "session_filter": SessionFilterDefinition.model_validate(
+            payload.get("session_filter") or {
+                "enabled": False,
+                "timezone": "UTC",
+                "blocked_start": "17:00",
+                "blocked_end": "20:00",
+            }
+        ),
+        "seasonal_filter": SeasonalFilterDefinition.model_validate(
+            payload.get("seasonal_filter") or {
+                "enabled": False,
+                "timezone": "UTC",
+                "blocked_start": "12-01",
+                "blocked_end": "12-15",
+            }
+        ),
+    }
+    # model_construct bypasses validators but keeps typed nested objects.
+    return StrategyDefinition.model_construct(**data)
+
+
+def normalize_definition(payload: dict) -> dict:
+    normalized = _normalize_tp1(payload)
+    if isinstance(normalized, dict):
+        normalized = dict(normalized)
+        risk = dict(normalized.get("risk") or {})
+        risk.setdefault("max_concurrent_positions", 1)
+        risk.setdefault("max_combined_open_risk_percent", None)
+        normalized["risk"] = risk
+    errors = validation_errors(normalized)
+    if errors:
+        raise ValueError("; ".join(f"{path}: {message}" for path, message in errors.items()))
+    parsed = StrategyDefinition.model_validate(normalized)
+    return parsed.model_dump(mode="json")
+
+
+def _fmt(value: float | int | None) -> str:
+    if value is None:
+        return ""
+    numeric = float(value)
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:g}"
+
+
+def strategy_summary(definition: dict) -> str:
+    value = normalize_definition(definition)
+    parts: list[str] = []
+    tf = value["trading_timeframe"]
+
+    trend = value["trend"]
+    if trend["methods"]:
+        labels = {
+            "BOS_CHOCH": "BOS/CHOCH",
+            "EMA_50": "EMA 50",
+            "EMA_200": "EMA 200",
+            "SWING_STRUCTURE": "swing structure",
+        }
+        parts.append(f"{trend['timeframe']} trend " + " + ".join(labels[item] for item in trend["methods"]))
+
+    parts.append(f"{value['structure_timeframe']} BOS/CHOCH")
+
+    structure = value["structure"]
+    validation_labels = []
+    for rule in structure["break_validation"]:
+        if rule == "CLOSE_BEYOND":
+            validation_labels.append("close beyond level")
+        elif rule == "MIN_BODY_PERCENT":
+            validation_labels.append(f"body >= {_fmt(structure['minimum_body_percent'])}%")
+        elif rule == "MIN_DISTANCE":
+            validation_labels.append(f"distance >= {_fmt(structure['minimum_distance_pips'])} pips")
+    if validation_labels:
+        parts.append(" + ".join(validation_labels))
+
+    confirmation = value["confirmation"]
+    confirmation_labels = []
+    for rule in confirmation["rules"]:
+        if rule == "NEXT_SAME_DIRECTION":
+            confirmation_labels.append("next candle same direction")
+        elif rule == "SECOND_CLOSE_BEYOND":
+            confirmation_labels.append("second close beyond level")
+        elif rule == "RETEST_LEVEL":
+            confirmation_labels.append("retest broken level")
+        elif rule == "MIN_BODY_PERCENT":
+            confirmation_labels.append(f"body >= {_fmt(confirmation['minimum_body_percent'])}%")
+    if confirmation_labels:
+        parts.append(" + ".join(confirmation_labels))
+
+    if confirmation["max_setup_age_bars"] is not None:
+        parts.append(f"setup valid {confirmation['max_setup_age_bars']} {tf} bars from original event")
+
+    session_filter = value["session_filter"]
+    if session_filter["enabled"]:
+        parts.append(
+            f"block entries {session_filter['blocked_start']}–"
+            f"{session_filter['blocked_end']} UTC"
+        )
+
+    seasonal_filter = value["seasonal_filter"]
+    if seasonal_filter["enabled"]:
+        parts.append(
+            f"block dates {seasonal_filter['blocked_start']}–"
+            f"{seasonal_filter['blocked_end']} UTC"
+        )
+
+    entry_labels = {
+        "BOS_CHOCH_CLOSE": "BOS/CHOCH close",
+        "CONFIRMATION_CLOSE": "confirmation close",
+        "RETEST": "retest entry",
+    }
+    entry_text = entry_labels[value["entry"]["method"]]
+    if value["entry"].get("remember_bos_on_confirmation_failure"):
+        entry_text += " / remember BOS on failed next candle and enter on valid re-break"
+    parts.append(entry_text)
+
+    stop = value["stop_loss"]
+    if stop["method"] == "LAST_SWING":
+        stop_text = f"{value['structure_timeframe']} swing SL"
+        if stop["buffer_pips"] is not None and float(stop["buffer_pips"]) != 0:
+            stop_text += f" + {_fmt(stop['buffer_pips'])} pip buffer"
+    else:
+        stop_text = f"SL {_fmt(stop['fixed_distance'])} pips/points"
+    parts.append(stop_text)
+    distance_filter = stop["distance_filter"]
+    if distance_filter["enabled"]:
+        unit = "% of entry" if distance_filter["mode"] == "PERCENT_ENTRY" else "pips"
+        parts.append(f"SL distance {_fmt(distance_filter['minimum'])}–{_fmt(distance_filter['maximum'])} {unit}")
+
+    tp1 = value["tp1"]
+    if tp1["enabled"]:
+        target_percent = float(tp1["target_r"]) * 100.0
+        target_basis = "TP2 distance" if tp1["target_basis"] == "TP2_DISTANCE" else "SL distance"
+        if tp1["protection_mode"] == "TP2_STEPS":
+            step_text = ", ".join(
+                f"{_fmt(step['trigger_percent'])}%→secure {_fmt(step['secure_percent'])}%"
+                for step in tp1["protection_steps"]
+            )
+            trigger_label = (
+                "price touch"
+                if tp1.get("protection_trigger_method") == "PRICE_TOUCH"
+                else "candle close"
+            )
+            protect = f"step protect on {trigger_label} {step_text}"
+        else:
+            protection_percent = float(tp1["protection_r"]) * 100.0
+            protect_basis = "TP2" if tp1["target_basis"] == "TP2_DISTANCE" else "SL"
+            protect = (
+                "breakeven"
+                if protection_percent == 0
+                else f"secure {_fmt(protection_percent)}% of {protect_basis} distance"
+            )
+        parts.append(
+            f"TP1 {_fmt(target_percent)}% of {target_basis} / "
+            f"close {_fmt(tp1['close_percent'])}% / {protect}"
+        )
+
+    tp2 = value["tp2"]
+    if tp2["method"] == "FIXED_R":
+        parts.append(f"TP2 {_fmt(tp2['value'])}R")
+    elif tp2["method"] == "FIXED_DISTANCE":
+        parts.append(f"TP2 {_fmt(tp2['value'])} pips/points")
+    else:
+        parts.append("TP2 opposite swing")
+
+    risk = value["risk"]
+    if risk["method"] == "PERCENT_BALANCE":
+        parts.append(f"risk {_fmt(risk['value'])}% balance")
+    else:
+        parts.append(f"risk ${_fmt(risk['value'])}")
+    if int(risk.get("max_concurrent_positions") or 1) > 1:
+        parts.append(f"max {int(risk['max_concurrent_positions'])} concurrent positions")
+        if risk.get("max_combined_open_risk_percent") is not None:
+            parts.append(
+                f"combined open risk <= {_fmt(risk['max_combined_open_risk_percent'])}%"
+            )
+
+    fundamental_mode = value["fundamentals"]["mode"]
+    if fundamental_mode == "REQUIRE_ALIGNMENT":
+        parts.append("LIVE fundamentals require alignment")
+    else:
+        parts.append("LIVE fundamentals block opposite bias")
+
+    return " -> ".join(parts)

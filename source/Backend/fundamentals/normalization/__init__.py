@@ -1,0 +1,2 @@
+"""Canonical economic-data normalization."""
+
