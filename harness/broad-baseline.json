@@ -1,0 +1,299 @@
+{
+  "cases": [
+    {
+      "message": "Disposable PostgreSQL service only",
+      "node": "tests.test_broker_integration_test_postgres::test_postgres_separate_process_normal_submission_cannot_overlap_test",
+      "status": "skipped",
+      "subsystem": "test_broker_integration_test_postgres"
+    },
+    {
+      "message": "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: indicator_stream_generations",
+      "node": "tests.test_chart_closed_candle_fallback::test_panel_display_reader_prefers_memory_and_strips_forming_candle",
+      "status": "failure",
+      "subsystem": "test_chart_closed_candle_fallback"
+    },
+    {
+      "message": "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: indicator_stream_generations",
+      "node": "tests.test_chart_closed_candle_fallback::test_panel_display_reader_rechecks_freshness_after_forming_candle_removed",
+      "status": "failure",
+      "subsystem": "test_chart_closed_candle_fallback"
+    },
+    {
+      "message": "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: indicator_stream_generations",
+      "node": "tests.test_chart_closed_candle_fallback::test_panel_display_reader_never_uses_another_accounts_memory_frame",
+      "status": "failure",
+      "subsystem": "test_chart_closed_candle_fallback"
+    },
+    {
+      "message": "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: indicator_stream_generations",
+      "node": "tests.test_chart_closed_candle_fallback::test_panel_display_reader_rejects_health_from_previous_account",
+      "status": "failure",
+      "subsystem": "test_chart_closed_candle_fallback"
+    },
+    {
+      "message": "AttributeError: 'Query' object has no attribute 'tzinfo'",
+      "node": "tests.test_ctrader_candle_export::test_chart_history_is_two_month_bounded_closed_and_read_only",
+      "status": "failure",
+      "subsystem": "test_ctrader_candle_export"
+    },
+    {
+      "message": "AttributeError: 'Query' object has no attribute 'tzinfo'",
+      "node": "tests.test_ctrader_candle_export::test_chart_history_ctrader_api_error_becomes_retryable_503",
+      "status": "failure",
+      "subsystem": "test_ctrader_candle_export"
+    },
+    {
+      "message": "AssertionError: False is not true",
+      "node": "tests.test_database_configuration.DatabaseConfigurationTests::test_local_sqlite_source_is_readable_for_one_time_copy",
+      "status": "failure",
+      "subsystem": "test_database_configuration"
+    },
+    {
+      "message": "AssertionError: False is not true",
+      "node": "tests.test_database_configuration.DatabaseConfigurationTests::test_models_match_existing_sqlite_tables",
+      "status": "failure",
+      "subsystem": "test_database_configuration"
+    },
+    {
+      "message": "AssertionError: {'sym[173 chars]ed': True, 'message': 'Fundamental coverage is[159 chars]True} != {'sym[173 chars]ed': False}, 'data_quality': {'status': 'INSUF[29 chars]True}",
+      "node": "tests.test_fundamental_engine_phase1.FundamentalApiTests::test_fundamentals_api",
+      "status": "failure",
+      "subsystem": "test_fundamental_engine_phase1"
+    },
+    {
+      "message": "AssertionError: no logs of level ERROR or higher triggered on fundamentals.repositories.economic_events",
+      "node": "tests.test_fundamental_insight_cache.FundamentalInsightCacheTests::test_cache_invalidation_failure_does_not_fail_committed_ingestion",
+      "status": "failure",
+      "subsystem": "test_fundamental_insight_cache"
+    },
+    {
+      "message": "AssertionError: {'symbol': 'EURUSD', 'trading_guidance': {'execution_connect[137 chars]s.'}} != {'symbol': 'EURUSD'}",
+      "node": "tests.test_fundamental_insight_reliability.FundamentalInsightReliabilityTests::test_eurusd_xauusd_route_isolation",
+      "status": "failure",
+      "subsystem": "test_fundamental_insight_reliability"
+    },
+    {
+      "message": "AssertionError: {'sym[28 chars] True, 'trading_guidance': {'execution_connect[137 chars]s.'}} != {'sym[28 chars] True}",
+      "node": "tests.test_fundamental_insight_reliability.FundamentalInsightReliabilityTests::test_route_disables_snapshot_writes",
+      "status": "failure",
+      "subsystem": "test_fundamental_insight_reliability"
+    },
+    {
+      "message": "AssertionError: no logs of level INFO or higher triggered on uvicorn.error",
+      "node": "tests.test_fundamental_insight_reliability.FundamentalInsightReliabilityTests::test_timing_record_uses_production_visible_logger",
+      "status": "failure",
+      "subsystem": "test_fundamental_insight_reliability"
+    },
+    {
+      "message": "AssertionError: assert 'V3B_5M_RECONCILIATION_START' in ''",
+      "node": "tests.test_indicator_stream_account_scope::test_account_scoped_v3b_5m_correction_rolls_back_and_replays",
+      "status": "failure",
+      "subsystem": "test_indicator_stream_account_scope"
+    },
+    {
+      "message": "AssertionError: assert 'V3B_5M_RECONCILIATION_BLOCKED_IRREVERSIBLE_EVENT' in ''",
+      "node": "tests.test_indicator_stream_account_scope::test_irreversible_live_lifecycle_blocks_repair_without_history_mutation[SUBMITTING]",
+      "status": "failure",
+      "subsystem": "test_indicator_stream_account_scope"
+    },
+    {
+      "message": "AssertionError: assert 'V3B_5M_RECONCILIATION_BLOCKED_IRREVERSIBLE_EVENT' in ''",
+      "node": "tests.test_indicator_stream_account_scope::test_irreversible_live_lifecycle_blocks_repair_without_history_mutation[CONSUMED]",
+      "status": "failure",
+      "subsystem": "test_indicator_stream_account_scope"
+    },
+    {
+      "message": "AssertionError: assert {'ok': True, 'symbol': 'EURUSD', 'side': 'BUY', 'action': 'BUY', ...} is None",
+      "node": "tests.test_simple_account_switch::test_actual_position_sync_a_b_a_preserves_frozen_management[same_worker]",
+      "status": "failure",
+      "subsystem": "test_simple_account_switch"
+    },
+    {
+      "message": "AssertionError: assert {'ok': True, 'symbol': 'EURUSD', 'side': 'BUY', 'action': 'BUY', ...} is None",
+      "node": "tests.test_simple_account_switch::test_actual_position_sync_a_b_a_preserves_frozen_management[other_worker]",
+      "status": "failure",
+      "subsystem": "test_simple_account_switch"
+    },
+    {
+      "message": "AssertionError: assert False",
+      "node": "tests.test_strategy_fast_jobs::test_cleanup_never_removes_current_process_and_only_evicts_needed_result",
+      "status": "failure",
+      "subsystem": "test_strategy_fast_jobs"
+    },
+    {
+      "message": "AssertionError: 'WAIT_V3B_STRATEGY_CONFIG_UNAVAILABLE' != 'WAIT_V3B_EXECUTION_PROFILE_UNSUPPORTED'",
+      "node": "tests.test_strategy_lab_live_v3b_execution_profile.FrozenV3BProfileTests::test_all_legacy_switches_still_cannot_reach_unaware_executor",
+      "status": "failure",
+      "subsystem": "test_strategy_lab_live_v3b_execution_profile"
+    },
+    {
+      "message": "AssertionError: False is not true",
+      "node": "tests.test_strategy_lab_live_v3b_execution_profile.FrozenV3BProfileTests::test_broker_payload_is_explicitly_stamped_and_frozen",
+      "status": "failure",
+      "subsystem": "test_strategy_lab_live_v3b_execution_profile"
+    },
+    {
+      "message": "AssertionError: False is not true",
+      "node": "tests.test_strategy_lab_live_v3b_execution_profile.FrozenV3BProfileTests::test_locked_v3b_gate_accepts_5m_identity_without_15m_ema_fields",
+      "status": "failure",
+      "subsystem": "test_strategy_lab_live_v3b_execution_profile"
+    },
+    {
+      "message": "AssertionError: 'WAIT_V3B_EXECUTION_PROFILE' != 'setup contains a future candle close'",
+      "node": "tests.test_strategy_lab_live_v3b_execution_profile.FrozenV3BProfileTests::test_locked_v3b_gate_rejects_future_or_consumed_event",
+      "status": "failure",
+      "subsystem": "test_strategy_lab_live_v3b_execution_profile"
+    },
+    {
+      "message": "TypeError: 'NoneType' object is not subscriptable",
+      "node": "tests.test_strategy_lab_live_v3b_execution_profile.FrozenV3BProfileTests::test_locked_v3b_gate_rejects_wrong_timeframe_and_active_position",
+      "status": "failure",
+      "subsystem": "test_strategy_lab_live_v3b_execution_profile"
+    },
+    {
+      "message": "AssertionError: False is not true",
+      "node": "tests.test_strategy_lab_live_v3b_execution_profile.FrozenV3BProfileTests::test_profile_aware_executor_can_only_be_reached_after_all_four_gates",
+      "status": "failure",
+      "subsystem": "test_strategy_lab_live_v3b_execution_profile"
+    },
+    {
+      "message": "AssertionError: False is not true : {'ok': False, 'reason': 'WAIT_V3B_STRATEGY_CONFIG_UNAVAILABLE', 'details': {'error': \"active strategy configuration unavailable: (sqlite3.OperationalError) no such table: runtime_settings\\n[SQL: SELECT runtime_settings.setting_name AS runtime_settings_setting_name, runtime_settings.setting_value AS runtime_settings_setting_value, runtime_settings.updated_at AS runtime_settings_updated_at, runtime_settings.updated_by AS runtime_settings_updated_by \\nFROM runtime_settings \\nWHERE runtime_settings.setting_name IN (?, ?, ?)]\\n[parameters: ('strategy_profile.V3B_M5_FROZEN.target_rr', 'strategy_profile.V3B_M5_FROZEN.protection_trigger_percent', 'strategy_profile.V3B_M5_FROZEN.protected_stop_percent')]\\n(Background on this error at: https://sqlalche.me/e/20/e3q8)\"}}",
+      "node": "tests.test_strategy_lab_live_v3b_execution_profile.FrozenV3BProfileTests::test_real_eurusd_rounded_levels_pass_frozen_contract",
+      "status": "failure",
+      "subsystem": "test_strategy_lab_live_v3b_execution_profile"
+    },
+    {
+      "message": "AssertionError: False is not true : {'ok': False, 'reason': 'WAIT_V3B_STRATEGY_CONFIG_UNAVAILABLE', 'details': {'error': \"active strategy configuration unavailable: (sqlite3.OperationalError) no such table: runtime_settings\\n[SQL: SELECT runtime_settings.setting_name AS runtime_settings_setting_name, runtime_settings.setting_value AS runtime_settings_setting_value, runtime_settings.updated_at AS runtime_settings_updated_at, runtime_settings.updated_by AS runtime_settings_updated_by \\nFROM runtime_settings \\nWHERE runtime_settings.setting_name IN (?, ?, ?)]\\n[parameters: ('strategy_profile.V3B_M5_FROZEN.target_rr', 'strategy_profile.V3B_M5_FROZEN.protection_trigger_percent', 'strategy_profile.V3B_M5_FROZEN.protected_stop_percent')]\\n(Background on this error at: https://sqlalche.me/e/20/e3q8)\"}}",
+      "node": "tests.test_strategy_lab_live_v3b_execution_profile.FrozenV3BProfileTests::test_real_xauusd_rounded_levels_pass_frozen_contract",
+      "status": "failure",
+      "subsystem": "test_strategy_lab_live_v3b_execution_profile"
+    },
+    {
+      "message": "KeyError: 'checks'",
+      "node": "tests.test_strategy_lab_live_v3b_execution_profile.FrozenV3BProfileTests::test_rounded_contract_rejects_declared_strategy_drift",
+      "status": "failure",
+      "subsystem": "test_strategy_lab_live_v3b_execution_profile"
+    },
+    {
+      "message": "KeyError: 'checks'",
+      "node": "tests.test_strategy_lab_live_v3b_execution_profile.FrozenV3BProfileTests::test_rounded_contract_still_rejects_real_geometry_drift",
+      "status": "failure",
+      "subsystem": "test_strategy_lab_live_v3b_execution_profile"
+    },
+    {
+      "message": "AssertionError: \"read-only\" does not match \"unknown active strategy setting(s): ema_fast_period, ema_slow_period\"",
+      "node": "tests.test_strategy_settings.StrategySettingsTests::test_cross_field_and_unknown_setting_validation",
+      "status": "failure",
+      "subsystem": "test_strategy_settings"
+    },
+    {
+      "message": "KeyError: 'ema_fast_period'",
+      "node": "tests.test_strategy_settings.StrategySettingsTests::test_fixed_rule_rows_are_ignored_and_cannot_be_saved",
+      "status": "failure",
+      "subsystem": "test_strategy_settings"
+    },
+    {
+      "message": "AssertionError: {'target_rr': 1.9, 'protection_trigger_perc[38 chars]60.0} != {'minimum_rr': 1.2, 'maximum_rr': 2.0, 'ris[393 chars]: 15}",
+      "node": "tests.test_strategy_settings.StrategySettingsTests::test_get_returns_current_defaults_and_validation_metadata",
+      "status": "failure",
+      "subsystem": "test_strategy_settings"
+    },
+    {
+      "message": "services.strategy_settings_service.StrategySettingsValidationError: unknown active strategy setting(s): minimum_rr",
+      "node": "tests.test_strategy_settings.StrategySettingsTests::test_history_is_newest_first_bounded_and_read_only",
+      "status": "failure",
+      "subsystem": "test_strategy_settings"
+    },
+    {
+      "message": "AssertionError: \"maximum_rr must be greater\" does not match \"unknown active strategy setting(s): maximum_rr, minimum_rr\"",
+      "node": "tests.test_strategy_settings.StrategySettingsTests::test_invalid_update_is_rejected_without_partial_write",
+      "status": "failure",
+      "subsystem": "test_strategy_settings"
+    },
+    {
+      "message": "KeyError: 'bos_buffer_points'",
+      "node": "tests.test_strategy_settings.StrategySettingsTests::test_legacy_bos_floor_row_is_read_without_losing_saved_value",
+      "status": "failure",
+      "subsystem": "test_strategy_settings"
+    },
+    {
+      "message": "services.strategy_settings_service.StrategySettingsValidationError: unknown active strategy setting(s): maximum_rr",
+      "node": "tests.test_strategy_settings.StrategySettingsTests::test_partial_update_validates_against_saved_configuration",
+      "status": "failure",
+      "subsystem": "test_strategy_settings"
+    },
+    {
+      "message": "services.strategy_settings_service.StrategySettingsValidationError: unknown active strategy setting(s): minimum_rr",
+      "node": "tests.test_strategy_settings.StrategySettingsTests::test_reset_requires_confirmation_and_restores_defaults",
+      "status": "failure",
+      "subsystem": "test_strategy_settings"
+    },
+    {
+      "message": "services.strategy_settings_service.StrategySettingsValidationError: unknown active strategy setting(s): minimum_rr, post_trade_cooldown_minutes",
+      "node": "tests.test_strategy_settings.StrategySettingsTests::test_valid_update_is_durable_and_preserves_unspecified_values",
+      "status": "failure",
+      "subsystem": "test_strategy_settings"
+    },
+    {
+      "message": "services.strategy_settings_service.StrategySettingsValidationError: unknown active strategy setting(s): minimum_rr",
+      "node": "tests.test_strategy_settings_wiring.StrategySettingsExecutionCacheTests::test_cache_avoids_cycle_reads_and_save_reset_refresh_it",
+      "status": "failure",
+      "subsystem": "test_strategy_settings_wiring"
+    },
+    {
+      "message": "services.strategy_settings_service.StrategySettingsValidationError: unknown active strategy setting(s): minimum_rr",
+      "node": "tests.test_strategy_settings_wiring.StrategySettingsExecutionCacheTests::test_concurrent_cache_miss_cannot_overwrite_completed_save",
+      "status": "failure",
+      "subsystem": "test_strategy_settings_wiring"
+    },
+    {
+      "message": "AssertionError: assert 'STRATEGY_STUDIO_OWNER_DEBUG' in ''",
+      "node": "tests.test_strategy_studio_owner_boundary::test_diagnostics_report_owner_and_counts_without_credentials",
+      "status": "failure",
+      "subsystem": "test_strategy_studio_owner_boundary"
+    },
+    {
+      "message": "assert '\"snapshot_available\": false' in ''",
+      "node": "tests.test_strategy_studio_owner_boundary::test_diagnostic_failure_does_not_replace_successful_library",
+      "status": "failure",
+      "subsystem": "test_strategy_studio_owner_boundary"
+    },
+    {
+      "message": "AssertionError: Traceback (most recent call last):",
+      "node": "tests.test_stream_generations::test_admin_import_has_no_broker_or_services_capability",
+      "status": "failure",
+      "subsystem": "test_stream_generations"
+    },
+    {
+      "message": "FileNotFoundError: [Errno 2] No such file or directory: '/var/tmp/runtime-owner-src.eIw1qa/Backend/Backend/scripts/stream_generation_recovery.py'",
+      "node": "tests.test_stream_generations::test_admin_default_dry_run_then_explicit_apply",
+      "status": "failure",
+      "subsystem": "test_stream_generations"
+    },
+    {
+      "message": "FileNotFoundError: [Errno 2] No such file or directory: '/var/tmp/runtime-owner-src.eIw1qa/Backend/Backend/migrations/versions/20260925_0026_stream_generations.py'",
+      "node": "tests.test_stream_generations::test_additive_migration_backfill_preserves_all_legacy_rows",
+      "status": "failure",
+      "subsystem": "test_stream_generations"
+    },
+    {
+      "message": "TypeError: 'NoneType' object is not subscriptable",
+      "node": "tests.test_v3b_snapshot_restore::test_empty_worker_without_exact_snapshot_mirrors_position_without_legacy_management",
+      "status": "failure",
+      "subsystem": "test_v3b_snapshot_restore"
+    },
+    {
+      "message": "TypeError: 'NoneType' object is not subscriptable",
+      "node": "tests.test_v3b_snapshot_restore::test_empty_worker_paused_position_wick_reaches_protection_only",
+      "status": "failure",
+      "subsystem": "test_v3b_snapshot_restore"
+    },
+    {
+      "message": "AssertionError: {'sym[28 chars] True, 'trading_guidance': {'execution_connect[137 chars]s.'}} != {'sym[28 chars] True}",
+      "node": "tests.test_xauusd_fundamental_engine_phase1.GoldInsightApiTests::test_route_supports_xauusd_and_preserves_eurusd_path",
+      "status": "failure",
+      "subsystem": "test_xauusd_fundamental_engine_phase1"
+    }
+  ],
+  "reference": "outputs/runtime-owner-handoff-20261012/full-final.xml"
+}

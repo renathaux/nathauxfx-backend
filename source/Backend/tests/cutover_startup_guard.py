@@ -32,9 +32,12 @@ def check_startup(source, module):
         ('legacy_adoption', 'adopt_verified_cutover'): {'_VerificationTree'},
         ('owner_handoff', '_ready_authority'): {'_verify_coverage', 'decode_manifest'},
         ('owner_handoff', 'relinquish_terminated_ready_owner'): {'_VerificationTree'},
+        ('owner_handoff', 'relinquish_terminated_runtime_owner'): {'_VerificationTree'},
     }
     commands = {'inventory_state', 'copy_state', 'verify_state'}
-    admin = {'_ready_authority', 'relinquish_terminated_ready_owner'}
+    admin = {'_ready_authority', 'relinquish_terminated_ready_owner',
+        '_runtime_safety', '_runtime_fresh', '_runtime_generation', '_runtime_provenance',
+        '_runtime_lineage', '_runtime_authority', 'relinquish_terminated_runtime_owner'}
     # Closed import/call capabilities for these two functions only. In
     # particular, an unrelated symbol from checkpoints/store is NOT permission
     # to import a writer or ownership-acquisition function from that module.
@@ -71,7 +74,63 @@ def check_startup(source, module):
             'root': {'is_absolute'}, 'safety_reader': {'database'},
             'store': {'require_owner', '_unsettled', 'relinquish'}},
     }
+    # Separate runtime-owner contract; no additional capability for the old path.
+    admin_imports.update({
+        '_runtime_safety': {},
+        '_runtime_fresh': {'time': {'time', 'monotonic'}, 'math': {'isfinite'}},
+        '_runtime_generation': {'sqlalchemy': {'select'}, 'models': {'RecoveryLegacyAdoption'},
+            'startup_recovery.checkpoints': {'_KINDS', 'ProducedEnvelope', 'checked_envelope', 'CheckpointCandidate'},
+            'startup_recovery.adoption_evidence': {'AdoptedEnvelope', 'checked_adopted_envelope',
+                'validate_adoption_receipt', 'receipt_validated_candidates'},
+            'startup_recovery.legacy_adoption': {'_receipt'}},
+        '_runtime_provenance': {'sqlalchemy': {'select'}, 'models': {'RecoveryAttempt'}},
+        '_runtime_lineage': {},
+        '_runtime_authority': {'sqlalchemy': {'select'}, 'models': {'RecoveryCheckpointHead'},
+            'startup_recovery.checkpoints': {'_KINDS'},
+            'startup_recovery.reconcile': {'DiscoverySnapshot', 'reconcile'}},
+        'relinquish_terminated_runtime_owner': {'pathlib': {'Path'}, 'time': {'monotonic'},
+            'startup_recovery.cutover_evidence': {'_VerificationTree'},
+            'startup_recovery.reconcile': {'freeze', 'thaw'}},
+    })
+    admin_calls.update({
+        '_runtime_safety': common_calls | {'sorted', 'safety'},
+        '_runtime_fresh': common_calls | {'type', 'isfinite', 'time', 'monotonic'},
+        '_runtime_generation': common_calls | {'type', 'set', 'bool', 'sorted', 'len',
+            'ProducedEnvelope', 'checked_envelope', 'CheckpointCandidate', 'AdoptedEnvelope',
+            'checked_adopted_envelope', 'select', '_receipt', 'validate_adoption_receipt', 'receipt_validated_candidates'},
+        '_runtime_provenance': common_calls | {'type', 'select', 'len'},
+        '_runtime_lineage': common_calls | {'set', 'type', '_runtime_generation', '_runtime_provenance'},
+        '_runtime_authority': common_calls | {'select', 'bool', 'len', 'set', 'sorted',
+            '_runtime_safety', '_runtime_lineage', 'reconcile', 'list'},
+        'relinquish_terminated_runtime_owner': common_calls | {'isinstance', 'type', 'bool',
+            'callable', 'getattr', 'monotonic', 'thaw', 'freeze', 'safety_reader', '_runtime_safety',
+            '_runtime_fresh', 'ManagerToken', 'Path', '_VerificationTree', 'reconciliation_uow',
+            '_runtime_authority', 'HandoffEvidence', 'RelinquishmentResult', 'RecoveryError'},
+    })
+    admin_methods.update({
+        '_runtime_safety': {},
+        '_runtime_fresh': {'broker': {'get'}},
+        '_runtime_generation': {'tree': {'read', 'entries'}, 'adopted': {'add'},
+            'session': {'scalars', 'all'}, 'select': {'where', 'execution_options'}},
+        '_runtime_provenance': {'token': {'upper'}, 'store': {'scope_key'},
+            'session': {'scalars', 'all'}, 'select': {'where', 'execution_options'}},
+        '_runtime_lineage': {'seen': {'add'}, 'store': {'scope_key'}, 'lineage': {'append'}},
+        '_runtime_authority': {'store': {'require_owner', 'scope_key'},
+            'session': {'scalars', 'all'}, 'select': {'where', 'execution_options'},
+            'projections': {'append'}, 'DiscoverySnapshot': {'create'}, 'set': {'intersection'}},
+        'relinquish_terminated_runtime_owner': {'doc': {'get'}, 'root': {'is_absolute'},
+            'tree': {'shared'}, 'safety_reader': {'database'},
+            'store': {'require_owner', '_unsettled', 'relinquish'}},
+    })
+    admin_edges = {
+        'relinquish_terminated_ready_owner': {'_ready_authority'},
+        'relinquish_terminated_runtime_owner': {'_runtime_safety', '_runtime_fresh', '_runtime_authority'},
+        '_runtime_authority': {'_runtime_safety', '_runtime_lineage'},
+        '_runtime_lineage': {'_runtime_generation', '_runtime_provenance'},
+    }
     protected_names = set().union(*admin_calls.values())
+    parsed = ast.parse(source)
+    parents = {child: parent for parent in ast.walk(parsed) for child in ast.iter_child_nodes(parent)}
 
     def receiver_root(node):
         while isinstance(node, (ast.Call, ast.Attribute)):
@@ -97,6 +156,10 @@ def check_startup(source, module):
             return module == 'owner_handoff' and self.function in admin
 
         def visit_Name(self, node):
+            if node.id in admin and isinstance(node.ctx, ast.Load):
+                parent = parents.get(node)
+                assert (module == 'owner_handoff' and isinstance(parent, ast.Call)
+                    and parent.func is node and node.id in admin_edges.get(self.function, set()))
             if module == 'owner_handoff' and (self.function is None or self.administrative()) and isinstance(node.ctx, ast.Store):
                 # Do not alias a forbidden capability under an approved name.
                 assert node.id not in protected_names
@@ -107,7 +170,7 @@ def check_startup(source, module):
             if module != 'owner_handoff' and value is not None:
                 assert 'startup_recovery.owner_handoff' not in value
                 assert value not in {'owner_handoff', '.owner_handoff',
-                    'relinquish_terminated_owner', 'relinquish_terminated_ready_owner'}
+                    'relinquish_terminated_owner', *admin}
             self.generic_visit(node)
 
         visit_BinOp = visit_Constant
@@ -115,7 +178,7 @@ def check_startup(source, module):
 
         def visit_Attribute(self, node):
             if self.administrative() and isinstance(node.value, ast.Name) and node.value.id == 'store':
-                assert node.attr in admin_methods[self.function]['store']
+                assert node.attr in admin_methods[self.function].get('store', set())
                 assert isinstance(node.ctx, ast.Load)
             self.generic_visit(node)
 
@@ -165,8 +228,7 @@ def check_startup(source, module):
             name = getattr(node.func, 'id', getattr(node.func, 'attr', ''))
             assert name not in commands
             if name in admin:
-                assert module == 'owner_handoff' and self.function == 'relinquish_terminated_ready_owner'
-                assert name == '_ready_authority'  # no automatic administrative drain
+                assert module == 'owner_handoff' and name in admin_edges.get(self.function, set())
             if self.administrative():
                 if isinstance(node.func, ast.Name):
                     assert name in admin_calls[self.function]
@@ -186,11 +248,10 @@ def check_startup(source, module):
                            and ('startup_recovery.cutover' in value
                                 or 'startup_recovery.owner_handoff' in value
                                 or value in {'owner_handoff', '.owner_handoff',
-                                    'relinquish_terminated_owner',
-                                    'relinquish_terminated_ready_owner'})
+                                    'relinquish_terminated_owner', *admin})
                            for value in (_static_string(x) for x in ast.walk(node)))
             self.generic_visit(node)
-    Guard().visit(ast.parse(source))
+    Guard().visit(parsed)
 
 
 def check_evidence(source):

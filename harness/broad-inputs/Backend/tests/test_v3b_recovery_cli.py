@@ -1,0 +1,164 @@
+import json
+
+import pandas as pd
+
+from scripts import v3b_5m_stream_recovery as cli
+
+
+def test_recovery_cli_accepts_15m_dry_run(monkeypatch, capsys):
+    frame = pd.DataFrame(
+        {
+            "Open": [1.1, 1.2],
+            "High": [1.2, 1.3],
+            "Low": [1.0, 1.1],
+            "Close": [1.15, 1.25],
+        },
+        index=pd.DatetimeIndex(pd.to_datetime([
+            "2026-09-10T09:30:00Z",
+            "2026-09-10T09:45:00Z",
+        ], utc=True)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_load_state",
+        lambda storage_key, timeframe: (
+            pd.Timestamp("2026-09-10T09:30:00Z"),
+            pd.Timestamp("2026-09-14T21:00:00Z"),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "fetch_ctrader_historical_candles",
+        lambda symbol, timeframe, start, end: frame,
+    )
+    monkeypatch.setattr(
+        cli.recovery,
+        "plan_recovery",
+        lambda request, closed: {
+            "safe": True,
+            "timeframe": request.timeframe,
+            "dry_run": request.dry_run,
+        },
+    )
+
+    cli.main([
+        "--account-id", "47810571",
+        "--symbol", "EURUSD",
+        "--timeframe", "15m",
+        "--storage-key", "EURUSD~09C2948873",
+        "--dry-run",
+        "--lookback-candles", "4",
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"dry_run": True, "safe": True, "timeframe": "15m"}
+
+
+def test_recovery_cli_accepts_1h_dry_run(monkeypatch, capsys):
+    frame = pd.DataFrame(
+        {
+            "Open": [1.1, 1.2],
+            "High": [1.2, 1.3],
+            "Low": [1.0, 1.1],
+            "Close": [1.15, 1.25],
+        },
+        index=pd.DatetimeIndex(pd.to_datetime([
+            "2026-09-15T14:00:00Z",
+            "2026-09-15T15:00:00Z",
+        ], utc=True)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_load_state",
+        lambda storage_key, timeframe: (
+            pd.Timestamp("2026-09-15T14:00:00Z"),
+            pd.Timestamp("2026-09-15T15:00:00Z"),
+        ),
+    )
+    calls = {}
+
+    def _fetch(symbol, timeframe, start, end):
+        calls.update({
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "start": start,
+            "end": end,
+        })
+        return frame
+
+    monkeypatch.setattr(cli, "fetch_ctrader_historical_candles", _fetch)
+    monkeypatch.setattr(
+        cli.recovery,
+        "plan_recovery",
+        lambda request, closed: {
+            "safe": True,
+            "timeframe": request.timeframe,
+            "dry_run": request.dry_run,
+        },
+    )
+
+    cli.main([
+        "--account-id", "47810571",
+        "--symbol", "EURUSD",
+        "--timeframe", "1h",
+        "--storage-key", "EURUSD~09C2948873",
+        "--dry-run",
+        "--lookback-candles", "4",
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"dry_run": True, "safe": True, "timeframe": "1h"}
+    assert calls["timeframe"] == "1h"
+
+
+def test_recovery_cli_passes_explicit_rebuild_start_to_state_loader(monkeypatch, capsys):
+    frame = pd.DataFrame(
+        {
+            "Open": [4290.0, 4291.0],
+            "High": [4292.0, 4293.0],
+            "Low": [4289.0, 4290.0],
+            "Close": [4291.0, 4292.0],
+        },
+        index=pd.DatetimeIndex(pd.to_datetime([
+            "2026-09-13T22:40:00Z",
+            "2026-09-13T22:45:00Z",
+        ], utc=True)),
+    )
+    calls = {}
+
+    def _load_state(storage_key, timeframe, explicit=None):
+        calls["explicit"] = explicit
+        return (
+            pd.Timestamp(explicit),
+            pd.Timestamp("2026-09-15T12:15:00Z"),
+        )
+
+    monkeypatch.setattr(cli, "_load_state", _load_state)
+    monkeypatch.setattr(
+        cli,
+        "fetch_ctrader_historical_candles",
+        lambda symbol, timeframe, start, end: frame,
+    )
+    monkeypatch.setattr(
+        cli.recovery,
+        "plan_recovery",
+        lambda request, closed: {
+            "safe": True,
+            "earliest_required_at": request.earliest_required_at,
+        },
+    )
+
+    explicit = "2026-09-13T22:40:00+00:00"
+    cli.main([
+        "--account-id", "47810571",
+        "--symbol", "XAUUSD",
+        "--timeframe", "5m",
+        "--storage-key", "XAUUSD~93C0AAE3E8",
+        "--earliest-required-at", explicit,
+        "--dry-run",
+        "--lookback-candles", "4",
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert calls["explicit"] == explicit
+    assert payload["earliest_required_at"] == explicit

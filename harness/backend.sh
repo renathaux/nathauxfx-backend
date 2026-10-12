@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+gate=${CERTIFICATION_GATE:-backend_gate}
+case "$gate" in backend_gate|broad_gate) ;; *) exit 1 ;; esac
 test "$(uname -s)" = Linux
 test "$(uname -m)" = x86_64
 test "$(python -c 'import platform; print(platform.python_version())')" = 3.14.3
@@ -115,7 +117,7 @@ sudo unshare --net -- setpriv --reuid=501 --regid=1000 --clear-groups env -i \
  DATABASE_URL="$dsn" MIGRATION_DATABASE_URL="$dsn" VERIFIER_TEST_PG_DSN="$dsn" \
  PYTHONPATH="$cert_root/test-tools:$cert_root/harness" \
  FIXTURE_EVIDENCE="$cert_root/evidence/fixture.jsonl" \
- "$cert_root/venv/bin/python" -B "$cert_root/harness/backend_gate.py" "$cert_root/source" "$cert_root/evidence"
+ "$cert_root/venv/bin/python" -B "$cert_root/harness/$gate.py" "$cert_root/source" "$cert_root/evidence"
 status=$?
 set -e
 sudo test ! -e "$cert_root/source/Backend/database/flowsignal.db"

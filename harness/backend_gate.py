@@ -53,17 +53,23 @@ cutover = expand('tests/test_cutover_*.py')
 recovery = expand('tests/test_recovery_*.py','tests/test_strategy_live_version_binding.py')
 bounded = sorted(set(recovery + cutover + ['tests/test_runtime_paths.py','tests/test_runtime_paths_postgres.py','tests/test_database_configuration.py']))
 suites = [
-    ('architecture',['tests/test_cutover_first_start.py','-k','not first_start_transport and not first_start_management and not first_start_failed'],349),
-    ('owner-adoption',expand('tests/test_owner_handoff*.py','tests/test_legacy_adoption*.py'),356),
+    ('architecture',['tests/test_cutover_first_start.py','-k','not first_start_transport and not first_start_management and not first_start_failed'],424),
+    ('runtime-owner',['tests/test_owner_handoff_runtime.py'],82),
+    ('recovery-checkpoint',expand('tests/test_recovery*.py'),392),
+    ('auth-bridge',expand('tests/test_live_integrity_*.py','tests/test_hosted_live_integrity_integration.py','tests/test_strategy_live_integrity_verifier.py','tests/test_strategy_studio_owner_boundary.py'),170),
+    ('broader-auth',['tests/'+name+'.py' for name in ['test_live_order_intent','test_live_decimal_prices','test_live_identity_metadata_integration','test_broker_execution_metadata','test_strategy_studio_live_candidate','test_fundamental_execution_guard','test_strategy_engine_evaluator','test_account_approval']],164),
+    ('multi-user',['tests/test_multi_user_auth.py'],4),
+    ('preenable',['tests/test_live_integrity_preenable.py'],41),
+    ('owner-adoption',expand('tests/test_owner_handoff*.py','tests/test_legacy_adoption*.py'),438),
     ('recovery-runtime',expand('tests/test_recovery*.py','tests/test_runtime_paths*.py'),412),
-    ('hosted-verifier',expand('tests/test_live_integrity_*.py','tests/test_hosted_live_integrity_integration.py','tests/test_strategy_live_integrity_verifier.py'),127),
+    ('hosted-verifier',expand('tests/test_live_integrity_*.py','tests/test_hosted_live_integrity_integration.py','tests/test_strategy_live_integrity_verifier.py'),159),
     ('broader-affected',['tests/'+name+'.py' for name in ['test_live_order_intent','test_live_decimal_prices','test_live_identity_metadata_integration','test_broker_execution_metadata','test_strategy_studio_live_candidate','test_fundamental_execution_guard','test_strategy_engine_evaluator']],157),
     ('database-config',['tests/test_database_configuration.py'],7),
-    ('owner',expand('tests/test_owner_handoff*.py'),172),
-    ('focused',expand('tests/test_cutover_evidence.py','tests/test_cutover_first_start.py','tests/test_legacy_adoption_*.py','tests/test_owner_handoff*.py'),730),
+    ('owner',expand('tests/test_owner_handoff*.py'),254),
+    ('focused',expand('tests/test_cutover_evidence.py','tests/test_cutover_first_start.py','tests/test_legacy_adoption_*.py','tests/test_owner_handoff*.py'),887),
     ('safe-recovery',recovery,444),
-    ('cutover',cutover,691),
-    ('bounded',bounded,1162),
+    ('cutover',cutover,766),
+    ('bounded',bounded,1237),
 ]
 results = {}
 try:

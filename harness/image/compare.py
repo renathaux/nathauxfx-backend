@@ -5,8 +5,9 @@ import sys
 import os
 
 def validate_backend(backend):
-    expected={'architecture':349,'owner-adoption':356,'recovery-runtime':412,
-        'hosted-verifier':127,'broader-affected':157,'database-config':7,'owner':172,'focused':730,'safe-recovery':444,'cutover':691,'bounded':1162}
+    expected={'architecture':424,'owner-adoption':438,'recovery-runtime':412,
+        'hosted-verifier':159,'broader-affected':157,'database-config':7,'owner':254,'focused':887,'safe-recovery':444,'cutover':766,'bounded':1237,
+        'runtime-owner':82,'recovery-checkpoint':392,'auth-bridge':170,'broader-auth':164,'multi-user':4,'preenable':41}
     assert set(backend)==set(expected)
     for name,n in expected.items():
         assert backend[name]==dict(tests=n,failures=0,errors=0,skipped=0)
@@ -26,6 +27,9 @@ if __name__=='__main__':
     root=Path(sys.argv[1]);paths=sorted(root.glob('image-evidence-*/image-result.json'))
     assert len(paths)==2
     result=compare(*(json.loads(p.read_text()) for p in paths))
+    broad=json.loads((root/'broad/broad-comparison.json').read_text())
+    assert broad['pass'] and not broad['new'] and not broad['missing'] and not broad['changed']
+    result['broad_fingerprint_match']=True
     backend=root/'backend'
     result['backend_suites']=validate_backend(json.loads((backend/'backend-results.json').read_text()))
     deadline=json.loads((backend/'deadline-regression.json').read_text())
@@ -39,14 +43,15 @@ if __name__=='__main__':
     assert all(n==0 for phase in ('before','after') for n in migration[phase]['rows'].values())
     result['backend_migration']=migration
     result['source_after_cleanup']=json.loads((backend/'source-after.json').read_text())
-    assert result['source_after_cleanup']['source_files']==371
-    assert result['source_after_cleanup']['manifest_sha256']=='37c5ba049b5c06de3291cb5789b880ddb5a3bc5cb9b60695feb9f61ea030a31a'
+    assert result['source_after_cleanup']['source_files']==376
+    assert result['source_after_cleanup']['manifest_sha256']=='dbfa367c95c106c787b8338b282c2e83f4985cecb845ac3cb5bd8e233c32a0cc'
     result['origins']={'application':'c8c82ece5856c2e040b75070bad7888beedd2f60',
         'maintenance':'d223082822bd209858ce4c699e5fa907e654dc29',
         'composite':'63b42795ca26bdecb1be6d7758c8ae757eee90d4',
-        'deadline_patch':'faa946a8ea52a1654371f95a1f88ca56fdb3a73a',
+        'deadline_patch':'faa946a8ea52a1654376f95a1f88ca56fdb3a73a',
         'preenable_patch':'1a664174dfcc8b42da12718244c581aebfdb54f2',
-        'ready_owner_patch':'35a3c763de242a1671d9902b8c450d06a059faa4'}
+        'ready_owner_patch':'35a3c763de242a1671d9902b8c450d06a059faa4',
+        'runtime_owner_auth_composite':'4c1c483086f08a8c2596cb400725071d03a1249e'}
     result['base_digest']='sha256:c6f0b5b3a167963de3cc7cd97fe1a5d07105c8d27f47507ab31d648b533b05c7'
     result['oci_artifacts']=['tested-oci-'+str(n)+'-'+os.environ['GITHUB_RUN_ID'] for n in (1,2)]
     result['protected_paths']=[]

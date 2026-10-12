@@ -26,18 +26,33 @@ def runtime_snapshot():
 def verify(selectors:Selectors,request:Request):
     if os.getenv('STRATEGY_LIVE_INTEGRITY_VERIFY_ENABLED')!='1':
         return JSONResponse({'detail':'NOT_FOUND'},status_code=404,headers=_HEADERS)
-    header=request.headers.get('Authorization','')
-    token=header[len('FlowSignalUser '):].strip() if header.startswith('FlowSignalUser ') else request.cookies.get('flowsignal_session','')
+    headers=request.headers.getlist('Authorization')
+    header=headers[0] if len(headers)==1 else ''
+    scheme='modern'
+    if len(headers)>1:
+        return JSONResponse({'detail':'ACCESS_DENIED'},status_code=401,headers=_HEADERS)
+    if headers:
+        if header.startswith('Bearer '):
+            scheme='legacy-owner';token=header[len('Bearer '):]
+        elif header.startswith('FlowSignalUser '):
+            token=header[len('FlowSignalUser '):].strip()
+        else:
+            return JSONResponse({'detail':'ACCESS_DENIED'},status_code=401,headers=_HEADERS)
+        if not token or any(c.isspace() for c in token):
+            return JSONResponse({'detail':'ACCESS_DENIED'},status_code=401,headers=_HEADERS)
+    else:
+        token=request.cookies.get('flowsignal_session','')
     csrf=request.headers.get('X-FlowSignal-CSRF','')
     if not token:
         return JSONResponse({'detail':'ACCESS_DENIED'},status_code=401,headers=_HEADERS)
-    if not csrf or len(token)>2048 or len(csrf)>128:
+    if len(token)>2048 or (scheme=='modern' and (not csrf or len(csrf)>128)):
         return JSONResponse({'detail':'ACCESS_DENIED'},status_code=403,headers=_HEADERS)
+    if scheme=='legacy-owner':csrf=''
     try:
         deadline=time.monotonic()+TIMEOUT_SECONDS
         before=runtime_snapshot()
         if time.monotonic()>=deadline:raise TimeoutError()
-        result=run(dict(strategy_id=selectors.strategy_id,symbol=selectors.symbol,token=token,csrf=csrf,runtime=before,deadline=deadline))
+        result=run(dict(strategy_id=selectors.strategy_id,symbol=selectors.symbol,token=token,csrf=csrf,auth_scheme=scheme,runtime=before,deadline=deadline))
         if before!=runtime_snapshot():
             result=dict(status=200,body=dict(decision='WOULD_BLOCK',REAL_ORDER_DISPATCH_AVAILABLE=False,block_reasons=['RUNTIME_IDENTITY_CHANGED']))
         if time.monotonic()>=deadline:raise TimeoutError()

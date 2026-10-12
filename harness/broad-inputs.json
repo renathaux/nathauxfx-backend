@@ -1,0 +1,610 @@
+{
+  "files": [
+    {
+      "path": "Backend/benchmarks/profile_fast.py",
+      "sha256": "a68b864c642786c248aa0f24156cba330c24f760e10b7f1e155693140798fcb2",
+      "size": 7949
+    },
+    {
+      "path": "Backend/benchmarks/verify_fast.py",
+      "sha256": "b962b1dc0e41645cb3e0d90aff1dd83d12ce56e90f79ec3891f60de53d33f119",
+      "size": 2707
+    },
+    {
+      "path": "Backend/benchmarks/verify_fast_memory.py",
+      "sha256": "5fc215c49bf03c834536b2584230bcf9a437ded4ec531261f1aa3a00e03bcbe6",
+      "size": 3014
+    },
+    {
+      "path": "Backend/scripts/migrate_sqlite_to_neon.py",
+      "sha256": "944d6cfd065d9f893344d0a28860813c694655706177f7b2c261de245f68480a",
+      "size": 5788
+    },
+    {
+      "path": "Backend/scripts/run_broker_integration_test.py",
+      "sha256": "b61bdfa7b7acfe54794e4ac813c7dd23df3837f12d989f027dcbb8ba0d66f8b1",
+      "size": 1719
+    },
+    {
+      "path": "Backend/scripts/run_stream_generation_postgres_verification.py",
+      "sha256": "340bf5cbb952b562e9aace23d9266d463739a93155b415105c038e0a498dcfcf",
+      "size": 7757
+    },
+    {
+      "path": "Backend/scripts/stream_generation_recovery.py",
+      "sha256": "b8c296c877f750cd70754d709e2b66aad33c856c2b6c9294952c9d044786e4d4",
+      "size": 2579
+    },
+    {
+      "path": "Backend/scripts/v3b_5m_stream_recovery.py",
+      "sha256": "8e8a0705e9b9b6a056d6fada3319db9576d59458e9e1890de61ea54ea769ffea",
+      "size": 3731
+    },
+    {
+      "path": "Backend/tests/checkpoint_admission_fixture.py",
+      "sha256": "a82be187846867e938b980d96e2e4a657f41a233fa32f523eab4666b8f730beb",
+      "size": 2691
+    },
+    {
+      "path": "Backend/tests/live_claim_admission_fixture.py",
+      "sha256": "e16478331d72cdfea0f8cea7125b0649a55157edd483dd7a6ba351547caf8df6",
+      "size": 1299
+    },
+    {
+      "path": "Backend/tests/runtime_policy_fixture.py",
+      "sha256": "4d4a8c252be7704d23e6be55f4f0ddf9ee52ce126887a738afb73aa52bab315c",
+      "size": 1186
+    },
+    {
+      "path": "Backend/tests/test_active_trade_tp1_protection.py",
+      "sha256": "453d72ed19fb27a874b4ff371f133c6dc288565afd11c6df0e1560f05cfcb654",
+      "size": 12530
+    },
+    {
+      "path": "Backend/tests/test_broker_integration_test.py",
+      "sha256": "15051529f24ae55dcfc55185b791a2aa6848155ec9cf1b1e25523849b7c8bb27",
+      "size": 18992
+    },
+    {
+      "path": "Backend/tests/test_broker_integration_test_adapter.py",
+      "sha256": "428bc92b45b33a3069daf78979df25c6f1848199c1c61a4595ec453113db865e",
+      "size": 24552
+    },
+    {
+      "path": "Backend/tests/test_broker_integration_test_postgres.py",
+      "sha256": "0bab47ef9fc18bac57b9204e88dbcd11c4f7e997112d5821a46dc5bef649b546",
+      "size": 1725
+    },
+    {
+      "path": "Backend/tests/test_chart_closed_candle_fallback.py",
+      "sha256": "82ceb1ffea62c609aed626a732247e1a5b5f41ea46e9bfaa89f8367bbe8c9b39",
+      "size": 6103
+    },
+    {
+      "path": "Backend/tests/test_ctrader_candle_export.py",
+      "sha256": "41fa1c731cf10b658cd0ae4400b61dc58e9816f66570953f6788627e6e85a57b",
+      "size": 17082
+    },
+    {
+      "path": "Backend/tests/test_ctrader_durable_account_selection.py",
+      "sha256": "75efb8daba652e98ac1676fc7b8511aaf39ee9d3b3b309753a1d4df1421addfa",
+      "size": 4686
+    },
+    {
+      "path": "Backend/tests/test_ctrader_full_symbols_read_only.py",
+      "sha256": "69d2811b17cbd562d61625b9aa79a96313d4d84b2b5ffce95355e07bfd80c3db",
+      "size": 4240
+    },
+    {
+      "path": "Backend/tests/test_ctrader_live_stream_startup.py",
+      "sha256": "d70d23c8646cb2bf7633b1f7301009189a6d247ff39f8b4499dd5b98d8d28e68",
+      "size": 1862
+    },
+    {
+      "path": "Backend/tests/test_ctrader_m1_research.py",
+      "sha256": "88a2a0771a57880a186c3a1faf6683439d290fbb374c1e45c2ecd9e0a145c29b",
+      "size": 2339
+    },
+    {
+      "path": "Backend/tests/test_ctrader_sltp_amendment_readback.py",
+      "sha256": "47472eff5f1f27e9affc49af95be5ce24ccc7bdf1f51b50ce7dcf23341614c5b",
+      "size": 1955
+    },
+    {
+      "path": "Backend/tests/test_ctrader_structural_sl_guard.py",
+      "sha256": "516a862abf6fab3206c9c2c24629e23dd45d364af363de2c59799bacd8d94dec",
+      "size": 1172
+    },
+    {
+      "path": "Backend/tests/test_ctrader_symbol_metadata_diagnostic.py",
+      "sha256": "e768148006d870032e918d5fefb43903049e0b2510853ef10deaba5910759e8c",
+      "size": 13630
+    },
+    {
+      "path": "Backend/tests/test_ctrader_token_persistence.py",
+      "sha256": "a876ba1c664e1c097f1d7ad92fcd24b1613fcaba5336321179d8e25c17a128ce",
+      "size": 7459
+    },
+    {
+      "path": "Backend/tests/test_ctrader_websocket_keepalive.py",
+      "sha256": "fe1f19a05a6aa48ceae3e93a4fc36fe06dc82ed75dc8023ed42b9ec76984a2d4",
+      "size": 2094
+    },
+    {
+      "path": "Backend/tests/test_customer_forex_guard.py",
+      "sha256": "920f70e96f93a64769e232aac53e3ae7d66d6f84e0be462aca39dd95df37da21",
+      "size": 1203
+    },
+    {
+      "path": "Backend/tests/test_dashboard_display_fallback.py",
+      "sha256": "6f6ac0397e37e7ffee76ccbe6877a4a0f5660154b97b5f53c649acf934f9b815",
+      "size": 6308
+    },
+    {
+      "path": "Backend/tests/test_email_credential_security.py",
+      "sha256": "ebb2d053730b407765e6453493e3b3b8d3c1d639975486f777a0b83f9b4cfbc6",
+      "size": 1637
+    },
+    {
+      "path": "Backend/tests/test_email_verification_otp.py",
+      "sha256": "ac77253aef5246f8461a61da56c50d840e652b4cddbc0b2304bc59cb8e8a2c0d",
+      "size": 3849
+    },
+    {
+      "path": "Backend/tests/test_execution_authority.py",
+      "sha256": "634b43d1626a74e2005a89f6f68840d8d242d8953e77cbcce5558d4c7f739510",
+      "size": 8681
+    },
+    {
+      "path": "Backend/tests/test_fundamental_backfill.py",
+      "sha256": "53e666dd52bb5fc4cefc0c6a6de4b1ecb56e6adaedc430edcea6349fed6f5cb5",
+      "size": 13578
+    },
+    {
+      "path": "Backend/tests/test_fundamental_engine_phase1.py",
+      "sha256": "767567eec43129e6c244025cc023aeed9609e5d717254b6b503ed73053232207",
+      "size": 10011
+    },
+    {
+      "path": "Backend/tests/test_fundamental_engine_phase2.py",
+      "sha256": "e899ed699cee82f2015b9ce8b07c894091f510e266830cf4ba17a66c3ea4889f",
+      "size": 11626
+    },
+    {
+      "path": "Backend/tests/test_fundamental_evidence_readiness.py",
+      "sha256": "a587f182d41b2390805309219c201efcaeadd89103a8d0925453066b0b352cd8",
+      "size": 11473
+    },
+    {
+      "path": "Backend/tests/test_fundamental_insight_cache.py",
+      "sha256": "69001c8b4f8a67e11d8a9edfc815ec532adb5a2af9fd822078d21d4aae56e45b",
+      "size": 8994
+    },
+    {
+      "path": "Backend/tests/test_fundamental_insight_reliability.py",
+      "sha256": "77e594b88eb649cdaa4538e0157b077147229fe4e65f682332df8668f19ebb37",
+      "size": 21378
+    },
+    {
+      "path": "Backend/tests/test_heavy_replay_admission.py",
+      "sha256": "3ba04151e5fe0b20acb8101bb93a61dba033e5e23a36eb641e73bb4c791394e7",
+      "size": 3252
+    },
+    {
+      "path": "Backend/tests/test_heavy_replay_integration.py",
+      "sha256": "9a6cc2de3f5482c96fcfd570d0eae4c3f59cca07cf7866c0c29dddc626376631",
+      "size": 6008
+    },
+    {
+      "path": "Backend/tests/test_indicator_candle_display_reader.py",
+      "sha256": "6933c57334db6b0b870c1a3944925d89a740a5959802fa99b239554123786918",
+      "size": 12247
+    },
+    {
+      "path": "Backend/tests/test_indicator_event_stream.py",
+      "sha256": "8dfce33f2fe328cbd1c6fac3d0c8c9863bb358673a6bcd380574c800f00e6dc9",
+      "size": 26547
+    },
+    {
+      "path": "Backend/tests/test_indicator_stream_account_scope.py",
+      "sha256": "13c1dbc8f054095549f17bc99ed94cbd64310fa3c070555d47b307d2659c8b53",
+      "size": 49883
+    },
+    {
+      "path": "Backend/tests/test_indicator_stream_origin_boundary.py",
+      "sha256": "bad96bbc71387fe99515dfeb1f6aa64539f58365835830ebff5242d4e3af404b",
+      "size": 3292
+    },
+    {
+      "path": "Backend/tests/test_manual_broker_sl_protection.py",
+      "sha256": "0b6af922fb64f392d332cc613175104f963605d68725d962eb11eb144295ba86",
+      "size": 1169
+    },
+    {
+      "path": "Backend/tests/test_monthly_history_window.py",
+      "sha256": "c5c3f0b6f5b071ff6b7dc0479f07eec07be7e4f6bf39c2767936fcdc292e4453",
+      "size": 6294
+    },
+    {
+      "path": "Backend/tests/test_neon_observer_optimization.py",
+      "sha256": "cdbef2d59c1816a2e6b3a0bd0833efc2bd263d71f177c19669b43224134da7e5",
+      "size": 3925
+    },
+    {
+      "path": "Backend/tests/test_neon_traffic_optimization.py",
+      "sha256": "999744ccdc9334467b278792fdef9bb16905a0e558849d76d6a63a3c22ce307e",
+      "size": 3750
+    },
+    {
+      "path": "Backend/tests/test_official_backfill.py",
+      "sha256": "0421528d268eaefe67fd6d7eac83fdef4c2ca524db78558ac312d7b5324b65e2",
+      "size": 7884
+    },
+    {
+      "path": "Backend/tests/test_official_fundamental_sources.py",
+      "sha256": "7a64d03c8e379c7ae12495568ba97171f624a40daec52a00c5ab8ed1531492da",
+      "size": 21305
+    },
+    {
+      "path": "Backend/tests/test_phase12_ctrader_rollover_gap.py",
+      "sha256": "8a088da7678a107082c83500f0ea0ac48094ab801bbb3c8ad0c2759175762190",
+      "size": 17752
+    },
+    {
+      "path": "Backend/tests/test_phase_1_2_final_audit.py",
+      "sha256": "792a302b8a141e00646e645acd29ae66b41a71310755095a00010dc1d9f50bdc",
+      "size": 17058
+    },
+    {
+      "path": "Backend/tests/test_ready_execution_handoff.py",
+      "sha256": "baa21bc51417a4af77b945ade2ed294bd5d5f8d52b58721103520404d02f6ff6",
+      "size": 28156
+    },
+    {
+      "path": "Backend/tests/test_setup_swing_execution_guard.py",
+      "sha256": "cd5cc10302f88580587b0adefe06452926f858935c8d670b28a90cb54cdc162e",
+      "size": 7104
+    },
+    {
+      "path": "Backend/tests/test_simple_account_switch.py",
+      "sha256": "965c801157857489b1b7d7714169977b8201b5279696961ec9cfc93921eb68b4",
+      "size": 33505
+    },
+    {
+      "path": "Backend/tests/test_smc_breakout_adapter.py",
+      "sha256": "2a9c7547e622f432fcaec34393ad2e4d9656749bb45c8520f0f77144392953a0",
+      "size": 6721
+    },
+    {
+      "path": "Backend/tests/test_smc_indicator_engine.py",
+      "sha256": "5925a982127a5b18f5fd52518cd8dea0697f96c69dc7abf702752725b300bf40",
+      "size": 17522
+    },
+    {
+      "path": "Backend/tests/test_smc_strategy_authority.py",
+      "sha256": "ea768bacb04f63fcdca619f0664c6fe6f04108696524490e384cd529ae7e962c",
+      "size": 19534
+    },
+    {
+      "path": "Backend/tests/test_smc_structure_distance.py",
+      "sha256": "fbf4b379961f8d4981fd40bb1f67084f5badcfc6bed0fa7e72083d8c9934a918",
+      "size": 1834
+    },
+    {
+      "path": "Backend/tests/test_stale_ctrader_spot.py",
+      "sha256": "4a8b19a77e12f194bd5a1499269289bf15abaea8bbb0c47dc7b223cdc4955b80",
+      "size": 11338
+    },
+    {
+      "path": "Backend/tests/test_strategy_engine_market_facts.py",
+      "sha256": "d24abcc21d0e9bc3280195828cb761c40ff69ac8afaf00e50757b98371e28d66",
+      "size": 6950
+    },
+    {
+      "path": "Backend/tests/test_strategy_execution_controls.py",
+      "sha256": "4098d29aee58d70791a8424320d7a7a4ee3a6b2cb343949c1d810166ce344495",
+      "size": 10507
+    },
+    {
+      "path": "Backend/tests/test_strategy_fast_aggregation.py",
+      "sha256": "0efbf7fe026d3a3a55d40096d862bb2e4c5fe36f3f0f113e24c576ae281b2fd7",
+      "size": 2900
+    },
+    {
+      "path": "Backend/tests/test_strategy_fast_history.py",
+      "sha256": "7fe62e4b9207eab704b1b7f4bfe23352bae1f2345bc862dd8df5dd2c032fc231",
+      "size": 14535
+    },
+    {
+      "path": "Backend/tests/test_strategy_fast_jobs.py",
+      "sha256": "d20a4e8e53629efb5b2cb46063c937acd246cac356400be2a736df7faf86db0e",
+      "size": 6841
+    },
+    {
+      "path": "Backend/tests/test_strategy_fast_lifecycle.py",
+      "sha256": "b37ae846971599265b8e66b6bafbbdcc13bf4b22bc2e2d06bb20f616a3a98a92",
+      "size": 10656
+    },
+    {
+      "path": "Backend/tests/test_strategy_fast_performance.py",
+      "sha256": "f15effb707006944a282c277acb1744ce4d84b94dfd4add70fa0133dc7dda56e",
+      "size": 3343
+    },
+    {
+      "path": "Backend/tests/test_strategy_fast_results.py",
+      "sha256": "8d6792b5302b79ebf1f1657758c6ac1fdd16f9ea1628fe959425522c60839417",
+      "size": 3526
+    },
+    {
+      "path": "Backend/tests/test_strategy_fast_window_facts.py",
+      "sha256": "8fa605d30936ab3b2c32704edb3a03dc184e93274bbeba409c89a95481510e9c",
+      "size": 9751
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab.py",
+      "sha256": "0b7615070cab60ff41e7554afdf7e6b4cc62308c2bde23309e5424cf3884b3f6",
+      "size": 11383
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_hardening.py",
+      "sha256": "38d8145ec870c3ccfc566fe621ec7d030bfb414c8345fc2b7b2bf01dc9720213",
+      "size": 6691
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_live_v3b.py",
+      "sha256": "8e32e675e1dd9b3ce1b2f061b78ac75d0c5048d2149121ee1c0ca794d22c808c",
+      "size": 16147
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_live_v3b_execution_adapter.py",
+      "sha256": "66f803338ce7f5ca755edf68a70f8ad1c671e290051788ecc3ae0192fc4f132f",
+      "size": 10719
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_live_v3b_execution_profile.py",
+      "sha256": "15acc5933b15c8d6034fbadcdb4e5d2db48194e6f79cb1af0ab0ae577a5bfcfc",
+      "size": 9949
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_live_v3b_runtime_install.py",
+      "sha256": "a209429d6b22a4299aab2c86a95b4ec803c03ed8691ac9d983d9caf209e01ba6",
+      "size": 32669
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_paper_v3b.py",
+      "sha256": "b1c2fe0190a7b11376e33c89a541fd42ee39544f89dfd976193d29f904483353",
+      "size": 16873
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_v2.py",
+      "sha256": "f2bee0499d913214cdebe1357516d36addd2787237fdc02d3cbceb13e49e6109",
+      "size": 3921
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_v3.py",
+      "sha256": "4bd5da0dd4ebfdc39b9b3f101156b49a1c4213d94931f34fcf063b880ab9d0b3",
+      "size": 4888
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_v3b.py",
+      "sha256": "a1892f27c7060b23494867b2a5cc10ba32511071c20915ad6ed16c17b0b634d9",
+      "size": 2893
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_v3b_choch_acceptance.py",
+      "sha256": "656f4417c3debb71f89eeaeb8c8cfbda40d2ce76762ab2662ac85a057cdc8fb8",
+      "size": 5274
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_v3b_dashboard_state.py",
+      "sha256": "a4cd81a7d07b36e56194bbf90f76d898fd87a4c2ce56868caa7ad05b22191e8b",
+      "size": 8450
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_v3b_xauusd.py",
+      "sha256": "949ffceaa36ef26b869b9ed85fec785c94049f6284851b828f24493287143e0d",
+      "size": 2007
+    },
+    {
+      "path": "Backend/tests/test_strategy_lab_variants.py",
+      "sha256": "a2943983b08ee45c4a8faa82f520e655657d586e40891957e759086ae428ddf0",
+      "size": 3212
+    },
+    {
+      "path": "Backend/tests/test_strategy_memory_boundaries.py",
+      "sha256": "6d35f6b5cdc8107e363546bf334cf9ebe0179f23346abc4557cfdcbef55dac34",
+      "size": 11326
+    },
+    {
+      "path": "Backend/tests/test_strategy_memory_cleanup.py",
+      "sha256": "ecb962d16a31dcb9761c16426b0513ff442b5bae7dc10a4bebc9abd5a4b312cb",
+      "size": 2322
+    },
+    {
+      "path": "Backend/tests/test_strategy_memory_first.py",
+      "sha256": "3496fe2719793719581696ce84eef91001f80bb920ebf8468b6306e58acc9d19",
+      "size": 4831
+    },
+    {
+      "path": "Backend/tests/test_strategy_settings.py",
+      "sha256": "d216b0c56ece93bd3584d1a82c66dd0b12db91184b02d303bcf3bd4a095c0db9",
+      "size": 8856
+    },
+    {
+      "path": "Backend/tests/test_strategy_settings_wiring.py",
+      "sha256": "233876a8157b6437f07475bd6ef34ac4f6e68f8c4b34835f08aa9ffa7b0028d2",
+      "size": 30605
+    },
+    {
+      "path": "Backend/tests/test_strategy_simulator.py",
+      "sha256": "48c8db2f10fccb70ffab809b12b1eda32178fcce77213ea2f1d36d138f41dbbb",
+      "size": 25474
+    },
+    {
+      "path": "Backend/tests/test_strategy_simulator_routes.py",
+      "sha256": "6853aba1da3f9ecba5a12a72982f72ae031387d0602c95d82a5f66d857b4c050",
+      "size": 13595
+    },
+    {
+      "path": "Backend/tests/test_strategy_studio_account_switch.py",
+      "sha256": "d1c104fe5c993d12ef54581ca84350fcbf1438184b4ae184544415e347fee31d",
+      "size": 5210
+    },
+    {
+      "path": "Backend/tests/test_strategy_studio_live_handoff.py",
+      "sha256": "4d0df9e0b3211bdfd1689f79321637a573e641bffd8fea56ba2e48b49c23d5a1",
+      "size": 11952
+    },
+    {
+      "path": "Backend/tests/test_strategy_studio_live_handoff_endpoint.py",
+      "sha256": "72dd912bbb70a4b1568ff3f2eae7b351273e7546d4cc640bcbe508e588af95e8",
+      "size": 13518
+    },
+    {
+      "path": "Backend/tests/test_strategy_studio_owner_boundary.py",
+      "sha256": "8ed98937e21329470c29c230bcdf8b23ae2dda495b1261257c07c92a981438d8",
+      "size": 8312
+    },
+    {
+      "path": "Backend/tests/test_strategy_studio_parity.py",
+      "sha256": "9861af91fb2fe1e28a71f1d578f9a4ed67413d3987b816b146f25c789b3acdcc",
+      "size": 11436
+    },
+    {
+      "path": "Backend/tests/test_strategy_studio_real_history_parity_snapshot.py",
+      "sha256": "1c0c95417405143a47331a3f94ae48c84771d776fbb8e9aa9bf858be23c7d072",
+      "size": 42048
+    },
+    {
+      "path": "Backend/tests/test_strategy_studio_routes.py",
+      "sha256": "0602389df83d1a990e98586be79e3b6b4e27e355433322102c2252061daf112e",
+      "size": 3507
+    },
+    {
+      "path": "Backend/tests/test_strategy_studio_schema.py",
+      "sha256": "c6ccdbdce9343e6107d14b4ce1002a4a966cbf9f792149e6c10d25f445633e6b",
+      "size": 12164
+    },
+    {
+      "path": "Backend/tests/test_strategy_studio_service.py",
+      "sha256": "0960a3adda2314e2af4d951c537cf35dc9882645df6ac60ed8c0b237935e15a9",
+      "size": 7964
+    },
+    {
+      "path": "Backend/tests/test_strategy_studio_submission.py",
+      "sha256": "2a8c6629f24bc927c322b1beb8ee6275ceffa0617e32d8406cc25020d3c85ada",
+      "size": 11032
+    },
+    {
+      "path": "Backend/tests/test_stream_generations.py",
+      "sha256": "c0c7b553c214df22d075c7c48348b92063d27bc92590fc0e336f21f360946862",
+      "size": 42851
+    },
+    {
+      "path": "Backend/tests/test_structural_sl_alignment.py",
+      "sha256": "924cf3e76b08cb4f1aa26e176bf56acb52380a1886e5389a3340be0e6d11d601",
+      "size": 3898
+    },
+    {
+      "path": "Backend/tests/test_submission_capacity.py",
+      "sha256": "75a6ff7a70ac3063d64c81da58f41836a19a6ce0f4f904b114d8b987a21ad13f",
+      "size": 9290
+    },
+    {
+      "path": "Backend/tests/test_tick_research_window.py",
+      "sha256": "2af63970f79292851e841fc72ac17614e2c38f96a7a5f3d07387b963fec2e0ce",
+      "size": 2851
+    },
+    {
+      "path": "Backend/tests/test_treasury_yield_ingestion.py",
+      "sha256": "974816deac2b82089e966cef8652ec0f422e81edc8d8a085ad06e557006ab0c6",
+      "size": 8813
+    },
+    {
+      "path": "Backend/tests/test_v1_removed.py",
+      "sha256": "34e78eab1540b0d89fdadbfb5bc57e9e05d44bca439da7bd6bfe03ac8d059d07",
+      "size": 1452
+    },
+    {
+      "path": "Backend/tests/test_v2_removed.py",
+      "sha256": "6fcf8bc8191644fbea794dde881cd127babde60aae1919d1c34ab88228ab6375",
+      "size": 886
+    },
+    {
+      "path": "Backend/tests/test_v3b_15m_stream_recovery.py",
+      "sha256": "66c9c232a4ebf533f433a659a547f21c785c70ffda1251c9291d0b0ecb09438c",
+      "size": 8054
+    },
+    {
+      "path": "Backend/tests/test_v3b_1h_stream_recovery.py",
+      "sha256": "114ee533d6a60f7874db099370cd3b759d399b9782063572ad3181879721dc36",
+      "size": 6025
+    },
+    {
+      "path": "Backend/tests/test_v3b_5m_authority_refresh.py",
+      "sha256": "76bc1a5bd3f4ce2147ec3498544078efea8d60b5c3396f75bfa1e37a773868a3",
+      "size": 3927
+    },
+    {
+      "path": "Backend/tests/test_v3b_5m_stream_recovery.py",
+      "sha256": "e9ff4a272d19789eaaa6834235ade74769cd904a82b0b6647ce7dff14c8d27e6",
+      "size": 12357
+    },
+    {
+      "path": "Backend/tests/test_v3b_5m_stream_recovery_rollover_gaps.py",
+      "sha256": "008add2909356f8f44c89b53252c74d8dac4ccd83e7bf0f05cffc04e0236d470",
+      "size": 2946
+    },
+    {
+      "path": "Backend/tests/test_v3b_recovery_cli.py",
+      "sha256": "48a6e026333c71f2792d81db80fc5029c9d44ed24985a9a697b690d59e08e5c7",
+      "size": 4484
+    },
+    {
+      "path": "Backend/tests/test_v3b_round_aware_contract.py",
+      "sha256": "769ad86614baa7383a5f94bde19ffa2ea626c0875d759164c529c61895792602",
+      "size": 3248
+    },
+    {
+      "path": "Backend/tests/test_v3b_signal_history.py",
+      "sha256": "d95be7edd28019b94cc2ee425971151de4312027f8aa6ed84d3ba7ee0df72f6a",
+      "size": 5950
+    },
+    {
+      "path": "Backend/tests/test_v3b_snapshot_restore.py",
+      "sha256": "b562b1d8f8d00be9915752c0b9f30f6ce4aff64754e7775fa8a8aff732db500e",
+      "size": 12151
+    },
+    {
+      "path": "Backend/tests/test_v3b_startup_stream_gate.py",
+      "sha256": "0893dab9a9ba1eea1e45bfc34e54db4b89c367b20b089f509a917caab8382a68",
+      "size": 1520
+    },
+    {
+      "path": "Backend/tests/test_v3b_strategy_settings_sync.py",
+      "sha256": "969a260093a75bf7c4477ef234a94177a7147cffaed817d66f9aefb44caecb0b",
+      "size": 5528
+    },
+    {
+      "path": "Backend/tests/test_weekend_cost_and_static_simulator.py",
+      "sha256": "ada0362ffbaf15a04a06afc817e4abcba8a665ee023a242a37d6bacd7b0668a9",
+      "size": 2525
+    },
+    {
+      "path": "Backend/tests/test_weekend_panel_cache_only.py",
+      "sha256": "66c34049647d212a963775e60b679c8816a81af6fb096fc30726b6d56456511e",
+      "size": 1907
+    },
+    {
+      "path": "Backend/tests/test_xauusd_fundamental_engine_phase1.py",
+      "sha256": "29b728a3760f04ef94cca3884631fe5bd4899c74b597ff1e61e3aff4056040e2",
+      "size": 10450
+    },
+    {
+      "path": "Backend/tests/test_xauusd_risk_guard.py",
+      "sha256": "c952dc3e03a2b7149c4e0ebf4000c2039a0f61632c569d8224327aa261ea883f",
+      "size": 4314
+    }
+  ],
+  "source": "4c1c483086f08a8c2596cb400725071d03a1249e"
+}

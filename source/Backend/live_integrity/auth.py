@@ -3,6 +3,8 @@ import hashlib
 import hmac
 import time
 from sqlalchemy import text
+from datetime import datetime, timezone
+from owner_identity import owner_session_hash, legacy_owner_identity
 
 
 def valid_session_user(session,user,now):
@@ -19,6 +21,25 @@ class AccessDenied(ValueError):
     def __init__(self,status):
         self.status = status
         super().__init__('ACCESS_DENIED')
+
+
+def read_legacy_owner(connection, token):
+    """Durable SELECT only: no cache fallback, refresh, or expired-row cleanup."""
+    if not isinstance(token, str) or not token or len(token) > 2048 or any(c.isspace() for c in token):
+        raise AccessDenied(401)
+    rows = connection.execute(text(
+        'SELECT expires_at FROM flowsignal_owner_sessions WHERE token_hash=:hash'),
+        {'hash': owner_session_hash(token)}).mappings().all()
+    if len(rows) != 1:
+        raise AccessDenied(401)
+    expiry = rows[0]['expires_at']
+    if (not isinstance(expiry, datetime) or expiry.tzinfo is None
+        or expiry.utcoffset() is None or expiry <= datetime.now(timezone.utc)):
+        raise AccessDenied(401)
+    try:
+        return legacy_owner_identity()
+    except Exception:
+        raise AccessDenied(401) from None
 
 
 def read_admin(connection,token,csrf):

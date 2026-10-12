@@ -245,3 +245,257 @@ def relinquish_terminated_ready_owner(*, session_factory, scope, expected_attemp
         if isinstance(exc, RecoveryError):
             raise
         raise RecoveryError('RECOVERY_TERMINATION_EVIDENCE_INVALID') from None
+
+
+def _runtime_safety(observation, scope):
+    # DB row order is not checkpoint authority; never alter the reader's copy.
+    database = dict(observation['database'])
+    database['checkpoint_heads'] = sorted(database['checkpoint_heads'], key=lambda h: h['kind'])
+    return safety(dict(database=database, broker=observation['broker']), scope)
+
+
+def _runtime_fresh(broker, started):
+    """Same 20s budget as certified broker observations; never extend under lock."""
+    from time import time, monotonic
+    from math import isfinite
+    observed = broker.get('observed_at')
+    require(type(observed) in (int, float) and isfinite(observed))
+    require(0 <= time() - observed <= 20 and 0 <= monotonic() - started <= 20)
+
+
+def _runtime_generation(tree, session, key, generation):
+    """Only an explicit head/ancestor reference is readable; no orphan discovery."""
+    from sqlalchemy import select
+    from models import RecoveryLegacyAdoption
+    from startup_recovery.checkpoints import _KINDS, ProducedEnvelope, checked_envelope, CheckpointCandidate
+    from startup_recovery.adoption_evidence import (
+        AdoptedEnvelope, checked_adopted_envelope, validate_adoption_receipt, receipt_validated_candidates,
+    )
+    from startup_recovery.legacy_adoption import _receipt
+
+    require(_valid_hash(generation))
+    prefix = '.recovery-generations/' + generation + '/'
+    image = tree.read(prefix + 'manifest.json')
+    require(image.stat.mode == 0o600 and _digest(image.raw) == generation)
+    manifest = _parse(image.raw)
+    require(type(manifest) is dict and set(manifest) == {'manifest_schema', 'parent_hash', 'files'}
+        and type(manifest['manifest_schema']) is int and manifest['manifest_schema'] == 1
+        and _encoded(manifest) == image.raw)
+    require(manifest['parent_hash'] is None or _valid_hash(manifest['parent_hash']))
+    hashes = manifest['files']
+    require(type(hashes) is dict and bool(hashes) and set(hashes) <= _KINDS)
+    require(set(tree.entries(prefix[:-1])) == {'manifest.json', *(k+'.json' for k in hashes)})
+    bodies, envelopes, candidates = {}, {}, {}
+    adopted = set()
+    for kind in sorted(hashes):
+        require(_valid_hash(hashes[kind]))
+        image = tree.read(prefix + kind + '.json')
+        require(image.stat.mode == 0o600 and _digest(image.raw) == hashes[kind])
+        body = _parse(image.raw)
+        require(type(body) is dict and _encoded(body) == image.raw)
+        if 'adoption' in body:
+            envelope = AdoptedEnvelope(kind, image.raw)
+            body = checked_adopted_envelope(envelope)
+            adopted.add(kind)
+        else:
+            envelope = ProducedEnvelope(kind, image.raw)
+            body = checked_envelope(envelope)
+        require(body['parent_hash'] == manifest['parent_hash'])
+        bodies[kind], envelopes[kind] = body, envelope
+        candidates[kind] = CheckpointCandidate(kind, image.raw, False)
+    # Same generation-wide identity contract as write_generation; even an
+    # unselected sibling must not make the selected manifest incoherent.
+    require(len({_encoded({field: bodies[kind]['identity'][field]
+        for field in ('account_scope', 'epoch', 'boot_id', 'generation')}) for kind in bodies}) == 1)
+    receipt = None
+    if adopted:
+        require(adopted == set(hashes))
+        rows = session.scalars(select(RecoveryLegacyAdoption).where(
+            RecoveryLegacyAdoption.scope_key == key,
+            RecoveryLegacyAdoption.generation_manifest_hash == generation
+        ).execution_options(populate_existing=True)).all()
+        require(len(rows) == 1)
+        receipt = _receipt(rows[0])
+        validate_adoption_receipt(receipt, envelopes, key)
+        require(receipt['generation_manifest_hash'] == generation)
+        candidates = receipt_validated_candidates(receipt, envelopes, key)
+    return manifest, bodies, candidates, receipt
+
+
+def _runtime_provenance(session, token, build_id, historical_hash, body, receipt):
+    from sqlalchemy import select
+    from models import RecoveryAttempt
+
+    identity = body['identity']
+    require(token.scope.broker == 'ctrader'
+        and identity['account_scope'] == f'CTRADER:{token.scope.environment.upper()}:{token.scope.account_id}'
+        and type(identity['epoch']) is int and 0 < identity['epoch'] <= token.epoch)
+    if receipt is not None:
+        return dict(classification='ADOPTED', receipt=receipt)
+    if identity['epoch'] == token.epoch:
+        require(identity['boot_id'] == token.boot_id and identity['build_id'] == build_id
+            and body['admission_hash'] == historical_hash)
+        return dict(classification='PRODUCED_CURRENT')
+    rows = session.scalars(select(RecoveryAttempt).where(
+        RecoveryAttempt.scope_key == store.scope_key(token.scope),
+        RecoveryAttempt.epoch == identity['epoch']
+    ).execution_options(populate_existing=True)).all()
+    require(len(rows) == 1)
+    producer = rows[0]
+    require(producer.boot_id == identity['boot_id'] and producer.build_id == identity['build_id']
+        and producer.phase == Phase.RELINQUISHED and producer.phase_evidence_hash == body['admission_hash'])
+    return dict(classification='PRODUCED_INHERITED', claim='CURRENTLY_ACCEPTED_INHERITED_AUTHORITY',
+        producer=dict(attempt_id=producer.attempt_id, epoch=producer.epoch, boot_id=producer.boot_id,
+            build_id=producer.build_id, phase=producer.phase, phase_evidence_hash=producer.phase_evidence_hash))
+
+
+def _runtime_lineage(tree, session, token, build_id, historical_hash, head):
+    generation, seen, lineage = head['manifest_hash'], set(), []
+    sequence, child_epoch, selected = head['generation'], token.epoch, None
+    require(type(sequence) is int and sequence > 0)
+    while generation is not None:
+        require(generation not in seen)
+        seen.add(generation)
+        manifest, bodies, candidates, receipt = _runtime_generation(
+            tree, session, store.scope_key(token.scope), generation)
+        kind = head['kind']
+        require(kind in bodies)
+        body = bodies[kind]
+        identity = body['identity']
+        require(identity['generation'] == sequence and identity['epoch'] <= child_epoch)
+        provenance = _runtime_provenance(session, token, build_id, historical_hash, body, receipt)
+        if selected is None:
+            require(head['identity'] == identity and _encoded(head['identity']) == _encoded(identity)
+                and head['file_hash'] == manifest['files'][kind]
+                and head['admission_hash'] == body['admission_hash'])
+            selected = candidates[kind], provenance
+        lineage.append(dict(manifest_hash=generation, file_hash=manifest['files'][kind], **provenance))
+        sequence -= 1
+        child_epoch = identity['epoch']
+        generation = manifest['parent_hash']
+        require((generation is None) == (sequence == 0))
+    require(selected is not None)
+    return selected[0], dict(**head, **selected[1], envelope_sha256=_digest(selected[0].raw), lineage=lineage)
+
+
+def _runtime_authority(tree, session, token, build_id, historical_hash, observation):
+    """Read-only two-proof projection; callable by independent pin collection.
+
+    A historical recovery result is not a historical checkpoint snapshot. Only
+    today's complete DB-selected set enters today's unchanged reconciliation.
+    Unreferenced generations are UNREFERENCED_EVIDENCE, never loaded or repaired.
+    """
+    from sqlalchemy import select
+    from models import RecoveryCheckpointHead
+    from startup_recovery.checkpoints import _KINDS
+    from startup_recovery.reconcile import DiscoverySnapshot, reconcile
+
+    require(_valid_hash(historical_hash))
+    account, attempt = store.require_owner(session, token, lock=False)
+    require(account.broker == token.scope.broker and account.environment == token.scope.environment
+        and account.account_id == token.scope.account_id)
+    require(account.phase == Phase.NEW_ENTRIES_READY and attempt.phase == Phase.NEW_ENTRIES_READY
+        and attempt.build_id == build_id and attempt.conflict_reason is None
+        and account.accepted_manifest_hash == historical_hash and attempt.phase_evidence_hash == historical_hash)
+    key = store.scope_key(token.scope)
+    rows = session.scalars(select(RecoveryCheckpointHead).where(
+        RecoveryCheckpointHead.scope_key == key).execution_options(populate_existing=True)).all()
+    heads = [dict(scope_key=row.scope_key, kind=row.kind, manifest_hash=row.manifest_hash,
+        file_hash=row.file_hash, generation=row.generation, identity=row.identity,
+        admission_hash=row.admission_hash) for row in rows]
+    kinds = [h['kind'] for h in heads]
+    require(bool(heads) and len(kinds) == len(set(kinds)) and set(kinds) <= _KINDS)
+    # The injected server reader cannot omit a DB-selected kind or substitute a pointer.
+    database = observation['database']
+    require(sorted(database['checkpoint_heads'], key=lambda h: h['kind']) == sorted(heads, key=lambda h: h['kind']))
+    comparisons = _runtime_safety(observation, token.scope)
+    candidates, projections = {}, []
+    for head in sorted(heads, key=lambda h: h['kind']):
+        require(head['identity']['owner_id'] in database['runtime_owners'])
+        candidate, projection = _runtime_lineage(tree, session, token, build_id, historical_hash, head)
+        candidates[head['kind']] = candidate
+        projections.append(projection)
+    result = reconcile(DiscoverySnapshot.create(token, database, observation['broker']), candidates)
+    require(result.ok and result.conflicts == () and set(result.checkpoints) == set(kinds)
+        and not set(kinds).intersection(result.quarantined))
+    return dict(schema=1, scope=asdict(token.scope), current=dict(attempt_id=token.attempt_id,
+        epoch=token.epoch, boot_id=token.boot_id, build_id=build_id),
+        historical=dict(owner_attempt_id=account.owner_attempt_id, owner_epoch=account.owner_epoch,
+            account_phase=account.phase, attempt_phase=attempt.phase, conflict_reason=attempt.conflict_reason,
+            historical_admission_hash=historical_hash, phase_evidence_hash=attempt.phase_evidence_hash),
+        authority=dict(current_reconciliation_hash=result.manifest_hash,
+            current_dependencies_hash=result.dependencies_hash, conflicts=list(result.conflicts),
+            quarantined=list(result.quarantined), heads=projections),
+        database_safety_sha256=comparisons[0], broker_safety_sha256=comparisons[1])
+
+
+def relinquish_terminated_runtime_owner(*, session_factory, scope, expected_attempt_id, expected_epoch,
+        predecessor_boot_id, predecessor_build_id, predecessor_deployment_id,
+        successor_release_identity, evidence_document, expected_evidence_sha256, safety_reader,
+        expected_historical_admission_hash, expected_current_runtime_authority_sha256, state_root):
+    """Administrative-only successor drain. Independent pins precede this call.
+
+    Two fresh network observations precede filesystem -> account -> owner locks.
+    The retained immutable broker observation expires after at most 20 seconds,
+    including lock wait, lineage reads and reconciliation. A failure is not retry
+    authority; after mutation starts every failure requires commit inspection.
+    """
+    from pathlib import Path
+    from time import monotonic
+    from startup_recovery.cutover_evidence import _VerificationTree
+    from startup_recovery.reconcile import freeze, thaw
+
+    mutation_started = False
+    try:
+        require(isinstance(evidence_document, bytes) and _valid_hash(expected_evidence_sha256)
+            and _digest(evidence_document) == expected_evidence_sha256)
+        require(_valid_hash(expected_historical_admission_hash)
+            and _valid_hash(expected_current_runtime_authority_sha256) and _valid_hash(successor_release_identity))
+        require(type(expected_epoch) is int and expected_epoch > 0)
+        for value in (expected_attempt_id, predecessor_boot_id, predecessor_build_id, predecessor_deployment_id):
+            require(isinstance(value, str) and bool(value))
+        doc = _parse(evidence_document)
+        require(type(doc) is dict and _encoded(doc) == evidence_document)
+        expected = dict(schema=1, kind='graceful-drain', scope=asdict(scope),
+            attempt_id=expected_attempt_id, epoch=expected_epoch, boot_id=predecessor_boot_id,
+            build_id=predecessor_build_id, deployment_id=predecessor_deployment_id,
+            successor_release_identity=successor_release_identity, predecessor_status='TERMINATED',
+            predecessor_phase='NEW_ENTRIES_READY', operations_reconciled=True,
+            termination_record_sha256=doc.get('termination_record_sha256'),
+            historical_admission_hash=expected_historical_admission_hash,
+            current_runtime_authority_sha256=expected_current_runtime_authority_sha256)
+        require(_valid_hash(expected['termination_record_sha256']) and _encoded(doc) == _encoded(expected))
+        require(callable(safety_reader) and callable(getattr(safety_reader, 'database', None)))
+        started = monotonic()
+        first = thaw(freeze(safety_reader(scope)))
+        _runtime_fresh(first['broker'], started)
+        comparisons = _runtime_safety(first, scope)
+        second = thaw(freeze(safety_reader(scope)))
+        _runtime_fresh(second['broker'], started)
+        require(second['broker']['observed_at'] >= first['broker']['observed_at'])
+        require(_runtime_safety(second, scope) == comparisons)
+        token = ManagerToken(scope, expected_attempt_id, expected_epoch, predecessor_boot_id)
+        root = Path(state_root)
+        require(root.is_absolute())
+        with _VerificationTree(root) as tree, tree.shared():
+            with reconciliation_uow(session_factory, scope) as uow:
+                store.require_owner(uow.session, token)
+                current = safety_reader.database(uow.session, scope)
+                observation = dict(database=current, broker=second['broker'])
+                require(_runtime_safety(observation, scope) == comparisons)
+                require(not store._unsettled(uow.session, scope))
+                authority = _runtime_authority(tree, uow.session, token, predecessor_build_id,
+                    expected_historical_admission_hash, observation)
+                require(_digest(b'flowsignal-runtime-owner-authority-v1\0' + _encoded(authority))
+                    == expected_current_runtime_authority_sha256)
+                _runtime_fresh(second['broker'], started)
+                proof = HandoffEvidence('graceful-drain', expected_evidence_sha256, predecessor_boot_id, True, True)
+                mutation_started = True
+                store.relinquish(uow.session, token, proof)
+        return RelinquishmentResult('RELINQUISHED', expected_evidence_sha256, expected_epoch)
+    except Exception as exc:
+        if mutation_started:
+            raise RecoveryError('RECOVERY_HANDOFF_COMMIT_INSPECT_REQUIRED') from None
+        if isinstance(exc, RecoveryError):
+            raise
+        raise RecoveryError('RECOVERY_TERMINATION_EVIDENCE_INVALID') from None

@@ -96,6 +96,51 @@ def test_ordinary_startup_has_no_cutover_dependency_or_invocation():
         check_startup(path.read_text(), path.stem)
 
 
+@pytest.mark.parametrize('statement', [
+    'from startup_recovery.owner_handoff import relinquish_terminated_runtime_owner',
+    'from startup_recovery.owner_handoff import relinquish_terminated_runtime_owner as drain',
+    'from startup_recovery.owner_handoff import *',
+    'from .owner_handoff import relinquish_terminated_runtime_owner',
+    'from startup_recovery import owner_handoff as drain',
+    'relinquish_terminated_runtime_owner()',
+    'getattr(module, "relinquish_" + "terminated_runtime_owner")()',
+    'importlib.import_module("startup_recovery." + "owner_handoff")',
+    '_runtime_authority()',
+])
+def test_runtime_admin_not_reachable_from_startup(statement):
+    from tests.cutover_startup_guard import check_startup
+    with pytest.raises(AssertionError): check_startup(statement, 'coordinator')
+
+
+@pytest.mark.parametrize('statement', [
+    'def normal_startup():\n    drain = relinquish_terminated_runtime_owner\n    drain()',
+    'drain = relinquish_terminated_runtime_owner\ndef normal_startup():\n    drain()',
+    'def normal_startup():\n    return _runtime_authority',
+])
+def test_same_module_cannot_leak_runtime_admin_capability(statement):
+    from tests.cutover_startup_guard import check_startup
+    with pytest.raises(AssertionError): check_startup(statement, 'owner_handoff')
+
+
+@pytest.mark.parametrize('function', ['_runtime_safety', '_runtime_fresh', '_runtime_generation',
+    '_runtime_provenance', '_runtime_lineage', '_runtime_authority', 'relinquish_terminated_runtime_owner'])
+@pytest.mark.parametrize('statement', [
+    'from startup_recovery.checkpoints import write_generation',
+    'from startup_recovery.cutover_service import copy_state',
+    'store.acquire_owner(session, token)',
+    'store.begin_attempt(session, scope, boot, build)',
+    'broker.send_order()',
+    'os.remove(path)',
+    'callback = store.acquire_owner',
+    'from os import remove as _digest',
+    '_digest = os.remove',
+])
+def test_runtime_admin_helpers_have_closed_capabilities(function, statement):
+    from tests.cutover_startup_guard import check_startup
+    with pytest.raises(AssertionError):
+        check_startup('def '+function+'():\n    '+statement, 'owner_handoff')
+
+
 # Exercise the architecture checker itself: synthetic code must not gain a
 # command capability merely by using the approved administrative function name.
 READY_RO = [

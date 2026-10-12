@@ -118,11 +118,18 @@ done
 mkdir test-tools
 docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/test-tools:/tools" --entrypoint python "$base" \
  -m pip install --only-binary=:all: --no-cache-dir --no-compile --target /tools pytest==8.4.2 >/dev/null
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/test-tools:/tools" -v "$PWD/harness/test-client.lock:/test-client.lock:ro" --entrypoint python "$base" \
+ -m pip install --require-hashes --no-deps --only-binary=:all: --no-cache-dir --no-compile --target /tools -r /test-client.lock >/dev/null
 chmod -R a+rX test-tools
 docker run "${common[@]}" -v "$pg_root:$pg_root:ro" -v "$PWD/test-tools:/test-tools:ro" \
  -e DATABASE_URL="$dsn" -e MIGRATION_DATABASE_URL="$dsn" -e VERIFIER_TEST_PG_DSN="$dsn" \
+ -e PYTHONPATH=/test-tools:/app/Backend --entrypoint /bin/sh "$prod" -c \
+ 'mkdir /cache/tmp; python -B -m pytest -q -p no:cacheprovider --rootdir=/app/Backend --junitxml=/cache/auth.xml tests/test_live_integrity_legacy_auth.py tests/test_live_integrity_preenable.py /cert-tools/test_packaged_auth.py --deselect=tests/test_live_integrity_legacy_auth.py::test_real_durable_auth_and_isolated_worker_have_no_session_side_effects; result=$?; cat /cache/auth.xml; exit "$result"' \
+ > evidence/production-auth.log 2>&1
+docker run "${common[@]}" -v "$pg_root:$pg_root:ro" -v "$PWD/test-tools:/test-tools:ro" \
+ -e DATABASE_URL="$dsn" -e MIGRATION_DATABASE_URL="$dsn" -e VERIFIER_TEST_PG_DSN="$dsn" \
  -e PYTHONPATH=/test-tools:/app/Backend --entrypoint /bin/sh "$maint" -c \
- 'mkdir /cache/tmp; python -B -m pytest -q -p no:cacheprovider --junitxml=/cache/owner.xml tests/test_owner_handoff.py tests/test_owner_handoff_submissions.py tests/test_owner_handoff_ready.py; result=$?; cat /cache/owner.xml; exit "$result"' \
+ 'mkdir /cache/tmp; python -B -m pytest -q -p no:cacheprovider --junitxml=/cache/owner.xml tests/test_owner_handoff.py tests/test_owner_handoff_submissions.py tests/test_owner_handoff_ready.py tests/test_owner_handoff_runtime.py; result=$?; cat /cache/owner.xml; exit "$result"' \
  > evidence/maintenance-owner.log 2>&1
 python3 -B harness/image/finalize.py
 python3 -B harness/verify_source.py source > evidence/image-source-after.json

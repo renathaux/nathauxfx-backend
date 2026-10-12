@@ -17,7 +17,7 @@ import time
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 from live_integrity.read_store import read_only,single_flight,Busy
-from live_integrity.auth import read_admin,AccessDenied
+from live_integrity.auth import read_admin,read_legacy_owner,AccessDenied
 from live_integrity.build_identity import capture
 from live_integrity.verifier import verify
 
@@ -55,7 +55,13 @@ def main():
             url=url.replace('postgres://','postgresql://',1)
         engine = create_engine(url,poolclass=NullPool,connect_args={'connect_timeout':2,'options':'-c default_transaction_read_only=on'})
         with read_only(engine) as conn:
-            owner = read_admin(conn,payload['token'],payload['csrf'])
+            scheme = payload.get('auth_scheme', 'modern')
+            if scheme == 'legacy-owner':
+                owner = read_legacy_owner(conn,payload['token'])
+            elif scheme == 'modern':
+                owner = read_admin(conn,payload['token'],payload['csrf'])
+            else:
+                raise AccessDenied(401)
             with single_flight(conn):
                 build = capture()
                 response['build']=build

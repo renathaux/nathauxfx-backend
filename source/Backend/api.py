@@ -500,7 +500,8 @@ OWNER_SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 
 
 def _owner_session_hash(token: str) -> str:
-    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+    from owner_identity import owner_session_hash
+    return owner_session_hash(token)
 
 
 def persist_owner_session(token: str) -> None:
@@ -571,11 +572,8 @@ def resolve_owner_session(token: str):
         print("OWNER_SESSION_RESOLVE_ERROR =", type(exc).__name__)
         return None
 
-    restored = {
-        "email": "flowsignal.contact@gmail.com",
-        "role": "admin",
-        "auth_method": "persistent_owner_session",
-    }
+    from owner_identity import legacy_owner_actor
+    restored = legacy_owner_actor()
     SESSIONS[token] = restored
     return restored
 NEWS_MODE_CHANGE_LOCK = threading.RLock()

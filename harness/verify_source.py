@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 import sys
 
-SOURCE = '35a3c763de242a1671d9902b8c450d06a059faa4'
-MANIFEST = '37c5ba049b5c06de3291cb5789b880ddb5a3bc5cb9b60695feb9f61ea030a31a'
+SOURCE = '4c1c483086f08a8c2596cb400725071d03a1249e'
+MANIFEST = 'dbfa367c95c106c787b8338b282c2e83f4985cecb845ac3cb5bd8e233c32a0cc'
 LOCK = '1d8e368b5645db69cab33479c56d7db0827155898368a419fc80ab9819ee5736'
 METADATA = '8e24bda82fa3cc5bdcf21f19c86eec85eae74e24e115a402066bfafe884e5e89'
 GENERATED = {'certification-source-manifest.json', 'Backend/requirements.production.lock',
@@ -19,7 +19,7 @@ def verify(root):
     assert manifest['packaging_source_sha'] == SOURCE
     assert manifest['application_input_sha'] == 'c8c82ece5856c2e040b75070bad7888beedd2f60'
     assert manifest['maintenance_input_sha'] == 'd223082822bd209858ce4c699e5fa907e654dc29'
-    assert len(manifest['files']) == 371
+    assert len(manifest['files']) == 376
     expected = set(GENERATED)
     for entry in manifest['files']:
         name = entry['path']
@@ -38,7 +38,7 @@ def verify(root):
     assert not list((root/'Backend/data').glob('*.json'))
     for name, pin in [('requirements.production.lock', LOCK), ('requirements.production.metadata.json', METADATA)]:
         assert hashlib.sha256((root/'Backend'/name).read_bytes()).hexdigest() == pin
-    return {'source_sha': SOURCE, 'source_files': 371, 'manifest_sha256': MANIFEST}
+    return {'source_sha': SOURCE, 'source_files': 376, 'manifest_sha256': MANIFEST}
 
 if __name__ == '__main__':
     print(json.dumps(verify(sys.argv[1]), sort_keys=True))

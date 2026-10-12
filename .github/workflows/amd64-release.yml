@@ -1,14 +1,39 @@
-name: Ready-owner combined release AMD64 recertification
+name: Final runtime-owner composite AMD64 certification
 on:
   push:
-    branches: [certification/amd64-ready-owner-20261011]
+    branches: [certification/amd64-runtime-owner-20261012]
 permissions:
   contents: read
 concurrency:
-  group: ready-owner-release-amd64-20261011
+  group: runtime-owner-release-amd64-20261012
   cancel-in-progress: false
 jobs:
+  broad:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHON_DOTENV_DISABLED: '1'
+      CERTIFICATION_GATE: broad_gate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.3'
+          architecture: x64
+      - name: Isolated broad failure fingerprint, no image build
+        run: bash harness/backend.sh
+      - name: Retain textual broad-run evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: broad-fingerprint-${{ github.run_id }}
+          path: evidence/
+          retention-days: 3
   backend:
+    needs: broad
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -88,6 +113,10 @@ jobs:
         with:
           name: amd64-backend-gate-${{ github.run_id }}
           path: comparison/backend
+      - uses: actions/download-artifact@v4
+        with:
+          name: broad-fingerprint-${{ github.run_id }}
+          path: comparison/broad
       - name: Compare independent image identities
         run: python3 -B harness/image/compare.py comparison
       - uses: actions/upload-artifact@v4
