@@ -1,0 +1,1 @@
+{"node":"tests/test_strategy_fast_jobs.py::test_cleanup_never_removes_current_process_and_only_evicts_needed_result","observation":"UNAVAILABLE","outcome":"passed"}

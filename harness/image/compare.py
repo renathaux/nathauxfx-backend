@@ -29,7 +29,12 @@ if __name__=='__main__':
     result=compare(*(json.loads(p.read_text()) for p in paths))
     broad=json.loads((root/'broad/broad-comparison.json').read_text())
     assert broad['pass'] and not broad['new'] and not broad['missing'] and not broad['changed']
-    result['broad_fingerprint_match']=True
+    assert broad['pass_comparability'] and not broad['pass_whole_repository']
+    assert broad['reference_run']==38270359938 and not broad['historical_equivalence_claimed']
+    result['native_diagnostic_reference_match']=True
+    result['whole_repository_green']=False
+    result['historical_broad_equivalence_claimed']=False
+    result['release_scope_exclusion']='Historical BLS backfill via shipped CLI is unsupported in this release; default manifest absent.'
     backend=root/'backend'
     result['backend_suites']=validate_backend(json.loads((backend/'backend-results.json').read_text()))
     deadline=json.loads((backend/'deadline-regression.json').read_text())
