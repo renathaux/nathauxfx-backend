@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 gate=${CERTIFICATION_GATE:-backend_gate}
+python -B harness/test_auth_overlay.py
 case "$gate" in backend_gate|broad_gate|diagnostic_gate|logging_probe_gate|native_reference_gate) ;; *) exit 1 ;; esac
 test "$(uname -s)" = Linux
 test "$(uname -m)" = x86_64
