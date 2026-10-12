@@ -1,0 +1,35 @@
+name: Diagnostic broad collection only - no certification or builds
+on:
+  push:
+    branches: [certification/diagnostic-broad-20261012]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        observation: [1, 2]
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHON_DOTENV_DISABLED: '1'
+      CERTIFICATION_GATE: diagnostic_gate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.3'
+          architecture: x64
+      - name: Independent diagnostic broad observation
+        run: bash harness/backend.sh
+      - name: Preserve diagnostic text - not an approved baseline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-broad-${{ matrix.observation }}-${{ github.run_id }}
+          path: evidence/
+          retention-days: 7
