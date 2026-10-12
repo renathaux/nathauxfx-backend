@@ -1,0 +1,29 @@
+name: Native isolated logging diagnosis - no builds
+on:
+  push:
+    branches: [certification/diagnostic-logging-20261012]
+permissions:
+  contents: read
+jobs:
+  logging:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHON_DOTENV_DISABLED: '1'
+      CERTIFICATION_GATE: logging_probe_gate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.3'
+          architecture: x64
+      - run: bash harness/backend.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logging-proof-${{ github.run_id }}
+          path: evidence/
+          retention-days: 7

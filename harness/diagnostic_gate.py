@@ -14,7 +14,7 @@ from verify_source import verify, SOURCE
 
 DOC_SHA = '0d66543aad759a8d38d3470bfb422fda3d6e8494e880862fec3d0e6713762d12'
 
-def run(root, evidence):
+def run(root, evidence, *, logging_only=False):
     assert platform.system() == 'Linux' and platform.machine() == 'x86_64'
     assert platform.python_version() == '3.14.3'
     assert (os.getuid(), os.getgid()) == (501, 1000)
@@ -44,7 +44,8 @@ def run(root, evidence):
             assert not (test_root/'Backend/fundamentals/bls_timestamp_manifest_12m.json').exists()
             db = test_root/'Backend/database/flowsignal.db'
             db.parent.mkdir(exist_ok=True)
-            record('sqlite-before.json', create_empty_sqlite(db))
+            initial_sqlite = create_empty_sqlite(db)
+            record('sqlite-before.json', initial_sqlite)
             subprocess.run(['/usr/bin/git', 'init', '-q', str(test_root)], check=True)
             subprocess.run(['/usr/bin/git', '-C', str(test_root), 'add', '--', '*.py'], check=True)
             env = {k: os.environ[k] for k in ('HOME', 'PATH', 'PYTHONDONTWRITEBYTECODE',
@@ -63,15 +64,42 @@ def run(root, evidence):
             command = [sys.executable, '-B', '-m', 'pytest', '-q', '-ra', '-p', 'no:cacheprovider',
                        '-p', 'diagnostic_observer', '--continue-on-collection-errors', '--tb=short',
                        '--junitxml='+str(evidence/'broad.xml')]
-            with (evidence/'broad.log').open('w') as log:
-                result = subprocess.run(command, cwd=test_root/'Backend', env=env,
-                                        stdout=log, stderr=subprocess.STDOUT)
-            rows = read_cases(evidence/'broad.xml')
-            record('diagnostic-results.json', dict(cases=rows, fingerprint_sha256=digest(rows),
-                process_returncode=result.returncode, reference_approved=False,
-                classification='COLLECTED_DIAGNOSTIC_NOT_CERTIFICATION'))
+            if logging_only:
+                nodes = [
+                    'tests/test_fundamental_insight_cache.py::FundamentalInsightCacheTests::test_cache_invalidation_failure_does_not_fail_committed_ingestion',
+                    'tests/test_fundamental_insight_reliability.py::FundamentalInsightReliabilityTests::test_timing_record_uses_production_visible_logger',
+                    'tests/test_indicator_stream_account_scope.py::test_account_scoped_v3b_5m_correction_rolls_back_and_replays',
+                    'tests/test_indicator_stream_account_scope.py::test_irreversible_live_lifecycle_blocks_repair_without_history_mutation[SUBMITTING]',
+                    'tests/test_indicator_stream_account_scope.py::test_irreversible_live_lifecycle_blocks_repair_without_history_mutation[CONSUMED]',
+                ]
+                results = []
+                for i, node in enumerate(nodes):
+                    probe_evidence = evidence/f'logging-{i}'
+                    probe_evidence.mkdir()
+                    snapshot = sqlite_snapshot(db)
+                    assert snapshot == initial_sqlite, 'LOGGING_SQLITE_INITIAL_DRIFT'
+                    assert snapshot['schema'] == [] and snapshot['integrity'] == 'ok', 'LOGGING_SQLITE_DRIFT'
+                    record(f'logging-{i}/sqlite-before.json', snapshot)
+                    probe_env = dict(env, DIAGNOSTIC_EVIDENCE=str(probe_evidence))
+                    xml = evidence/f'logging-{i}.xml'
+                    with (evidence/f'logging-{i}.log').open('w') as log:
+                        result = subprocess.run(command[:-1]+['--junitxml='+str(xml), node],
+                            cwd=test_root/'Backend', env=probe_env, stdout=log, stderr=subprocess.STDOUT)
+                    rows = read_cases(xml)
+                    assert sqlite_snapshot(db) == snapshot, 'LOGGING_SQLITE_MUTATED'
+                    results.append(dict(node=node, process_returncode=result.returncode, cases=rows))
+                record('logging-results.json', results)
+                assert all(v['process_returncode']==0 and len(v['cases'])==1 and v['cases'][0]['status']=='passed' for v in results), 'ISOLATED_LOGGING_PROOF_BLOCKED'
+            else:
+                with (evidence/'broad.log').open('w') as log:
+                    result = subprocess.run(command, cwd=test_root/'Backend', env=env,
+                                            stdout=log, stderr=subprocess.STDOUT)
+                rows = read_cases(evidence/'broad.xml')
+                record('diagnostic-results.json', dict(cases=rows, fingerprint_sha256=digest(rows),
+                    process_returncode=result.returncode, reference_approved=False,
+                    classification='COLLECTED_DIAGNOSTIC_NOT_CERTIFICATION'))
+                assert result.returncode in (0, 1), 'DIAGNOSTIC_EXECUTION_ERROR'
             record('sqlite-after.json', sqlite_snapshot(db))
-            assert result.returncode in (0, 1), 'DIAGNOSTIC_EXECUTION_ERROR'
         record('diagnostic-cleanup.json', {'disposable_copy_removed': not Path(temporary).exists()})
     finally:
         after = verify(root)

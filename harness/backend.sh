@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 gate=${CERTIFICATION_GATE:-backend_gate}
-case "$gate" in backend_gate|broad_gate|diagnostic_gate) ;; *) exit 1 ;; esac
+case "$gate" in backend_gate|broad_gate|diagnostic_gate|logging_probe_gate) ;; *) exit 1 ;; esac
 test "$(uname -s)" = Linux
 test "$(uname -m)" = x86_64
 test "$(python -c 'import platform; print(platform.python_version())')" = 3.14.3
@@ -96,7 +96,7 @@ print(json.dumps({'packages':actual,'installer_tooling':tooling},sort_keys=True)
 PY
 "$cert_root/venv/bin/python" -B -m pip install --target "$cert_root/test-tools" --only-binary=:all: --no-compile --no-cache-dir pytest==8.4.2
 "$cert_root/venv/bin/python" -B -m pip install --target "$cert_root/test-tools" --require-hashes --no-deps --only-binary=:all: --no-compile --no-cache-dir -r harness/test-client.lock
-if [ "$gate" = diagnostic_gate ]; then
+if [ "$gate" = diagnostic_gate ] || [ "$gate" = logging_probe_gate ]; then
   PYTHONPATH="$cert_root/test-tools" "$cert_root/venv/bin/python" -B harness/test_diagnostic_contract.py
 fi
 cp -R source "$cert_root/source"
