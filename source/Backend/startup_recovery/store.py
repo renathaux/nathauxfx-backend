@@ -61,10 +61,13 @@ def begin_attempt(session, scope, boot_id, build_id):
     row = account_state(session, scope, lock=True)
     row.allocated_epoch += 1
     token = ManagerToken(scope, str(uuid4()), row.allocated_epoch, boot_id)
+    created_at = datetime.now(timezone.utc)
     session.add(RecoveryAttempt(attempt_id=token.attempt_id, scope_key=key,
         epoch=token.epoch, boot_id=boot_id, build_id=build_id, phase=Phase.BOOTSTRAP,
-        predecessor_id=row.owner_attempt_id, created_at=datetime.now(timezone.utc)))
+        predecessor_id=row.owner_attempt_id, created_at=created_at))
     session.flush()
+    from startup_recovery.observability import note
+    note('attempt_staged', attempt_id=token.attempt_id, epoch=token.epoch, created_at=created_at)
     return token
 
 
@@ -122,16 +125,23 @@ def _attempt(session, token):
 
 def acquire_owner(session, token):
     row = account_state(session, token.scope, lock=True)
+    from startup_recovery.observability import note
+    note('owner_observed', attempt_id=row.owner_attempt_id, epoch=row.owner_epoch)
     attempt = _attempt(session, token)
     if row.phase == Phase.LEGACY_CUTOVER_REQUIRED:
+        note('acquisition_rejected')
         raise RecoveryError('LEGACY_CUTOVER_REQUIRED')
     if row.owner_attempt_id:
+        note('acquisition_rejected')
         raise RecoveryError('RECOVERY_OWNER_BUSY')
     if row.owner_epoch is not None and token.epoch <= row.owner_epoch:
+        note('acquisition_rejected')
         raise RecoveryError('RECOVERY_TOKEN_STALE')
     if row.phase != Phase.RELINQUISHED or not row.handoff_evidence:
+        note('acquisition_rejected')
         raise RecoveryError('RECOVERY_HANDOFF_UNPROVEN')
     if attempt.phase != Phase.BOOTSTRAP or _unsettled(session, token.scope):
+        note('acquisition_rejected')
         raise RecoveryError('RECOVERY_OPERATIONS_UNRESOLVED')
     row.owner_attempt_id, row.owner_epoch = token.attempt_id, token.epoch
     row.phase = Phase.BOOTSTRAP

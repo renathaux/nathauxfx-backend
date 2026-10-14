@@ -1,11 +1,11 @@
-name: Final runtime-owner composite AMD64 certification
+name: Runtime identity observability AMD64 certification
 on:
   push:
-    branches: [certification/amd64-runtime-owner-20261012]
+    branches: [certification/amd64-runtime-identity-20261014]
 permissions:
   contents: read
 concurrency:
-  group: runtime-owner-release-amd64-20261012
+  group: runtime-identity-release-amd64-20261014
   cancel-in-progress: false
 jobs:
   broad:

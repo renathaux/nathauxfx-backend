@@ -10,6 +10,7 @@ import re
 from startup_recovery import store
 from startup_recovery.reconcile import discover, reconcile, digest
 from startup_recovery.types import Phase, RecoveryError, ManagerToken
+from startup_recovery.observability import note
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ def recover(dependencies, scope, boot_id, build_id):
     try:
         with factory.begin() as session:
             token = store.begin_attempt(session, scope, boot_id, build_id)
+        note('attempt_committed')
         # Exact broker observation can settle the old ledger without acquiring
         # management authority. Legacy cutover and explicit handoff remain gates.
         # This hook performs broker reads before its short DB write transaction.
@@ -66,10 +68,15 @@ def recover(dependencies, scope, boot_id, build_id):
             if not legacy:
                 dependencies.verify_database()
                 reconciliation=dependencies.reconcile_submissions()
+                note('submission_reconciled', ok=reconciliation.get('ok'))
                 if not reconciliation.get('ok'):
                     raise RecoveryError('RECOVERY_OPERATIONS_UNRESOLVED')
+        note('acquisition_started')
         with factory.begin() as session:
             store.acquire_owner(session, token)
+            note('acquisition_validated')
+        note('acquisition_committed')
+        note('owner_observed', attempt_id=token.attempt_id, epoch=token.epoch)
         database_evidence = dependencies.verify_database()
         if not isinstance(database_evidence, dict) or not database_evidence:
             raise RecoveryError('RECOVERY_DB_UNAVAILABLE')

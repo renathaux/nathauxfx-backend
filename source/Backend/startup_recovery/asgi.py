@@ -7,6 +7,11 @@ class RecoveryContextMiddleware:
         self.app, self.runtime_api = app, runtime_api
 
     async def __call__(self, scope, receive, send):
+        if (scope['type'] == 'http' and scope.get('method') == 'GET'
+                and scope.get('path') == '/admin/runtime-identity'):
+            # This independently authenticated read-only diagnostic must not
+            # evaluate or install recovery capabilities merely to observe them.
+            return await self.app(scope, receive, send)
         runtime = getattr(self.runtime_api, '_recovery_runtime', None)
         if scope['type'] not in {'http', 'websocket'} or runtime is None:
             return await self.app(scope, receive, send)
@@ -27,6 +32,8 @@ def install(api):
     if getattr(api, '_RECOVERY_STARTUP_INSTALLED', False):
         return
     api._recovery_runtime = None
+    from routes.runtime_identity import install as install_runtime_identity
+    install_runtime_identity(api)
     api.app.add_middleware(RecoveryContextMiddleware, runtime_api=api)
 
     def startup():

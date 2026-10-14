@@ -260,8 +260,11 @@ class ProductionDependencies:
                 shared.restore_admitted_paper_payload(paper)
         self._baseline_database = fresh.database
         self.writer, self.token = writer, token
+        from startup_recovery.observability import note
+        note('token_installed')
         from startup_recovery.checkpoint_store import register_worker_producer
         register_worker_producer(writer)
+        note('producer_admitted')
 
     def produced_dependencies(self, kind, payload):
         from startup_recovery.reconcile import checkpoint_dependencies, checkpoint_execution_version

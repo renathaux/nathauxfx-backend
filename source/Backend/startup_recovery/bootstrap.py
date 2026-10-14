@@ -28,16 +28,27 @@ def adoption_configuration():
 
 
 def start(api_module, *, engine=None, session_factory=None, dependencies_factory=None):
+    from startup_recovery.observability import attach, observing, note
+    with observing(attach(api_module)):
+        outcome = _start(api_module, engine=engine, session_factory=session_factory,
+                         dependencies_factory=dependencies_factory)
+        note('finished', ready=outcome.ready, reason=outcome.reason, phases=outcome.phases)
+        return outcome
+
+
+def _start(api_module, *, engine=None, session_factory=None, dependencies_factory=None):
     """Explicit startup entry point; injected dependencies are for local tests only.
 
     This function never constructs legacy-cutover or handoff evidence. Missing
     release evidence remains a durable block; liveness is not entry readiness.
     """
     build = None
+    from startup_recovery.observability import note
     try:
         from live_integrity.build_identity import capture
         try:
             build = capture()
+            note('build', build=build)
         except Exception:
             raise RecoveryError('BUILD_IDENTITY_UNVERIFIED') from None
         if engine is None or session_factory is None:
@@ -59,7 +70,9 @@ def start(api_module, *, engine=None, session_factory=None, dependencies_factory
         else:
             dependencies = dependencies_factory(api_module=api_module, engine=engine,
                 session_factory=session_factory, scope=scope, build=build)
-        outcome = recover(dependencies, scope, str(uuid4()), build['backend_git_sha'])
+        boot_id = str(uuid4())
+        note('boot', boot_id=boot_id)
+        outcome = recover(dependencies, scope, boot_id, build['backend_git_sha'])
         if outcome.management_ready:
             api_module._recovery_runtime = dependencies
     except Exception as exc:

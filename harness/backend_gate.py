@@ -54,6 +54,7 @@ cutover = expand('tests/test_cutover_*.py')
 recovery = expand('tests/test_recovery_*.py','tests/test_strategy_live_version_binding.py')
 bounded = sorted(set(recovery + cutover + ['tests/test_runtime_paths.py','tests/test_runtime_paths_postgres.py','tests/test_database_configuration.py']))
 suites = [
+    ('runtime-identity',['tests/test_runtime_identity_observations.py','tests/test_runtime_identity_endpoint.py'],49),
     ('architecture',['tests/test_cutover_first_start.py','-k','not first_start_transport and not first_start_management and not first_start_failed'],424),
     ('runtime-owner',['tests/test_owner_handoff_runtime.py'],82),
     ('recovery-checkpoint',expand('tests/test_recovery*.py'),392),

@@ -27,7 +27,8 @@ def run(root, evidence, *, logging_only=False):
             test_root = Path(temporary)/'source'
             shutil.copytree(root, test_root)
             overlay = json.loads((harness/'broad-inputs.json').read_bytes())
-            assert overlay['source'] == SOURCE
+            # Test-only historical bytes keep their independently pinned provenance.
+            assert overlay['source'] == '4c1c483086f08a8c2596cb400725071d03a1249e'
             for row in overlay['files']:
                 p = Path(row['path'])
                 assert not p.is_absolute() and '..' not in p.parts

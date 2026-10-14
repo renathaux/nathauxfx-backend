@@ -21,9 +21,9 @@ def test_packaged_durable_auth_worker_is_read_only():
     from live_integrity.read_store import read_only
 
     build = capture()
-    assert build['backend_git_sha'] == '4c1c483086f08a8c2596cb400725071d03a1249e'
-    assert build['source_manifest_sha256'] == 'dbfa367c95c106c787b8338b282c2e83f4985cecb845ac3cb5bd8e233c32a0cc'
-    assert build['build_identity'] == 'b6507d18c7c1c2ee542d2ccfee3ee385ba0ac812683672b9690bd66c383ad35a'
+    assert build['backend_git_sha'] == '8824e32da6a5d11427dea40d4236eb38dfe4d829'
+    assert build['source_manifest_sha256'] == 'dbe202f54b38e854b7873bda45557ec4b7263498f9c457b5215caa3fb276fb50'
+    assert build['build_identity'] == 'f4fef835fdd30b5c4060e1e0dab7fe32e4491400f1db8c363bbed0fafe1671c8'
     assert build['clean_source'] is True
     dsn = os.environ['VERIFIER_TEST_PG_DSN']
     assert 'host=/tmp/fs-verifier-pg.image.' in dsn and '/verifier_test?' in dsn
