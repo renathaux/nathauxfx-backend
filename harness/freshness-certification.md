@@ -35,3 +35,12 @@ Each independent production/maintenance build must preserve exact source,
 dependency and protected-path identity. No registry publication or production
 operation occurs in this certification workflow. All image publication later
 must transfer these already-tested OCI bytes, without rebuilding.
+# Harness environment correction after run 38744375513
+
+The broad comparison correctly rejected ENVIRONMENT_DRIFT: pytest's unpinned
+transitive test-tool dependency resolved pluggy 1.7.0 rather than the retained
+reference's 1.6.0. Comparing recorded environments under the unchanged comparator
+showed no other non-path difference. Pin pluggy 1.6.0 in backend and image test-tool
+installation. This changes neither product dependencies nor the frozen source,
+and does not change or normalize the baseline. Retain the failed run and rerun
+the complete native certification.

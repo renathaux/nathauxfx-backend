@@ -117,7 +117,7 @@ done
 # Pytest tooling remains an external mount, never installed in the image/venv.
 mkdir test-tools
 docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/test-tools:/tools" --entrypoint python "$base" \
- -m pip install --only-binary=:all: --no-cache-dir --no-compile --target /tools pytest==8.4.2 >/dev/null
+ -m pip install --only-binary=:all: --no-cache-dir --no-compile --target /tools pytest==8.4.2 pluggy==1.6.0 >/dev/null
 docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/test-tools:/tools" -v "$PWD/harness/test-client.lock:/test-client.lock:ro" --entrypoint python "$base" \
  -m pip install --require-hashes --no-deps --only-binary=:all: --no-cache-dir --no-compile --target /tools -r /test-client.lock >/dev/null
 chmod -R a+rX test-tools
