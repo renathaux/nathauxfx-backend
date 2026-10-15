@@ -19,14 +19,19 @@ class ReferenceGateTests(unittest.TestCase):
         self.write('diagnostic-cleanup.json',{'disposable_copy_removed':True})
         self.write('source-after.json',{'source_files':COUNT,'manifest_sha256':MANIFEST,'source_sha':SOURCE})
         old=json.loads((self.root/'collection-order.json').read_bytes())
-        self.write('collection-order.json',sorted(old+NODES,key=lambda n:n.split('::')[0]))
+        freshness=json.loads((Path(__file__).parent/'freshness-cases.json').read_bytes())
+        order=sorted([n for n in old if n not in freshness]+NODES+freshness,
+                     key=lambda n:n.split('::')[0])
+        self.write('collection-order.json',order)
         xml=ET.Element('testsuites'); suite=ET.SubElement(xml,'testsuite')
         for row in json.loads((self.root/'diagnostic-results.json').read_bytes())['cases']:
             classname,name=row['node'].split('::',1)
             case=ET.SubElement(suite,'testcase',classname=classname,name=name)
             if row['status']!='passed':
                 child=ET.SubElement(case,row['status'],message=row['message']); child.text=row['body']
-        for node in NODES:
+        for node in order:
+            if node in old:
+                continue
             path,name=node.split('::',1)
             ET.SubElement(suite,'testcase',classname=path[:-3].replace('/','.'),name=name)
         ET.ElementTree(xml).write(self.root/'broad.xml')

@@ -34,20 +34,28 @@ def check(evidence):
     require(read_cases(evidence/'broad.xml')==actual['cases'],'XML_RAW_RECORD_MISMATCH')
     require(actual['process_returncode']==previous['process_returncode']==1,'BROAD_EXIT_DRIFT')
     old_order=reference['collection-order.json']
-    require(not set(old_order).intersection(NODES),'NEW_NODE_ALREADY_HISTORICAL')
+    freshness_raw=(Path(__file__).parent/'freshness-cases.json').read_bytes()
+    require(hashlib.sha256(freshness_raw).hexdigest()=='30cc9fdcaa27b3e7685e1d43db1a3dbc374d1774b6c7cc07e8793d7206c93a50','FRESHNESS_MATRIX_PIN')
+    freshness_order=json.loads(freshness_raw)
+    require(len(freshness_order)==len(set(freshness_order))==123,'FRESHNESS_MATRIX_COUNT')
+    freshness_added=[n for n in freshness_order if n not in old_order]
+    require(len(freshness_added)==41,'FRESHNESS_ADDITIVE_COUNT')
+    require([n for n in freshness_order if n in old_order]==[n for n in old_order if n in freshness_order], 'FRESHNESS_OLD_ORDER_DRIFT')
+    additive=NODES+freshness_added
+    require(not set(old_order).intersection(additive),'NEW_NODE_ALREADY_HISTORICAL')
     # Preserve every old relative ordering and exact parameter order. Insert only
     # the reviewed new modules at pytest's ordinary alphabetical module positions.
-    expected_order=sorted(old_order+NODES,key=lambda node:node.split('::')[0])
+    expected_order=sorted([n for n in old_order if n not in freshness_order]+NODES+freshness_order,key=lambda node:node.split('::')[0])
     require(read('collection-order.json')==expected_order,'DIAGNOSTIC_COLLECTION_DRIFT')
     new_cases=[]
     for case in ET.parse(evidence/'broad.xml').iter('testcase'):
         classname=case.get('classname','')
-        if classname in ('tests.test_runtime_identity_endpoint','tests.test_runtime_identity_observations'):
-            node=classname.replace('.', '/')+'.py::'+case.get('name','')
+        node=classname.replace('.', '/')+'.py::'+case.get('name','')
+        if node in additive:
             new_cases.append(node)
             require(not any(case.find(tag) is not None for tag in ('failure','error','skipped')),
                     'NEW_DIAGNOSTIC_TEST_NOT_PASS')
-    require(new_cases==NODES,'NEW_DIAGNOSTIC_TEST_EXECUTION_DRIFT')
+    require(new_cases==[n for n in expected_order if n in additive],'NEW_DIAGNOSTIC_TEST_EXECUTION_DRIFT')
     for name in ('sqlite-before.json','sqlite-after.json'):
         require(read(name)==reference[name],'DIAGNOSTIC_SETUP_OR_ORDER_DRIFT:'+name)
     require(read('diagnostic-cleanup.json')=={'disposable_copy_removed':True},'DISPOSABLE_CLEANUP')
@@ -56,7 +64,7 @@ def check(evidence):
     for name in semantic_names:
         require(canonical(read(name))==canonical(reference[name]),'FULL_SEMANTIC_OBSERVATION_DRIFT')
     require(read('source-after.json')==dict(source_files=COUNT,manifest_sha256=MANIFEST,source_sha=SOURCE),'SOURCE_DRIFT')
-    added_nodes={node.split('::')[0][:-3].replace('/','.')+'::'+node.split('::',1)[1] for node in NODES}
+    added_nodes={node.split('::')[0][:-3].replace('/','.')+'::'+node.split('::',1)[1] for node in additive}
     added=[row for row in actual['cases'] if row['node'] in added_nodes]
     expected_added=sorted([dict(node=node,status='passed',boundary=classify(node),message='',body='')
                            for node in added_nodes],key=lambda row:row['node'])
@@ -67,7 +75,7 @@ def check(evidence):
         historical_equivalence_claimed=False,reference_run=38270359938,
         current_raw_fingerprint=actual['fingerprint_sha256'],reference_raw_fingerprint=previous['fingerprint_sha256'],
         lossless_field_proofs=proofs,source_after=read('source-after.json'))
-    result['reviewed_additive_tests']=dict(tests=49,failures=0,errors=0,skipped=0)
+    result['reviewed_additive_tests']=dict(tests=90,failures=0,errors=0,skipped=0)
     # Existing downstream consumer expects 'pass': only the comparison gate.
     result['pass']=True
     result.update(new=[],missing=[],changed=[])

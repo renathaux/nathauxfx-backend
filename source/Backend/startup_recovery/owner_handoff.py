@@ -269,7 +269,7 @@ def _runtime_generation(tree, session, key, generation):
     from models import RecoveryLegacyAdoption
     from startup_recovery.checkpoints import _KINDS, ProducedEnvelope, checked_envelope, CheckpointCandidate
     from startup_recovery.adoption_evidence import (
-        AdoptedEnvelope, checked_adopted_envelope, validate_adoption_receipt, receipt_validated_candidates,
+        AdoptedEnvelope, checked_adopted_envelope, receipt_validated_candidates,
     )
     from startup_recovery.legacy_adoption import _receipt
 
@@ -316,8 +316,10 @@ def _runtime_generation(tree, session, key, generation):
         ).execution_options(populate_existing=True)).all()
         require(len(rows) == 1)
         receipt = _receipt(rows[0])
-        validate_adoption_receipt(receipt, envelopes, key)
         require(receipt['generation_manifest_hash'] == generation)
+        # This constructor validates the complete receipt against these exact
+        # local envelope bytes before issuing candidate proofs. Do not validate
+        # twice or reuse validation across separate generation reads.
         candidates = receipt_validated_candidates(receipt, envelopes, key)
     return manifest, bodies, candidates, receipt
 
@@ -482,10 +484,14 @@ def relinquish_terminated_runtime_owner(*, session_factory, scope, expected_atte
                 store.require_owner(uow.session, token)
                 current = safety_reader.database(uow.session, scope)
                 observation = dict(database=current, broker=second['broker'])
-                require(_runtime_safety(observation, scope) == comparisons)
                 require(not store._unsettled(uow.session, scope))
                 authority = _runtime_authority(tree, uow.session, token, predecessor_build_id,
                     expected_historical_admission_hash, observation)
+                # Authority validation fully checks this fresh locked observation.
+                # Reuse only its returned canonical identities, within this call;
+                # independent authority collection retains the same full checks.
+                require((authority['database_safety_sha256'], authority['broker_safety_sha256'])
+                    == comparisons)
                 require(_digest(b'flowsignal-runtime-owner-authority-v1\0' + _encoded(authority))
                     == expected_current_runtime_authority_sha256)
                 _runtime_fresh(second['broker'], started)

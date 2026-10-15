@@ -1,0 +1,920 @@
+{
+  "trials": [
+    {
+      "readonly_path_seconds": 16.188988817855716,
+      "timings": [
+        {
+          "seconds": 0.6274008061736822,
+          "stage": "credential_read"
+        },
+        {
+          "seconds": 0.5356261990964413,
+          "stage": "broker_connect"
+        },
+        {
+          "seconds": 1.749339610338211,
+          "stage": "database_snapshot"
+        },
+        {
+          "seconds": 2.263259619474411,
+          "stage": "broker_complete"
+        },
+        {
+          "seconds": 2.8926867116242647,
+          "stage": "complete_observation"
+        },
+        {
+          "seconds": 0.21310431510210037,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.5192689672112465,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.05056259222328663,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 1.7856820188462734,
+          "stage": "first_safety"
+        },
+        {
+          "seconds": 0.6208600997924805,
+          "stage": "credential_read"
+        },
+        {
+          "seconds": 0.5087126195430756,
+          "stage": "broker_connect"
+        },
+        {
+          "seconds": 1.6313963290303946,
+          "stage": "database_snapshot"
+        },
+        {
+          "seconds": 2.255055520683527,
+          "stage": "broker_complete"
+        },
+        {
+          "seconds": 2.878116151317954,
+          "stage": "complete_observation"
+        },
+        {
+          "seconds": 0.20775134302675724,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.3972547203302383,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0008845441043376923,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 1.6087409760802984,
+          "stage": "second_safety"
+        },
+        {
+          "seconds": 0.0001228097826242447,
+          "stage": "filesystem_lock"
+        },
+        {
+          "seconds": 0.05479121953248978,
+          "stage": "advisory_lock"
+        },
+        {
+          "seconds": 0.9965051840990782,
+          "stage": "fresh_database"
+        },
+        {
+          "seconds": 0.13607873395085335,
+          "stage": "unsettled"
+        },
+        {
+          "seconds": 0.16634694673120975,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.3916365429759026,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0010981801897287369,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0023504216223955154,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002591930329799652,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002231072634458542,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002126414328813553,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002140045166015625,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001985255628824234,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0021325238049030304,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002619389444589615,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002126803621649742,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001967335119843483,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0020037367939949036,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0022116806358098984,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0020556077361106873,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001901928335428238,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002149786800146103,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0021346155554056168,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0019751563668251038,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0021624863147735596,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002101914957165718,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0018960684537887573,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.21887260675430298,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.26460038870573044,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.1531407441943884,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.15364809520542622,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.17910495586693287,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.1793991383165121,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.0015228018164634705,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001515798270702362,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.16834278404712677,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.17181238904595375,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.0015095993876457214,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0013229083269834518,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0011268127709627151,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0010989606380462646,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0013763010501861572,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.006069861352443695,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0015255101025104523,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0014245547354221344,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0014238227158784866,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0035215672105550766,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.021087495610117912,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.20381906814873219,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.20408723503351212,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 1.9106186591088772,
+          "stage": "reconciliation"
+        },
+        {
+          "seconds": 4.901703920215368,
+          "stage": "authority"
+        },
+        {
+          "seconds": 0.0022433139383792877,
+          "stage": "authority_canonical_digest"
+        },
+        {
+          "seconds": 0.3725722227245569,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.376151341944933,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.001430947333574295,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 1.753533374518156,
+          "stage": "removed_duplicate_separate"
+        }
+      ]
+    },
+    {
+      "readonly_path_seconds": 15.058259366080165,
+      "timings": [
+        {
+          "seconds": 0.6161492466926575,
+          "stage": "credential_read"
+        },
+        {
+          "seconds": 0.462155107408762,
+          "stage": "broker_connect"
+        },
+        {
+          "seconds": 1.5179001577198505,
+          "stage": "database_snapshot"
+        },
+        {
+          "seconds": 2.023300487548113,
+          "stage": "broker_complete"
+        },
+        {
+          "seconds": 2.639939120039344,
+          "stage": "complete_observation"
+        },
+        {
+          "seconds": 0.20685581676661968,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.2631539199501276,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0008474718779325485,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 1.4738089367747307,
+          "stage": "first_safety"
+        },
+        {
+          "seconds": 0.6152945756912231,
+          "stage": "credential_read"
+        },
+        {
+          "seconds": 0.46744677424430847,
+          "stage": "broker_connect"
+        },
+        {
+          "seconds": 1.5031953565776348,
+          "stage": "database_snapshot"
+        },
+        {
+          "seconds": 2.238938756287098,
+          "stage": "broker_complete"
+        },
+        {
+          "seconds": 2.854718156158924,
+          "stage": "complete_observation"
+        },
+        {
+          "seconds": 0.36655953526496887,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.195449348539114,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0015087202191352844,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 1.5685350000858307,
+          "stage": "second_safety"
+        },
+        {
+          "seconds": 0.00017031095921993256,
+          "stage": "filesystem_lock"
+        },
+        {
+          "seconds": 0.04762045852839947,
+          "stage": "advisory_lock"
+        },
+        {
+          "seconds": 0.9908198695629835,
+          "stage": "fresh_database"
+        },
+        {
+          "seconds": 0.0986988227814436,
+          "stage": "unsettled"
+        },
+        {
+          "seconds": 0.15443388186395168,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.4026551730930805,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0013475287705659866,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0027384497225284576,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.05146617069840431,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0028726905584335327,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0018240343779325485,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.00711485743522644,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0024517998099327087,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0032641571015119553,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0033130422234535217,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002966504544019699,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.003055563196539879,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001901267096400261,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0053917840123176575,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.003530588001012802,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0052818357944488525,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002017877995967865,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0020301397889852524,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002111302688717842,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.004080478101968765,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0019331108778715134,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001969344913959503,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.1377947609871626,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.2506596799939871,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.14796195924282074,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.14858639612793922,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.1465546153485775,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.14705571345984936,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.002064308151602745,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0020077042281627655,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.14347883127629757,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.1479615680873394,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.002011016011238098,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001283060759305954,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0017380081117153168,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001245090737938881,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0034946538507938385,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0012421607971191406,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0011564847081899643,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002202119678258896,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0011367108672857285,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0011416226625442505,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.017154870554804802,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.18063360825181007,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.1808986682444811,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 1.7989268116652966,
+          "stage": "reconciliation"
+        },
+        {
+          "seconds": 4.598660338670015,
+          "stage": "authority"
+        },
+        {
+          "seconds": 0.002324918285012245,
+          "stage": "authority_canonical_digest"
+        },
+        {
+          "seconds": 0.1902206987142563,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.2785562630742788,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0008367616683244705,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 1.4722826965153217,
+          "stage": "removed_duplicate_separate"
+        }
+      ]
+    },
+    {
+      "readonly_path_seconds": 15.631485223770142,
+      "timings": [
+        {
+          "seconds": 0.6179040558636189,
+          "stage": "credential_read"
+        },
+        {
+          "seconds": 0.5119815468788147,
+          "stage": "broker_connect"
+        },
+        {
+          "seconds": 1.500718168914318,
+          "stage": "database_snapshot"
+        },
+        {
+          "seconds": 2.202515320852399,
+          "stage": "broker_complete"
+        },
+        {
+          "seconds": 2.820921253412962,
+          "stage": "complete_observation"
+        },
+        {
+          "seconds": 0.19974541291594505,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.2939542960375547,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0011416450142860413,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 1.498666349798441,
+          "stage": "first_safety"
+        },
+        {
+          "seconds": 0.6194426380097866,
+          "stage": "credential_read"
+        },
+        {
+          "seconds": 0.4635257665067911,
+          "stage": "broker_connect"
+        },
+        {
+          "seconds": 1.5000649709254503,
+          "stage": "database_snapshot"
+        },
+        {
+          "seconds": 2.0216529089957476,
+          "stage": "broker_complete"
+        },
+        {
+          "seconds": 2.6417202800512314,
+          "stage": "complete_observation"
+        },
+        {
+          "seconds": 0.26576521061360836,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.5680059995502234,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0013050530105829239,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 1.8397441133856773,
+          "stage": "second_safety"
+        },
+        {
+          "seconds": 0.00011643953621387482,
+          "stage": "filesystem_lock"
+        },
+        {
+          "seconds": 0.047562774270772934,
+          "stage": "advisory_lock"
+        },
+        {
+          "seconds": 1.0149247962981462,
+          "stage": "fresh_database"
+        },
+        {
+          "seconds": 0.09841459058225155,
+          "stage": "unsettled"
+        },
+        {
+          "seconds": 0.21238845214247704,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.580089971423149,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.001394243910908699,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0021827686578035355,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0020594410598278046,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0019969474524259567,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0016547497361898422,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0020302366465330124,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0021557584404945374,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0021460969001054764,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.00200713612139225,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001824691891670227,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0018097851425409317,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001699063926935196,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001746397465467453,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0019802339375019073,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.002292027696967125,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0018487926572561264,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001978915184736252,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0018373746424913406,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001837022602558136,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001740865409374237,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.05134600028395653,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.11776294000446796,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.20741637982428074,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.10372697561979294,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.10405310057103634,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.15473074093461037,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.15510112792253494,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.0015618838369846344,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0014989785850048065,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.09694562293589115,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.10037067160010338,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.0012863557785749435,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0013112761080265045,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0011467542499303818,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0013128258287906647,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.001202225685119629,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0010780878365039825,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0010331440716981888,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0011784974485635757,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0008776653558015823,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.0011837948113679886,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.012166185304522514,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 0.10459536872804165,
+          "stage": "generation"
+        },
+        {
+          "seconds": 0.10479182377457619,
+          "stage": "lineage"
+        },
+        {
+          "seconds": 1.6874563321471214,
+          "stage": "reconciliation"
+        },
+        {
+          "seconds": 4.655941324308515,
+          "stage": "authority"
+        },
+        {
+          "seconds": 0.0018023718148469925,
+          "stage": "authority_canonical_digest"
+        },
+        {
+          "seconds": 0.205173097550869,
+          "stage": "database_comparison"
+        },
+        {
+          "seconds": 1.3916351702064276,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 0.0015139523893594742,
+          "stage": "canonical_digest"
+        },
+        {
+          "seconds": 1.6032215747982264,
+          "stage": "removed_duplicate_separate"
+        }
+      ]
+    }
+  ]
+}
+

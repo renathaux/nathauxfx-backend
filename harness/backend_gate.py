@@ -56,19 +56,20 @@ bounded = sorted(set(recovery + cutover + ['tests/test_runtime_paths.py','tests/
 suites = [
     ('runtime-identity',['tests/test_runtime_identity_observations.py','tests/test_runtime_identity_endpoint.py'],49),
     ('architecture',['tests/test_cutover_first_start.py','-k','not first_start_transport and not first_start_management and not first_start_failed'],424),
-    ('runtime-owner',['tests/test_owner_handoff_runtime.py'],82),
+    ('runtime-owner',['tests/test_owner_handoff_runtime.py'],98),
+    ('handoff-reader',['tests/test_handoff_reader.py','tests/test_handoff_reader_integration.py'],25),
     ('recovery-checkpoint',expand('tests/test_recovery*.py'),392),
     ('auth-bridge',expand('tests/test_live_integrity_*.py','tests/test_hosted_live_integrity_integration.py','tests/test_strategy_live_integrity_verifier.py'),170),
     ('broader-auth',['tests/'+name+'.py' for name in ['test_live_order_intent','test_live_decimal_prices','test_live_identity_metadata_integration','test_broker_execution_metadata','test_strategy_studio_live_candidate','test_fundamental_execution_guard','test_strategy_engine_evaluator','test_account_approval']],164),
     ('multi-user',['tests/test_multi_user_auth.py'],4),
     ('preenable',['tests/test_live_integrity_preenable.py'],41),
-    ('owner-adoption',expand('tests/test_owner_handoff*.py','tests/test_legacy_adoption*.py'),438),
+    ('owner-adoption',expand('tests/test_owner_handoff*.py','tests/test_legacy_adoption*.py'),454),
     ('recovery-runtime',expand('tests/test_recovery*.py','tests/test_runtime_paths*.py'),412),
     ('hosted-verifier',expand('tests/test_live_integrity_*.py','tests/test_hosted_live_integrity_integration.py','tests/test_strategy_live_integrity_verifier.py'),159),
     ('broader-affected',['tests/'+name+'.py' for name in ['test_live_order_intent','test_live_decimal_prices','test_live_identity_metadata_integration','test_broker_execution_metadata','test_strategy_studio_live_candidate','test_fundamental_execution_guard','test_strategy_engine_evaluator']],157),
     ('database-config',['tests/test_database_configuration.py'],7),
-    ('owner',expand('tests/test_owner_handoff*.py'),254),
-    ('focused',expand('tests/test_cutover_evidence.py','tests/test_cutover_first_start.py','tests/test_legacy_adoption_*.py','tests/test_owner_handoff*.py'),887),
+    ('owner',expand('tests/test_owner_handoff*.py'),270),
+    ('focused',expand('tests/test_cutover_evidence.py','tests/test_cutover_first_start.py','tests/test_legacy_adoption_*.py','tests/test_owner_handoff*.py'),903),
     ('safe-recovery',recovery,444),
     ('cutover',cutover,766),
     ('bounded',bounded,1237),
@@ -108,6 +109,19 @@ try:
         (EVIDENCE/'backend-results.json').write_text(json.dumps(results,sort_keys=True,indent=2))
         print(json.dumps({'suite':name,**totals}),flush=True)
         assert result.returncode == 0 and totals == {'tests':count,'failures':0,'errors':0,'skipped':0}, 'BACKEND_GATE_FAILED_'+name
+    perf_env=dict(os.environ,FRESHNESS_BENCHMARK_MODE='production_concurrent',FRESHNESS_EVIDENCE=str(EVIDENCE))
+    perf_env['PYTHONPATH']=os.environ['PYTHONPATH']+os.pathsep+str(ROOT/'Backend')+os.pathsep+str(ROOT/'Backend/tests')
+    result=subprocess.run([sys.executable,'-B','-m','pytest','-q','-p','no:cacheprovider',
+        '--junitxml='+str(EVIDENCE/'freshness-performance.xml'),str(Path(__file__).with_name('test_freshness_performance.py'))],
+        stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,env=perf_env)
+    (EVIDENCE/'freshness-performance.log').write_text(result.stdout)
+    totals={k:sum(int(s.get(k,0)) for s in ET.parse(EVIDENCE/'freshness-performance.xml').iter('testsuite')) for k in ['tests','failures','errors','skipped']}
+    assert result.returncode==0 and totals==dict(tests=6,failures=0,errors=0,skipped=0),'NATIVE_FRESHNESS_PERFORMANCE_FAILED'
+    measured=[json.loads((EVIDENCE/f'freshness-performance-production_concurrent-{i}.json').read_text()) for i in range(1,7)]
+    assert all(r['performance_pass'] and r['database_unchanged'] and r['filesystem_unchanged'] and r['broker_observations']==2 and r['fixture_snapshot_bytes']>=3403219 for r in measured)
+    assert max(r['total_seconds'] for r in measured)+1.421998<20,'MEASURED_OPERATIONAL_RESERVE_EXHAUSTED'
+    results['freshness-performance']=totals
+    (EVIDENCE/'backend-results.json').write_text(json.dumps(results,sort_keys=True,indent=2))
 finally:
     assert not (ROOT/'Backend/database/flowsignal.db').exists(), 'FIXTURE_NOT_REMOVED'
     (EVIDENCE/'source-after.json').write_text(json.dumps(verify(ROOT),sort_keys=True))

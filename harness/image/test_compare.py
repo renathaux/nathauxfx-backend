@@ -26,7 +26,7 @@ class ReproducibilityTests(unittest.TestCase):
 
     def test_backend_gate_required_in_final_report(self):
         backend={name:dict(tests=n,failures=0,errors=0,skipped=0) for name,n in
-            [('architecture',424),('owner-adoption',438),('recovery-runtime',412),('hosted-verifier',159),('broader-affected',157),('database-config',7),('owner',254),('focused',887),('safe-recovery',444),('cutover',766),('bounded',1237),('runtime-owner',82),('recovery-checkpoint',392),('auth-bridge',170),('broader-auth',164),('multi-user',4),('preenable',41)]}
+            [('architecture',424),('owner-adoption',454),('recovery-runtime',412),('hosted-verifier',159),('broader-affected',157),('database-config',7),('owner',270),('focused',903),('safe-recovery',444),('cutover',766),('bounded',1237),('runtime-owner',98),('handoff-reader',25),('freshness-performance',6),('recovery-checkpoint',392),('auth-bridge',170),('broader-auth',164),('multi-user',4),('preenable',41)]}
         backend['runtime-identity']=dict(tests=49,failures=0,errors=0,skipped=0)
         self.assertTrue(hasattr(report,'validate_backend'),'backend evidence validation missing')
         self.assertEqual(report.validate_backend(backend),backend)

@@ -21,8 +21,8 @@ def test_packaged_durable_auth_worker_is_read_only():
     from live_integrity.read_store import read_only
 
     build = capture()
-    assert build['backend_git_sha'] == '8824e32da6a5d11427dea40d4236eb38dfe4d829'
-    assert build['source_manifest_sha256'] == 'dbe202f54b38e854b7873bda45557ec4b7263498f9c457b5215caa3fb276fb50'
+    assert build['backend_git_sha'] == '8b7c3d4bae1ae973a5bc9b58d4471fd47345f279'
+    assert build['source_manifest_sha256'] == 'a7828ecc7a3445b01bb4b4ca36e9dc9648569e759faa9e865b59d41c78a7273f'
     assert build['build_identity'] == 'f4fef835fdd30b5c4060e1e0dab7fe32e4491400f1db8c363bbed0fafe1671c8'
     assert build['clean_source'] is True
     dsn = os.environ['VERIFIER_TEST_PG_DSN']

@@ -1,11 +1,11 @@
-name: Runtime identity observability AMD64 certification
+name: Relinquishment freshness AMD64 certification
 on:
   push:
-    branches: [certification/amd64-runtime-identity-20261014]
+    branches: [certification/amd64-handoff-freshness-20261015]
 permissions:
   contents: read
 concurrency:
-  group: runtime-identity-release-amd64-20261014
+  group: handoff-freshness-release-amd64-20261015
   cancel-in-progress: false
 jobs:
   broad:

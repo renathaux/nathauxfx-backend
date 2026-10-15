@@ -18,6 +18,28 @@ def test_runtime_adapter_is_separate():
     assert callable(getattr(owner_handoff, 'relinquish_terminated_runtime_owner', None))
 
 
+def test_runtime_generation_validates_receipt_once_for_candidate_proof(ready_args, monkeypatch):
+    from startup_recovery import adoption_evidence
+    from startup_recovery.cutover_evidence import _VerificationTree
+    original = adoption_evidence.validate_adoption_receipt
+    calls = []
+
+    def validate(*args):
+        result = original(*args)
+        calls.append(result)
+        return result
+
+    monkeypatch.setattr(adoption_evidence, 'validate_adoption_receipt', validate)
+    with ready_args['session_factory']() as session:
+        receipt = session.query(RecoveryLegacyAdoption).one()
+        with _VerificationTree(ready_args['state_root']) as tree, tree.shared():
+            _, _, candidates, _ = owner_handoff._runtime_generation(
+                tree, session, receipt.scope_key, receipt.generation_manifest_hash)
+    assert len(calls) == 1
+    assert len(candidates) == 5
+    assert all(adoption_evidence.candidate_has_receipt(c) for c in candidates.values())
+
+
 @pytest.fixture
 def runtime_args(ready_args):
     args = dict(ready_args)
@@ -73,6 +95,130 @@ def test_zero_runtime_publications_and_historical_hash_not_current(runtime_args)
     assert projection['authority']['current_reconciliation_hash'] != 'd'*64
     assert {h['classification'] for h in projection['authority']['heads']} == {'ADOPTED'}
     assert release(runtime_args).status == 'RELINQUISHED'
+
+
+def test_locked_safety_identity_is_validated_once_within_freshness_budget(runtime_args, monkeypatch):
+    """A fourth identical safety calculation exhausts the unchanged deadline.
+
+    Inject computation cost, not a shorter/disabled freshness guard. Real
+    authority validation, reconciliation, locks and DB mutation still execute.
+    This is a deterministic regression, not operational performance evidence.
+    """
+    import time as clock
+    repin(runtime_args)
+    elapsed = [0.0]
+    original_reader = runtime_args['safety_reader']
+    original_safety = owner_handoff._runtime_safety
+    calls = []
+
+    class Reader:
+        database = original_reader.database
+
+        def __call__(self, scope):
+            value = original_reader(scope)
+            value['broker']['observed_at'] = 1000.0 + elapsed[0]
+            return value
+
+    def measured_safety(*args):
+        result = original_safety(*args)
+        calls.append(result)
+        elapsed[0] += 6.0
+        return result
+
+    runtime_args['safety_reader'] = Reader()
+    monkeypatch.setattr(clock, 'monotonic', lambda: elapsed[0])
+    monkeypatch.setattr(clock, 'time', lambda: 1000.0 + elapsed[0])
+    monkeypatch.setattr(owner_handoff, '_runtime_safety', measured_safety)
+    assert release(runtime_args).status == 'RELINQUISHED'
+    assert elapsed[0] == 18.0
+    assert len(calls) == 3
+    with runtime_args['session_factory']() as session:
+        account = store.account_state(session, runtime_args['scope'])
+        assert account.phase == 'RELINQUISHED'
+        assert account.owner_attempt_id is None
+
+
+@pytest.mark.parametrize('stage', ['second', 'locked'])
+@pytest.mark.parametrize('fault', ['live', 'account', 'unresolved', 'head'])
+def test_freshness_correction_rejects_mid_attempt_database_drift(runtime_args, monkeypatch, stage, fault):
+    repin(runtime_args)
+    original = runtime_args['safety_reader']
+    calls = []
+
+    def change(value):
+        if fault == 'live': value['settings'][0]['setting_value'] = 'true'
+        elif fault == 'account': value['selection']['account_id'] = 'different'
+        elif fault == 'unresolved': value['submissions'] = [{'attempt_status': 'SUBMITTING'}]
+        else: value['checkpoint_heads'][0]['file_hash'] = 'f'*64
+        return value
+
+    class Reader:
+        def __call__(self, scope):
+            calls.append('observation')
+            value = original(scope)
+            if stage == 'second' and len(calls) == 2: change(value['database'])
+            return value
+
+        def database(self, session, scope):
+            value = original.database(session, scope)
+            return change(value) if stage == 'locked' else value
+
+    runtime_args['safety_reader'] = Reader()
+    monkeypatch.setattr(store, 'relinquish', lambda *a: pytest.fail('drift must not reach mutation'))
+    with pytest.raises(RecoveryError): release(runtime_args)
+    assert calls == ['observation', 'observation']
+    with runtime_args['session_factory']() as session:
+        account = store.account_state(session, runtime_args['scope'])
+        assert account.owner_attempt_id == runtime_args['expected_attempt_id']
+        assert account.phase == 'NEW_ENTRIES_READY'
+
+
+@pytest.mark.parametrize('fault', ['stale_first', 'stale_second', 'positions', 'orders', 'history'])
+def test_freshness_correction_requires_independent_safe_broker_observations(runtime_args, monkeypatch, fault):
+    repin(runtime_args)
+    original = runtime_args['safety_reader']
+    calls = []
+
+    class Reader:
+        database = original.database
+
+        def __call__(self, scope):
+            calls.append(1)
+            value = original(scope)
+            broker = value['broker']
+            if fault == 'stale_first' and len(calls) == 1: broker['observed_at'] -= 21
+            if len(calls) == 2:
+                if fault == 'stale_second': broker['observed_at'] -= 21
+                elif fault == 'positions': broker['positions'] = [{'id': 'synthetic'}]
+                elif fault == 'orders': broker['orders'] = [{'id': 'synthetic'}]
+                elif fault == 'history': broker['history_complete'] = False
+            return value
+
+    runtime_args['safety_reader'] = Reader()
+    monkeypatch.setattr(store, 'relinquish', lambda *a: pytest.fail('unsafe broker evidence cannot mutate'))
+    with pytest.raises(RecoveryError): release(runtime_args)
+    assert len(calls) == (1 if fault == 'stale_first' else 2)
+
+
+def test_failed_attempt_does_not_cache_generation_validation(runtime_args, monkeypatch):
+    repin(runtime_args)
+    original_fresh = owner_handoff._runtime_fresh
+    calls = []
+
+    def expire_final(*args):
+        calls.append(1)
+        if len(calls) == 3: raise RecoveryError('RECOVERY_TERMINATION_EVIDENCE_INVALID')
+        return original_fresh(*args)
+
+    monkeypatch.setattr(owner_handoff, '_runtime_fresh', expire_final)
+    with pytest.raises(RecoveryError): release(runtime_args)
+    monkeypatch.setattr(owner_handoff, '_runtime_fresh', original_fresh)
+    with runtime_args['session_factory']() as session:
+        head = session.query(RecoveryCheckpointHead).filter_by(kind='live_backup').one()
+        envelope = runtime_args['state_root']/'.recovery-generations'/head.manifest_hash/'live_backup.json'
+    envelope.write_bytes(b'{}')
+    monkeypatch.setattr(store, 'relinquish', lambda *a: pytest.fail('retry cannot reuse validated generation'))
+    with pytest.raises(RecoveryError): release(runtime_args)
 
 
 @pytest.mark.parametrize('field,value', [('accepted_manifest_hash', None), ('accepted_manifest_hash', 'e'*64),

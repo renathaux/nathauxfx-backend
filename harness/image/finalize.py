@@ -9,12 +9,12 @@ e=Path('evidence')
 raw=(e/'maintenance-owner.log').read_text()
 xml=ET.fromstring(raw[raw.index('<?xml'):])
 totals={k:sum(int(s.get(k,0)) for s in xml.iter('testsuite')) for k in ['tests','failures','errors','skipped']}
-assert totals==dict(tests=254,failures=0,errors=0,skipped=0)
+assert totals==dict(tests=270,failures=0,errors=0,skipped=0)
 auth_raw=(e/'production-auth.log').read_text()
 auth_xml=ET.fromstring(auth_raw[auth_raw.index('<?xml'):])
 auth_totals={k:sum(int(s.get(k,0)) for s in auth_xml.iter('testsuite')) for k in ['tests','failures','errors','skipped']}
 assert auth_totals==dict(tests=73,failures=0,errors=0,skipped=0)
-result={'source_sha':package.SOURCE,'manifest_sha256':package.MANIFEST,'source_files':383,
+result={'source_sha':package.SOURCE,'manifest_sha256':package.MANIFEST,'source_files':388,
  'dependency_lock':package.LOCK,'native_amd64':True,'owner_container_tests':totals,
  'production_auth_tests':auth_totals,
  'registry_push':False,'production_access':False,'broker_writes':0}
