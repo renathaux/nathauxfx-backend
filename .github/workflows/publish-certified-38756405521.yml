@@ -1,13 +1,13 @@
-name: Publish exact certified OCI 38584096907 without build
+name: Publish exact certified OCI 38756405521 without build
 on:
   push:
-    branches: [publication/certified-38584096907]
+    branches: [publication/certified-38756405521]
 permissions:
   contents: read
   actions: read
   packages: write
 concurrency:
-  group: publish-certified-38584096907
+  group: publish-certified-38756405521
   cancel-in-progress: false
 jobs:
   publish:
@@ -33,9 +33,9 @@ jobs:
         run: |
           set +x
           set -euo pipefail
-          python3 -B harness/publication/download.py "$RUNNER_TEMP/certified-oci-38584096907" evidence/artifact.json
+          python3 -B harness/publication/download.py "$RUNNER_TEMP/certified-oci-38756405521" evidence/artifact.json
       - name: Verify both certified archives before registry authentication
-        run: python3 -B harness/publication/verify.py pre "$RUNNER_TEMP/certified-oci-38584096907" evidence/pre.json
+        run: python3 -B harness/publication/verify.py pre "$RUNNER_TEMP/certified-oci-38756405521" evidence/pre.json
       - name: Authenticate, preserve digests, and read back by digest
         env:
           PUBLICATION_TOKEN: ${{ github.token }}
@@ -43,34 +43,34 @@ jobs:
           set +x
           set -euo pipefail
           umask 077
-          auth="$RUNNER_TEMP/publication-38584096907-auth.json"
+          auth="$RUNNER_TEMP/publication-38756405521-auth.json"
           trap 'rm -f -- "$auth"' EXIT
           printf '%s' "$PUBLICATION_TOKEN" | skopeo login --authfile "$auth" --username "${{ github.actor }}" --password-stdin ghcr.io
           unset PUBLICATION_TOKEN
-          mkdir "$RUNNER_TEMP/registry-readback-38584096907"
+          mkdir "$RUNNER_TEMP/registry-readback-38756405521"
           for kind in production maintenance; do
             digest=$(python3 -c 'import json,sys; print(json.load(open("evidence/pre.json"))[sys.argv[1]]["manifest_digest"])' "$kind")
             skopeo copy --authfile "$auth" --preserve-digests \
-              "oci-archive:$RUNNER_TEMP/certified-oci-38584096907/$kind.oci.tar" \
-              "docker://ghcr.io/renathaux/nathauxfx-backend:certified-38584096907-$kind"
+              "oci-archive:$RUNNER_TEMP/certified-oci-38756405521/$kind.oci.tar" \
+              "docker://ghcr.io/renathaux/nathauxfx-backend:certified-38756405521-$kind"
             skopeo copy --authfile "$auth" --preserve-digests \
               "docker://ghcr.io/renathaux/nathauxfx-backend@$digest" \
-              "oci-archive:$RUNNER_TEMP/registry-readback-38584096907/$kind.oci.tar"
+              "oci-archive:$RUNNER_TEMP/registry-readback-38756405521/$kind.oci.tar"
           done
       - name: Independently verify registry bytes
-        run: python3 -B harness/publication/verify.py post "$RUNNER_TEMP/registry-readback-38584096907" evidence/publication.json
+        run: python3 -B harness/publication/verify.py post "$RUNNER_TEMP/registry-readback-38756405521" evidence/publication.json
       - name: Sanitized publication evidence only
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: publication-38584096907-${{ github.run_id }}
+          name: publication-38756405521-${{ github.run_id }}
           path: evidence/*.json
           retention-days: 14
       - name: Remove disposable archives and credentials
         if: always()
         run: |
-          rm -f -- "$RUNNER_TEMP/publication-38584096907-auth.json"
-          rm -rf -- "$RUNNER_TEMP/certified-oci-38584096907" "$RUNNER_TEMP/registry-readback-38584096907"
-          test ! -e "$RUNNER_TEMP/publication-38584096907-auth.json"
-          test ! -e "$RUNNER_TEMP/certified-oci-38584096907"
-          test ! -e "$RUNNER_TEMP/registry-readback-38584096907"
+          rm -f -- "$RUNNER_TEMP/publication-38756405521-auth.json"
+          rm -rf -- "$RUNNER_TEMP/certified-oci-38756405521" "$RUNNER_TEMP/registry-readback-38756405521"
+          test ! -e "$RUNNER_TEMP/publication-38756405521-auth.json"
+          test ! -e "$RUNNER_TEMP/certified-oci-38756405521"
+          test ! -e "$RUNNER_TEMP/registry-readback-38756405521"

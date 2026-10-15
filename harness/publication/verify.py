@@ -3,8 +3,8 @@ import hashlib,json,sys,tarfile
 from pathlib import Path
 
 PINS={
- 'production':('62ccad99d85a63cc7e27e4bc2b7a0137150a89b44d5c8a99933d15c4e47bcfbc','000b35a4c1783f26b7870ae9ca4b831ec865a341c030678462e421dbab74ec65','dcf09cda4166b87cf1706acebc2d3985988fb9eb3745f5b95989523eff5b6168'),
- 'maintenance':('b23141e72bcceae169956ba694c242ea6eeae15e6bc8110b9b04d3e2119db41c','8a1b5faeb57e8541582b25446b410bd944eb1dac384033fecd54d9120be05a82','0f983d00b59b9e6c304b3f9dedcabbd1ebb4b8573f9e880a5ec7181044c20379')}
+ 'production':('8ae072036667dd8a515d13009991ef23f91d0d4f04f618f2909b55d68d315088','7214c2136df7304daad71a945c8b5b684effcd7507a693c463aaefb5b2a8ddfc','bef6ff3f51ddf76fc960532b1365e9a4dfefe22d7ea8a249dc34fbe96af9d4b0'),
+ 'maintenance':('8bc08529d26d7f0dc8d09ba75ec559b2897165eacc1845811493dbaf00710d26','34b1bdb5d3bd0cc6a226ce1df2a32013d299dd15d51480f56e86e010cbaad981','2abaebc2ecbef07c612d61639c9a2493d04c280196d73616f37c85ae89c5f578')}
 def sha(path):
  h=hashlib.sha256()
  with path.open('rb') as f:
@@ -33,7 +33,7 @@ if __name__=='__main__':
  result={kind:verify(Path(root)/(kind+'.oci.tar'),kind,mode=='pre') for kind in PINS}
  if mode=='post':
   before=json.loads(Path('evidence/pre.json').read_text());assert result==before,'REGISTRY_TRANSFORMATION'
-  result={'certification_run':38584096907,'artifact_id':11907941907,'artifact_name':'tested-oci-1-38584096907',
+  result={'certification_run':38756405521,'artifact_id':11987665377,'artifact_name':'tested-oci-1-38756405521',
    'registry':'ghcr.io/renathaux/nathauxfx-backend','images':result,'registry_verification':'PASS',
    'archive_hashes':{kind:pin[0] for kind,pin in PINS.items()},'rebuild':False,'deployment':False,'production_access':False}
  Path(out).write_text(json.dumps(result,sort_keys=True,indent=2));print(json.dumps(result,sort_keys=True))

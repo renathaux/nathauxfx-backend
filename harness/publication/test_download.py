@@ -4,10 +4,10 @@ import download
 
 class ArtifactPins(unittest.TestCase):
     def metadata(self):
-        return dict(id=11907941907,name='tested-oci-1-38584096907',
-            digest='sha256:f6bb7557ff6c23782fcac3ac435827594b2954e1a5acc6c3bb121b20d4aa8a26',
-            expired=False,workflow_run=dict(id=38584096907,
-                head_sha='8328d8025da84a47b56a4d6548126a496b1aa19a'))
+        return dict(id=11987665377,name='tested-oci-1-38756405521',
+            digest='sha256:8c7063de2ca4cc163be82eaf8cfadd91ec1734ce1724131aa3cea7b2c1fffd38',
+            expired=False,workflow_run=dict(id=38756405521,
+                head_sha='cd6cbf85f295ed6e4c7f37582cf737171b4ad6ba'))
     def test_exact_artifact(self):
         download.validate_metadata(self.metadata())
     def test_wrong_identity_or_expired_blocks(self):
