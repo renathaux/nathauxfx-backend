@@ -1,11 +1,11 @@
-name: Relinquishment freshness AMD64 certification
+name: Verifier startup and canonical identity AMD64 certification
 on:
   push:
-    branches: [certification/amd64-handoff-freshness-20261015]
+    branches: [certification/amd64-preenable-startup-20261016]
 permissions:
   contents: read
 concurrency:
-  group: handoff-freshness-release-amd64-20261015
+  group: preenable-startup-release-amd64-20261016
   cancel-in-progress: false
 jobs:
   broad:

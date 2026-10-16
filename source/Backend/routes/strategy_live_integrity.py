@@ -5,9 +5,11 @@ import time
 from fastapi import APIRouter,Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel,ConfigDict,Field
-from live_integrity.executor import run,TIMEOUT_SECONDS
+from live_integrity.executor import run,TIMEOUT_SECONDS,preload,shutdown
 
 router=APIRouter()
+router.add_event_handler('startup', preload)
+router.add_event_handler('shutdown', shutdown)
 _HEADERS={'Cache-Control':'no-store','Pragma':'no-cache'}
 
 

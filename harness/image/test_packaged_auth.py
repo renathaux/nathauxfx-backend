@@ -21,9 +21,9 @@ def test_packaged_durable_auth_worker_is_read_only():
     from live_integrity.read_store import read_only
 
     build = capture()
-    assert build['backend_git_sha'] == '8b7c3d4bae1ae973a5bc9b58d4471fd47345f279'
-    assert build['source_manifest_sha256'] == 'a7828ecc7a3445b01bb4b4ca36e9dc9648569e759faa9e865b59d41c78a7273f'
-    assert build['build_identity'] == '5e63edfe32fc0f204790b6bdd26ce076124bb705435660f2ff3aaa5b30f898b0'
+    assert build['backend_git_sha'] == '71ef8dfe56b5c28f3e8d110e6dc32454e00082b6'
+    assert build['source_manifest_sha256'] == 'b9d5c56bb73203f94f3e6b0923135fa38020bb6af25c91e487e2118b7e009635'
+    assert build['build_identity'] == '71a9cd429fffcb77ab9f02bae8f8a53670a644e9f12556e18d2de751f6a82c01'
     assert build['clean_source'] is True
     dsn = os.environ['VERIFIER_TEST_PG_DSN']
     assert 'host=/tmp/fs-verifier-pg.image.' in dsn and '/verifier_test?' in dsn
@@ -48,21 +48,32 @@ def test_packaged_durable_auth_worker_is_read_only():
             assert read_legacy_owner(connection, token) == 'owner:flowsignal.contact@gmail.com'
             with pytest.raises(AccessDenied):
                 read_legacy_owner(connection, 'synthetic-unknown')
-        payload = dict(auth_scheme='legacy-owner', token=token, csrf='',
-                       strategy_id='absent', symbol='XAUUSD', runtime={}, deadline=time.monotonic()+8)
         env = dict(PATH=os.environ['PATH'], DATABASE_URL=dsn,
                    STRATEGY_LIVE_INTEGRITY_VERIFY_ENABLED='1', PYTHONDONTWRITEBYTECODE='1')
-        result = subprocess.run([sys.executable, '-I', '-B', str(Path('live_integrity/worker.py').resolve())],
-                                input=json.dumps(payload)+'\n', capture_output=True, text=True,
-                                env=env, timeout=10)
-        assert result.returncode == 0
-        response = json.loads(result.stdout)
+        import selectors
+        with subprocess.Popen([sys.executable, '-I', '-B', str(Path('live_integrity/worker.py').resolve()), '--preload'],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env=env) as child:
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(child.stdout,selectors.EVENT_READ)
+                    assert selector.select(60), 'PRELOAD_DID_NOT_FINISH'
+                assert child.stdout.readline() == b'READY\n'
+                assert snapshot() == before
+                payload = dict(auth_scheme='legacy-owner', token=token, csrf='',
+                               strategy_id='absent', symbol='XAUUSD', runtime={}, deadline=time.monotonic()+8)
+                stdout,stderr=child.communicate((json.dumps(payload)+'\n').encode(),timeout=10)
+                assert child.returncode == 0
+                response = json.loads(stdout)
+            finally:
+                if child.poll() is None:child.kill()
+                child.communicate()
         assert response['status'] == 200
         assert response['body']['build'] == build
         assert response['body']['decision'] == 'WOULD_BLOCK'
         assert response['body']['REAL_ORDER_DISPATCH_AVAILABLE'] is False
         assert response['body']['block_reasons'] == ['STRATEGY_SAVED_ROW_MISSING']
-        assert token not in result.stdout + result.stderr
+        assert token.encode() not in stdout + stderr
         assert snapshot() == before
     finally:
         engine.dispose()

@@ -14,9 +14,13 @@ auth_raw=(e/'production-auth.log').read_text()
 auth_xml=ET.fromstring(auth_raw[auth_raw.index('<?xml'):])
 auth_totals={k:sum(int(s.get(k,0)) for s in auth_xml.iter('testsuite')) for k in ['tests','failures','errors','skipped']}
 assert auth_totals==dict(tests=73,failures=0,errors=0,skipped=0)
-result={'source_sha':package.SOURCE,'manifest_sha256':package.MANIFEST,'source_files':388,
+preload_raw=(e/'production-preload-canonical.log').read_text()
+preload_xml=ET.fromstring(preload_raw[preload_raw.index('<?xml'):])
+preload_totals={k:sum(int(s.get(k,0)) for s in preload_xml.iter('testsuite')) for k in ['tests','failures','errors','skipped']}
+assert preload_totals==dict(tests=29,failures=0,errors=0,skipped=0)
+result={'source_sha':package.SOURCE,'manifest_sha256':package.MANIFEST,'source_files':391,
  'dependency_lock':package.LOCK,'native_amd64':True,'owner_container_tests':totals,
- 'production_auth_tests':auth_totals,
+ 'production_auth_tests':auth_totals,'preload_canonical_container_tests':preload_totals,
  'registry_push':False,'production_access':False,'broker_writes':0}
 for kind in ('production','maintenance'):
  p=Path('images')/(kind+'.oci.tar')

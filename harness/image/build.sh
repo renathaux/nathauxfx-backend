@@ -131,5 +131,10 @@ docker run "${common[@]}" -v "$pg_root:$pg_root:ro" -v "$PWD/test-tools:/test-to
  -e PYTHONPATH=/test-tools:/app/Backend --entrypoint /bin/sh "$maint" -c \
  'mkdir /cache/tmp; python -B -m pytest -q -p no:cacheprovider --junitxml=/cache/owner.xml tests/test_owner_handoff.py tests/test_owner_handoff_submissions.py tests/test_owner_handoff_ready.py tests/test_owner_handoff_runtime.py; result=$?; cat /cache/owner.xml; exit "$result"' \
  > evidence/maintenance-owner.log 2>&1
+docker run "${common[@]}" -v "$PWD/test-tools:/test-tools:ro" \
+ -e DATABASE_URL=sqlite:///:memory: -e TMPDIR=/cache/tmp \
+ -e PYTHONPATH=/test-tools:/app/Backend --entrypoint /bin/sh "$prod" -c \
+ 'mkdir /cache/tmp; python -B -m pytest -q -p no:cacheprovider --junitxml=/cache/preload.xml tests/test_live_integrity_preload.py tests/test_canonical_strategy_successor.py; result=$?; cat /cache/preload.xml; exit "$result"' \
+ > evidence/production-preload-canonical.log 2>&1
 python3 -B harness/image/finalize.py
 python3 -B harness/verify_source.py source > evidence/image-source-after.json

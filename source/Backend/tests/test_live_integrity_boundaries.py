@@ -55,17 +55,21 @@ def test_dedicated_socket_cleanup_and_secret_free_errors(monkeypatch,failure):
 def test_hard_timeout_kills_worker_not_only_response(monkeypatch,tmp_path):
     import subprocess,sys,time
     from live_integrity import executor
-    script=tmp_path/'sleep.py';script.write_text('import time\ntime.sleep(60)\n')
+    script=tmp_path/'sleep.py';script.write_text("import time,sys\nprint('READY',flush=True)\nsys.stdin.buffer.readline()\ntime.sleep(60)\n")
     real_popen=subprocess.Popen
     children=[]
     def child(*args,**kwargs):
         p=real_popen([sys.executable,str(script)],**kwargs);children.append(p);return p
     monkeypatch.setattr(executor.subprocess,'Popen',child)
+    monkeypatch.setenv('STRATEGY_LIVE_INTEGRITY_VERIFY_ENABLED','1')
+    executor.shutdown()
+    assert executor.preload()
     monkeypatch.setattr(executor,'TIMEOUT_SECONDS',.2)
     started=time.monotonic()
     result=executor.run({'fixture':True})
     assert result['status']==504 and result['body']['block_reasons']==['DIAGNOSTIC_TIMEOUT']
     assert time.monotonic()-started<2
+    executor.shutdown()
     assert all(p.poll() is not None for p in children)
     assert executor._LOCAL_FLIGHT.acquire(False)
     executor._LOCAL_FLIGHT.release()

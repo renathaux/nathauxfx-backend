@@ -6,8 +6,8 @@ import os
 
 def validate_backend(backend):
     expected={'runtime-identity':49,'architecture':424,'owner-adoption':454,'recovery-runtime':412,
-        'hosted-verifier':159,'broader-affected':157,'database-config':7,'owner':270,'focused':903,'safe-recovery':444,'cutover':766,'bounded':1237,
-        'runtime-owner':98,'handoff-reader':25,'freshness-performance':6,'recovery-checkpoint':392,'auth-bridge':170,'broader-auth':164,'multi-user':4,'preenable':41}
+        'hosted-verifier':169,'broader-affected':157,'database-config':7,'owner':270,'focused':903,'safe-recovery':444,'cutover':766,'bounded':1237,
+        'runtime-owner':98,'handoff-reader':25,'freshness-performance':6,'recovery-checkpoint':392,'auth-bridge':180,'broader-auth':164,'multi-user':4,'preenable':41,'canonical-successor':19}
     assert set(backend)==set(expected)
     for name,n in expected.items():
         assert backend[name]==dict(tests=n,failures=0,errors=0,skipped=0)
@@ -48,8 +48,8 @@ if __name__=='__main__':
     assert all(n==0 for phase in ('before','after') for n in migration[phase]['rows'].values())
     result['backend_migration']=migration
     result['source_after_cleanup']=json.loads((backend/'source-after.json').read_text())
-    assert result['source_after_cleanup']['source_files']==388
-    assert result['source_after_cleanup']['manifest_sha256']=='a7828ecc7a3445b01bb4b4ca36e9dc9648569e759faa9e865b59d41c78a7273f'
+    assert result['source_after_cleanup']['source_files']==391
+    assert result['source_after_cleanup']['manifest_sha256']=='b9d5c56bb73203f94f3e6b0923135fa38020bb6af25c91e487e2118b7e009635'
     result['origins']={'application':'c8c82ece5856c2e040b75070bad7888beedd2f60',
         'maintenance':'d223082822bd209858ce4c699e5fa907e654dc29',
         'composite':'63b42795ca26bdecb1be6d7758c8ae757eee90d4',

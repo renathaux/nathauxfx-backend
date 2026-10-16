@@ -86,4 +86,9 @@ def main():
 
 
 if __name__=='__main__':
+    if sys.argv[1:] == ['--preload']:
+        # Imports only. main() performs all credential, DB, broker and runtime
+        # reads afresh after one request arrives, then this process exits.
+        sys.stdout.write('READY\n')
+        sys.stdout.flush()
     sys.stdout.write(json.dumps(main(),allow_nan=False,separators=(',',':')))
