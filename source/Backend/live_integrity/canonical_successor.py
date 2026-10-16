@@ -27,7 +27,7 @@ def plan(definition, *, source_sha256, successor_sha256):
             raise ValueError('CANONICAL_SUCCESSOR_SHAPE_UNSUPPORTED')
         candidate[section][field] = value
     normalized = normalize_definition(definition)
-    if (candidate != normalized or fingerprint(candidate) != fingerprint(normalized)
+    if (fingerprint(candidate) != fingerprint(normalized)
             or fingerprint(candidate) != successor_sha256):
         raise ValueError('CANONICAL_SUCCESSOR_SEMANTICS_UNPROVEN')
     return candidate

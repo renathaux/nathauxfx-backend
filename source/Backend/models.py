@@ -104,6 +104,25 @@ class RecoveryLegacyAdoption(Base):
     )
 
 
+class RecoveryNewsStrategyCompatibility(Base):
+    """One explicit historical-news identity transition per account scope."""
+    __tablename__ = 'recovery_news_strategy_compatibility'
+    scope_key = Column(String(64), ForeignKey('recovery_accounts.scope_key'), primary_key=True)
+    predecessor_attempt_id = Column(String(36), ForeignKey('recovery_attempts.attempt_id'), nullable=False)
+    predecessor_epoch = Column(BigInteger, nullable=False)
+    original_checkpoint_hash = Column(String(64), nullable=False)
+    predecessor_strategy_id = Column(String(64), ForeignKey('saved_strategies.strategy_id'), nullable=False)
+    successor_strategy_id = Column(String(64), ForeignKey('saved_strategies.strategy_id'), nullable=False)
+    receipt_digest = Column(String(64), nullable=False, unique=True)
+    document = Column(JSON(none_as_null=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        CheckConstraint('predecessor_epoch > 0', name='ck_news_compat_positive_epoch'),
+        CheckConstraint('predecessor_strategy_id <> successor_strategy_id', name='ck_news_compat_distinct_strategy'),
+        CheckConstraint("CAST(document AS TEXT) <> 'null'", name='ck_news_compat_document_not_null'),
+    )
+
+
 class RecoveryMutation(Base):
     """Fencing annotation ONLY; outcome is read from the referenced execution row.
 

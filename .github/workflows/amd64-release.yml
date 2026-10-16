@@ -1,11 +1,11 @@
-name: Verifier startup and canonical identity AMD64 certification
+name: Historical news compatibility AMD64 certification
 on:
   push:
-    branches: [certification/amd64-preenable-startup-20261016]
+    branches: [certification/amd64-news-compatibility-20261016]
 permissions:
   contents: read
 concurrency:
-  group: preenable-startup-release-amd64-20261016
+  group: news-compatibility-release-amd64-20261016
   cancel-in-progress: false
 jobs:
   broad:

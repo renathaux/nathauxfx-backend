@@ -30,6 +30,21 @@ def test_actual_postgres_reader_does_not_mutate_selection_or_lifecycle(db):
     assert before['runtime_owners'] == []
     assert before['lifecycles'] == [] and before['submissions'] == []
     assert reader(SCOPE) == before
+
+
+def test_reader_binds_studio_handoff_pointer_without_changing_enabled_state(db):
+    from models import RuntimeSetting, StrategyStudioLiveState
+    stamp=datetime(2026,10,1,tzinfo=timezone.utc)
+    with db.begin() as session:
+        session.add(RuntimeSetting(setting_name='ctrader_active_account',
+            setting_value='{"account_id":"7","env":"demo"}',updated_at=stamp,updated_by='fixture'))
+        session.add(StrategyStudioLiveState(owner_id='synthetic',enabled=True,
+            enabled_strategy_id='old',enabled_at=stamp,updated_at=stamp))
+    reader=readers_api().DatabaseReader(db.kw['bind'],history_from=1000)
+    before=reader(SCOPE)
+    assert before['studio_live_state']==[dict(owner_id='synthetic',enabled=True,
+        enabled_strategy_id='old',enabled_at=stamp.isoformat(),updated_at=stamp.isoformat())]
+    assert reader(SCOPE)==before
     with reader.transaction() as c:
         assert c.execute(text('SHOW transaction_read_only')).scalar_one() == 'on'
         with pytest.raises(Exception, match='read-only'):

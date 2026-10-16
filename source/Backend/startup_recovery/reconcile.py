@@ -443,8 +443,21 @@ def reconcile(snapshot, checkpoint_candidates):
                         payload = validated.payload
                         expected = checkpoint_dependencies(kind, db, payload)
                         if identity.get('dependencies_hash') != expected:
-                            raise RecoveryError('CHECKPOINT_DEPENDENCIES_CHANGED')
-                        if kind in {'paper_backup', 'visits'}:
+                            # Never equate old/new strategy hashes. Only the
+                            # exact original adopted news candidate can present
+                            # a separately durable, exact-pair historical proof.
+                            from startup_recovery.news_strategy_compatibility import validate_original
+                            from startup_recovery.types import scope_key
+                            receipts = db.get('news_strategy_compatibility', [])
+                            if (kind != 'news_trading_state' or not isinstance(receipts,list)
+                                or len(receipts) != 1 or type(receipts[0]) is not dict
+                                or receipts[0].get('source_head') != head
+                                or type(receipts[0].get('predecessor_epoch')) is not int
+                                or receipts[0]['predecessor_epoch'] >= snapshot.token.epoch):
+                                raise RecoveryError('CHECKPOINT_DEPENDENCIES_CHANGED')
+                            validate_original(receipts[0],db,candidate,scope_key(scope),
+                                              observed_at=broker.get('observed_at'))
+                        if kind in {'paper_backup', 'visits', 'news_trading_state'}:
                             from startup_recovery.publication import validate_produced_checkpoint
                             validate_produced_checkpoint(kind, payload, db)
                         accepted[kind] = payload

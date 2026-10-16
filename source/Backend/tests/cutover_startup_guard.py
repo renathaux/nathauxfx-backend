@@ -33,6 +33,9 @@ def check_startup(source, module):
         ('owner_handoff', '_ready_authority'): {'_verify_coverage', 'decode_manifest'},
         ('owner_handoff', 'relinquish_terminated_ready_owner'): {'_VerificationTree'},
         ('owner_handoff', 'relinquish_terminated_runtime_owner'): {'_VerificationTree'},
+        ('checkpoint_lineage', 'read_news_checkpoint'): {'_VerificationTree'},
+        ('news_strategy_transition', 'apply_transition'): {'_VerificationTree'},
+        ('news_strategy_transition', 'inspect_transition'): {'_VerificationTree'},
     }
     commands = {'inventory_state', 'copy_state', 'verify_state'}
     admin = {'_ready_authority', 'relinquish_terminated_ready_owner',
@@ -87,6 +90,7 @@ def check_startup(source, module):
         '_runtime_lineage': {},
         '_runtime_authority': {'sqlalchemy': {'select'}, 'models': {'RecoveryCheckpointHead'},
             'startup_recovery.checkpoints': {'_KINDS'},
+            'startup_recovery.news_strategy_compatibility': {'validate_lineage'},
             'startup_recovery.reconcile': {'DiscoverySnapshot', 'reconcile'}},
         'relinquish_terminated_runtime_owner': {'pathlib': {'Path'}, 'time': {'monotonic'},
             'startup_recovery.cutover_evidence': {'_VerificationTree'},
@@ -101,7 +105,7 @@ def check_startup(source, module):
         '_runtime_provenance': common_calls | {'type', 'select', 'len'},
         '_runtime_lineage': common_calls | {'set', 'type', '_runtime_generation', '_runtime_provenance'},
         '_runtime_authority': common_calls | {'select', 'bool', 'len', 'set', 'sorted',
-            '_runtime_safety', '_runtime_lineage', 'reconcile', 'list'},
+            '_runtime_safety', '_runtime_lineage', 'reconcile', 'list', 'validate_lineage'},
         'relinquish_terminated_runtime_owner': common_calls | {'isinstance', 'type', 'bool',
             'callable', 'getattr', 'monotonic', 'thaw', 'freeze', 'safety_reader', '_runtime_safety',
             '_runtime_fresh', 'ManagerToken', 'Path', '_VerificationTree', 'reconciliation_uow',
@@ -128,6 +132,26 @@ def check_startup(source, module):
         '_runtime_authority': {'_runtime_safety', '_runtime_lineage'},
         '_runtime_lineage': {'_runtime_generation', '_runtime_provenance'},
     }
+    # Extraction preserves the closed read capability set. Administrative
+    # wrappers may only delegate to the corresponding reader, not retain their
+    # former broad implementation permissions or import arbitrary capabilities.
+    reader_names = {'_runtime_generation': 'read_generation',
+                    '_runtime_provenance': 'read_provenance',
+                    '_runtime_lineage': 'read_lineage'}
+    for old, new in reader_names.items():
+        admin_imports[new] = admin_imports[old]
+        admin_calls[new] = {reader_names.get(n, n) for n in admin_calls[old]} | {'scope_key'}
+        admin_methods[new] = {k:v for k,v in admin_methods[old].items() if k != 'store'}
+        admin_imports[old] = {'startup_recovery.checkpoint_lineage': {new}}
+        admin_calls[old] = {new}
+        admin_methods[old] = {}
+    admin_imports['read_news_checkpoint'] = {
+        'pathlib': {'Path'}, 'models': {'RecoveryAccount'},
+        'startup_recovery.cutover_evidence': {'_VerificationTree'},
+        'startup_recovery.news_strategy_compatibility': {'validate_lineage'}}
+    admin_calls['read_news_checkpoint'] = {'require','len','scope_key','_VerificationTree',
+        'Path','read_lineage','validate_lineage','_parse'}
+    admin_methods['read_news_checkpoint'] = {'session': {'get'},'tree': {'shared'}}
     protected_names = set().union(*admin_calls.values())
     parsed = ast.parse(source)
     parents = {child: parent for parent in ast.walk(parsed) for child in ast.iter_child_nodes(parent)}
@@ -141,6 +165,8 @@ def check_startup(source, module):
         function = None
 
         def visit_FunctionDef(self, node):
+            if module == 'news_strategy_transition':
+                assert node.name not in {'_runtime_safety', '_runtime_fresh'}
             previous = self.function
             assert not self.administrative()  # no hidden nested capability scope
             if module == 'owner_handoff' and node.name in admin:
@@ -152,21 +178,40 @@ def check_startup(source, module):
         visit_AsyncFunctionDef = visit_FunctionDef
         visit_ClassDef = visit_FunctionDef
 
+        def visit_arg(self, node):
+            if module == 'news_strategy_transition':
+                assert node.arg not in {'_runtime_safety', '_runtime_fresh'}
+            self.generic_visit(node)
+
         def administrative(self):
-            return module == 'owner_handoff' and self.function in admin
+            return (module == 'owner_handoff' and self.function in admin
+                or module == 'checkpoint_lineage' and self.function in
+                    {*reader_names.values(), 'read_news_checkpoint'})
+
+        def transition_safety(self, name):
+            return (module == 'news_strategy_transition' and name in {
+                'validate_current_authority': {'_runtime_safety'},
+                'apply_transition': {'_runtime_safety', '_runtime_fresh'},
+                'inspect_transition': {'_runtime_fresh'},
+            }.get(self.function,set()))
 
         def visit_Name(self, node):
+            if module == 'news_strategy_transition' and isinstance(node.ctx, ast.Store):
+                assert node.id not in {'_runtime_safety','_runtime_fresh'}
             if node.id in admin and isinstance(node.ctx, ast.Load):
                 parent = parents.get(node)
-                assert (module == 'owner_handoff' and isinstance(parent, ast.Call)
-                    and parent.func is node and node.id in admin_edges.get(self.function, set()))
-            if module == 'owner_handoff' and (self.function is None or self.administrative()) and isinstance(node.ctx, ast.Store):
+                assert (isinstance(parent, ast.Call) and parent.func is node
+                    and (module == 'owner_handoff' and node.id in admin_edges.get(self.function, set())
+                         or self.transition_safety(node.id)))
+            if module in {'owner_handoff', 'checkpoint_lineage'} and (self.function is None or self.administrative()) and isinstance(node.ctx, ast.Store):
                 # Do not alias a forbidden capability under an approved name.
                 assert node.id not in protected_names
 
         def visit_Constant(self, node):
             # Also inspect folded literal targets stored before a dynamic import.
             value = _static_string(node)
+            if value is not None:
+                assert 'news_strategy_transition' not in value
             if module != 'owner_handoff' and value is not None:
                 assert 'startup_recovery.owner_handoff' not in value
                 assert value not in {'owner_handoff', '.owner_handoff',
@@ -177,12 +222,17 @@ def check_startup(source, module):
         visit_JoinedStr = visit_Constant
 
         def visit_Attribute(self, node):
+            assert node.attr != 'news_strategy_transition'
             if self.administrative() and isinstance(node.value, ast.Name) and node.value.id == 'store':
                 assert node.attr in admin_methods[self.function].get('store', set())
                 assert isinstance(node.ctx, ast.Load)
             self.generic_visit(node)
 
         def visit_Import(self, node):
+            if module == 'news_strategy_transition':
+                assert not any((n.asname or n.name.split('.')[0]) in
+                    {'_runtime_safety', '_runtime_fresh'} for n in node.names)
+            assert not any('news_strategy_transition' in n.name.split('.') for n in node.names)
             assert not self.administrative()  # no module-wide capabilities
             assert not any('cutover' in n.name for n in node.names), (module, node.lineno)
             assert not any(n.name == 'startup_recovery.owner_handoff'
@@ -191,21 +241,27 @@ def check_startup(source, module):
 
         def visit_ImportFrom(self, node):
             name = node.module or ''
+            if module == 'news_strategy_transition':
+                assert not any(n.asname in {'_runtime_safety','_runtime_fresh'} for n in node.names)
+            assert 'news_strategy_transition' not in name.split('.')
+            assert not any(n.name == 'news_strategy_transition' for n in node.names)
             # Resolve the imported capability, never its local alias. Relative
             # imports in the scanned startup_recovery package count identically.
-            assert not (name == 'startup_recovery.owner_handoff'
+            safety_import = (name == 'startup_recovery.owner_handoff' and node.level == 0
+                and bool(node.names) and all(self.transition_safety(n.name) and n.asname is None for n in node.names))
+            assert safety_import or not (name == 'startup_recovery.owner_handoff'
                         or name.startswith('startup_recovery.owner_handoff.')
                         or (node.level and name.split('.')[0] == 'owner_handoff'))
             if name == 'startup_recovery' or (node.level and not name):
                 assert not any(n.name in {'owner_handoff', '*'} for n in node.names)
-            if module == 'owner_handoff':
+            if module in {'owner_handoff', 'checkpoint_lineage'}:
                 assert not any(n.asname in protected_names for n in node.names)
             if self.administrative():
                 assert node.level == 0
                 assert {n.name for n in node.names} <= admin_imports[self.function].get(name, set())
                 assert all(n.asname is None for n in node.names)
             # Administrative callables may not leak into startup through aliases.
-            assert not any(n.name in admin for n in node.names)
+            assert safety_import or not any(n.name in admin for n in node.names)
             if name == 'startup_recovery.cutover_evidence':
                 assert {n.name for n in node.names} <= allowed.get((module, self.function), set())
                 assert all(n.asname is None for n in node.names)
@@ -228,7 +284,8 @@ def check_startup(source, module):
             name = getattr(node.func, 'id', getattr(node.func, 'attr', ''))
             assert name not in commands
             if name in admin:
-                assert module == 'owner_handoff' and name in admin_edges.get(self.function, set())
+                assert (module == 'owner_handoff' and name in admin_edges.get(self.function, set())
+                        or self.transition_safety(name))
             if self.administrative():
                 if isinstance(node.func, ast.Name):
                     assert name in admin_calls[self.function]

@@ -52,7 +52,7 @@ class ProductionDependencies:
         try:
             with self.readers.database.transaction() as connection:
                 versions = connection.execute(text('SELECT version_num FROM alembic_version')).scalars().all()
-                if versions != ['20261010_0031']:
+                if versions != ['20261016_0032']:
                     raise RecoveryError('RECOVERY_SCHEMA_UNVERIFIED')
                 protocol = connection.execute(text(
                     'SELECT protocol_version FROM execution_protocol_state WHERE singleton_id=1'
@@ -100,6 +100,11 @@ class ProductionDependencies:
             if matching:
                 try:
                     with self.session_factory() as session:
+                        if kind == 'news_trading_state':
+                            from startup_recovery.checkpoint_lineage import read_news_checkpoint
+                            candidates[kind] = read_news_checkpoint(session, snapshot,
+                                path.parent, self.build['backend_git_sha'])
+                            continue
                         generation = load_committed_candidates(session, snapshot.token.scope,
                             path.parent, matching[0]['manifest_hash'])
                     if kind not in generation:
@@ -267,12 +272,15 @@ class ProductionDependencies:
         note('producer_admitted')
 
     def produced_dependencies(self, kind, payload):
-        from startup_recovery.reconcile import checkpoint_dependencies, checkpoint_execution_version
+        from startup_recovery.reconcile import checkpoint_dependencies, checkpoint_execution_version, digest
         from startup_recovery.publication import validate_produced_checkpoint
         baseline = self._baseline_database
         if baseline is None:
             raise RecoveryError('CHECKPOINT_RECOVERY_NOT_ADMITTED')
         current = self.readers.database(self.scope)
+        if kind == 'news_trading_state' and digest(current.get('news_strategy_compatibility', [])) != digest(
+                baseline.get('news_strategy_compatibility', [])):
+            raise RecoveryError('NEWS_STRATEGY_COMPATIBILITY_INVALID')
         if (current.get('selection') != baseline.get('selection')
             or set(current.get('runtime_owners', [])) != set(baseline.get('runtime_owners', []))):
             raise RecoveryError('RECOVERY_ACCOUNT_CONFLICT')

@@ -149,11 +149,12 @@ class DatabaseConfigurationTests(unittest.TestCase):
         config = Config()
         config.set_main_option('script_location', str(BACKEND_DIR / 'migrations'))
         scripts = ScriptDirectory.from_config(config)
-        self.assertEqual(scripts.get_heads(), ['20261010_0031'])
+        self.assertEqual(scripts.get_heads(), ['20261016_0032'])
         recovery = scripts.get_revision('20261001_0029')
         self.assertEqual(recovery.down_revision, '20261001_0028')
         self.assertEqual(scripts.get_revision('20261001_0030').down_revision, recovery.revision)
         self.assertEqual(scripts.get_revision('20261010_0031').down_revision, '20261001_0030')
+        self.assertEqual(scripts.get_revision('20261016_0032').down_revision, '20261010_0031')
         # Inspect create-table operations, not arbitrary quoted strings/comments
         # or downgrade-only definitions. Historical model tables may later retire.
         created = set()

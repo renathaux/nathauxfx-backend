@@ -18,6 +18,46 @@ def test_runtime_adapter_is_separate():
     assert callable(getattr(owner_handoff, 'relinquish_terminated_runtime_owner', None))
 
 
+def test_shared_lineage_reader_has_no_administrative_import():
+    import ast
+    from pathlib import Path
+    path = Path('startup_recovery/checkpoint_lineage.py')
+    assert path.exists(), 'Read-only lineage extraction missing'
+    tree = ast.parse(path.read_text())
+    forbidden = {'owner_handoff', 'begin_attempt', 'acquire_owner', 'relinquish',
+                 'advance', 'publish', 'write_generation'}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            assert not any(any(word in alias.name.split('.') for word in forbidden)
+                           for alias in node.names)
+            assert 'owner_handoff' not in (getattr(node, 'module', '') or '')
+        if isinstance(node, ast.Call):
+            assert getattr(node.func, 'id', getattr(node.func, 'attr', '')) not in forbidden
+
+
+@pytest.mark.parametrize('statement', [
+    'from startup_recovery.store import relinquish',
+    'from startup_recovery.checkpoints import write_generation',
+    'session.execute(query)', 'session.flush()', 'store.acquire_owner(session, token)',
+    'importlib.import_module("startup_recovery." + "owner_handoff")',
+])
+def test_shared_lineage_reader_rejects_mutation_capabilities(statement):
+    from tests.cutover_startup_guard import check_startup
+    with pytest.raises(AssertionError):
+        check_startup('def read_lineage():\n    '+statement+'\n','checkpoint_lineage')
+
+
+@pytest.mark.parametrize('source', [
+    'from startup_recovery.store import acquire_owner as read_generation',
+    'from startup_recovery.store import acquire_owner as require',
+    'read_generation = mutation',
+    'require = mutation',
+])
+def test_shared_lineage_allowed_names_cannot_be_rebound(source):
+    from tests.cutover_startup_guard import check_startup
+    with pytest.raises(AssertionError): check_startup(source,'checkpoint_lineage')
+
+
 def test_runtime_generation_validates_receipt_once_for_candidate_proof(ready_args, monkeypatch):
     from startup_recovery import adoption_evidence
     from startup_recovery.cutover_evidence import _VerificationTree
@@ -38,6 +78,72 @@ def test_runtime_generation_validates_receipt_once_for_candidate_proof(ready_arg
     assert len(calls) == 1
     assert len(candidates) == 5
     assert all(adoption_evidence.candidate_has_receipt(c) for c in candidates.values())
+
+
+def test_news_startup_reader_uses_complete_committed_lineage(runtime_args):
+    from startup_recovery import checkpoint_lineage
+    from startup_recovery.reconcile import DiscoverySnapshot
+    ready_args=runtime_args
+    token=ManagerToken(ready_args['scope'],ready_args['expected_attempt_id'],
+        ready_args['expected_epoch'],ready_args['predecessor_boot_id'])
+    observation=ready_args['safety_reader'](token.scope)
+    snapshot=DiscoverySnapshot.create(token,observation['database'],observation['broker'])
+    with ready_args['session_factory']() as session:
+        candidate=checkpoint_lineage.read_news_checkpoint(session,snapshot,
+            ready_args['state_root'],ready_args['predecessor_build_id'])
+        head=next(h for h in observation['database']['checkpoint_heads'] if h['kind']=='news_trading_state')
+    assert _digest(candidate.raw)==head['file_hash']
+
+
+def test_server_news_discovery_rejects_missing_referenced_ancestor(runtime_args,monkeypatch):
+    from startup_recovery import server_adapter
+    from startup_recovery.reconcile import DiscoverySnapshot
+    from types import SimpleNamespace
+    args=runtime_args
+    with args['session_factory']() as session:
+        original=session.query(RecoveryCheckpointHead).filter_by(kind='news_trading_state').one().manifest_hash
+    publish(args,'news_trading_state')
+    observation=args['safety_reader'](args['scope'])
+    observation['database']['checkpoint_heads']=[h for h in observation['database']['checkpoint_heads']
+        if h['kind']=='news_trading_state']
+    token=ManagerToken(args['scope'],args['expected_attempt_id'],args['expected_epoch'],args['predecessor_boot_id'])
+    snapshot=DiscoverySnapshot.create(token,observation['database'],observation['broker'])
+    monkeypatch.setattr(server_adapter,'state_paths',lambda api:{'news_trading_state':args['state_root']/'news_trading_state.json'})
+    server=server_adapter.ProductionDependencies(api_module=SimpleNamespace(),
+        engine=args['session_factory'].kw['bind'],session_factory=args['session_factory'],
+        scope=args['scope'],build={'backend_git_sha':args['predecessor_build_id']})
+    assert server.checkpoints(snapshot)['news_trading_state'].raw
+    (args['state_root']/'.recovery-generations'/original/'news_trading_state.json').unlink()
+    with pytest.raises(RecoveryError): server.checkpoints(snapshot)
+
+
+def test_current_authority_cannot_forget_receipt_after_news_descendant(runtime_args,monkeypatch):
+    from startup_recovery import news_strategy_compatibility as proof
+    from live_integrity.binding import fingerprint
+    from test_canonical_strategy_successor import pair
+    old,new=pair()
+    monkeypatch.setattr(proof,'PREDECESSOR_SHA',fingerprint(old))
+    monkeypatch.setattr(proof,'SUCCESSOR_SHA',fingerprint(new))
+    with runtime_args['session_factory']() as session:
+        adoption=session.query(RecoveryLegacyAdoption).one()
+        monkeypatch.setattr(proof,'NEWS_SOURCE_SHA',adoption.source_hashes['news_trading_state'])
+    original=runtime_args['safety_reader']
+    class Reader:
+        def database(self,session,scope):
+            d=original.database(session,scope)
+            d['strategy_selections']=[dict(owner_id='owner',strategy_id='new')]
+            d['saved_strategies']=[dict(owner_id='owner',strategy_id='new',schema_version=1,
+                updated_at='2026-10-16T00:00:00Z',definition_json=new)]
+            return d
+        def __call__(self,scope):
+            value=original(scope)
+            with runtime_args['session_factory']() as session:
+                value['database']=self.database(session,scope)
+            return value
+    runtime_args['safety_reader']=Reader()
+    publish(runtime_args,'news_trading_state')
+    with pytest.raises(RecoveryError,match='NEWS_STRATEGY_COMPATIBILITY_INVALID'):
+        repin(runtime_args)
 
 
 @pytest.fixture
@@ -541,6 +647,7 @@ def test_missing_durable_producer_blocks(runtime_args):
 
 
 def test_parent_cycle_rejected_without_selecting_orphan(runtime_args, monkeypatch):
+    from startup_recovery import checkpoint_lineage
     from startup_recovery.cutover_evidence import _VerificationTree
     publish(runtime_args, 'live_backup')
     with runtime_args['session_factory']() as session:
@@ -548,7 +655,7 @@ def test_parent_cycle_rejected_without_selecting_orphan(runtime_args, monkeypatc
         selected = {c.name:getattr(head,c.name) for c in head.__table__.columns}
         token = ManagerToken(runtime_args['scope'], runtime_args['expected_attempt_id'],
                              runtime_args['expected_epoch'], runtime_args['predecessor_boot_id'])
-        original = owner_handoff._runtime_generation
+        original = checkpoint_lineage.read_generation
         calls = []
         def cycle(*args):
             manifest, bodies, candidates, receipt = original(*args)
@@ -557,7 +664,7 @@ def test_parent_cycle_rejected_without_selecting_orphan(runtime_args, monkeypatc
             # the reader boundary to exercise the explicit cycle fence as well.
             manifest['parent_hash'] = selected['manifest_hash']
             return manifest, bodies, candidates, receipt
-        monkeypatch.setattr(owner_handoff, '_runtime_generation', cycle)
+        monkeypatch.setattr(checkpoint_lineage, 'read_generation', cycle)
         with _VerificationTree(runtime_args['state_root']) as tree, tree.shared():
             with pytest.raises(RecoveryError):
                 owner_handoff._runtime_lineage(tree, session, token, 'build', 'd'*64, selected)

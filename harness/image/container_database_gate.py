@@ -47,9 +47,10 @@ elif mode=='production':
         except subprocess.TimeoutExpired:
             child.kill();child.wait();raise
 else: raise AssertionError('UNKNOWN_MODE')
-after=snapshot();assert after['revision']=='20261010_0031' and after['counts']==before['counts']
+after=snapshot();assert after['revision']=='20261016_0032' and after['counts']==before['counts']
 with engine.connect() as conn:
     assert conn.scalar(text('SELECT count(*) FROM recovery_legacy_adoptions'))==0
+    assert conn.scalar(text('SELECT count(*) FROM recovery_news_strategy_compatibility'))==0
 subprocess.run([sys.executable,'-B','-m','startup_recovery.migrate'],check=True)
 assert snapshot()==after
 assert list(Path('/state').iterdir())==[]

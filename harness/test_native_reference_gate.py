@@ -22,6 +22,10 @@ class ReferenceGateTests(unittest.TestCase):
         freshness=json.loads((Path(__file__).parent/'freshness-cases.json').read_bytes())
         order=sorted([n for n in old if n not in freshness]+NODES+freshness,
                      key=lambda n:n.split('::')[0])
+        news=json.loads((Path(__file__).parent/'news-compatibility-order.json').read_bytes())
+        modules={n.split('::')[0] for n in news}
+        order=sorted([n for n in order if n.split('::')[0] not in modules]+news,
+                     key=lambda n:n.split('::')[0])
         self.write('collection-order.json',order)
         xml=ET.Element('testsuites'); suite=ET.SubElement(xml,'testsuite')
         for row in json.loads((self.root/'diagnostic-results.json').read_bytes())['cases']:

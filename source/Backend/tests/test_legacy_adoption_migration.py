@@ -63,7 +63,9 @@ def test_upgrade_only_adds_empty_receipt_table_and_preserves_existing_rows(datab
         assert after.pop(TABLE) == []
         assert after == before
         assert conn.scalar(sa.text('SELECT version_num FROM alembic_version')) == REVISION
-    assert ScriptDirectory.from_config(cfg).get_heads() == [REVISION]
+    scripts = ScriptDirectory.from_config(cfg)
+    assert scripts.get_heads() == ['20261016_0032']
+    assert scripts.get_revision('20261016_0032').down_revision == REVISION
     import models
     assert hasattr(models, 'RecoveryLegacyAdoption'), 'Receipt ORM model is missing'
     model = models.RecoveryLegacyAdoption.__table__

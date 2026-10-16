@@ -25,7 +25,7 @@ def test_schema_verification_is_read_only_and_never_creates_missing_schema(db):
     with db.begin() as session:
         session.execute(text('CREATE TABLE ' + quoted + '.alembic_version (version_num VARCHAR(32) PRIMARY KEY)'))
         session.execute(text('INSERT INTO ' + quoted + '.alembic_version VALUES (:version)'),
-                        {'version': '20261010_0031'})
+                        {'version': '20261016_0032'})
         session.add(ExecutionProtocolState(singleton_id=1, protocol_version='wrong',
             updated_at=datetime.now(timezone.utc)))
     with pytest.raises(RecoveryError, match='RECOVERY_PROTOCOL_UNVERIFIED'):
@@ -37,12 +37,12 @@ def test_schema_verification_is_read_only_and_never_creates_missing_schema(db):
     with pytest.raises(RecoveryError,match='RECOVERY_SCHEMA_UNVERIFIED'):
         server.verify_database()
     with db.begin() as session:
-        session.execute(text('UPDATE '+quoted+'.alembic_version SET version_num=\'20261010_0031\''))
+        session.execute(text('UPDATE '+quoted+'.alembic_version SET version_num=\'20261016_0032\''))
     with pytest.raises(RecoveryError,match='RECOVERY_RESERVATION_GUARD_MISSING'):
         server.verify_database()
     from services.submission_reservation import install_reservation_guard
     with db.begin() as session: install_reservation_guard(session.connection())
-    assert server.verify_database() == dict(schema='20261010_0031', protocol=EXECUTION_PROTOCOL_VERSION)
+    assert server.verify_database() == dict(schema='20261016_0032', protocol=EXECUTION_PROTOCOL_VERSION)
     with db() as session:
         assert session.query(ExecutionProtocolState).count() == 1
 

@@ -5,8 +5,6 @@ second worker from queueing for authority. DB disconnect is never relinquishment
 """
 from dataclasses import asdict
 from datetime import datetime, timezone
-import hashlib
-import json
 import re
 from uuid import uuid4
 
@@ -15,17 +13,12 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError
 
 from models import RecoveryAccount, RecoveryAttempt, TradeSubmissionAttempt, StrategySetupLifecycle
-from startup_recovery.types import ManagerToken, RecoveryError, Phase, HandoffEvidence
+from startup_recovery.types import ManagerToken, RecoveryError, Phase, HandoffEvidence, scope_key
 
 _PHASES = [Phase.BOOTSTRAP, Phase.DB_READY, Phase.BROKER_AUTHENTICATED,
            Phase.STATE_DISCOVERED, Phase.STATE_RECONCILED,
            Phase.POSITION_MANAGEMENT_READY, Phase.NEW_ENTRIES_READY]
 _NEXT = dict(zip(_PHASES, _PHASES[1:]))
-
-
-def scope_key(scope):
-    return hashlib.sha256(json.dumps(asdict(scope), sort_keys=True,
-                                    separators=(',', ':')).encode()).hexdigest()
 
 
 def _hash(value):

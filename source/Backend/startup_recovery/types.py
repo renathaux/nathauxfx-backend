@@ -1,6 +1,14 @@
 """Immutable recovery identities. Timestamps never confer ownership."""
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from enum import StrEnum
+import hashlib
+import json
+
+
+def scope_key(scope):
+    """Existing durable scope encoding, available without importing DB adapters."""
+    return hashlib.sha256(json.dumps(asdict(scope), sort_keys=True,
+                                    separators=(',', ':')).encode()).hexdigest()
 
 
 class RecoveryError(RuntimeError):

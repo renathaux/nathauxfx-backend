@@ -22,7 +22,7 @@ def prepare_database(factory, account_id='7'):
     quoted = engine.dialect.identifier_preparer.quote(schema)
     with factory.begin() as session:
         session.execute(text('CREATE TABLE ' + quoted + '.alembic_version (version_num VARCHAR(32) PRIMARY KEY)'))
-        session.execute(text('INSERT INTO ' + quoted + '.alembic_version VALUES (:v)'), {'v': '20261010_0031'})
+        session.execute(text('INSERT INTO ' + quoted + '.alembic_version VALUES (:v)'), {'v': '20261016_0032'})
         if session.get(ExecutionProtocolState, 1) is None:
             session.add(ExecutionProtocolState(singleton_id=1, protocol_version=EXECUTION_PROTOCOL_VERSION,
                 updated_at=datetime.now(timezone.utc)))

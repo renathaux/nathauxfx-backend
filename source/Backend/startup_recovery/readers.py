@@ -46,6 +46,8 @@ class DatabaseReader:
     def read_connection(self, connection, scope):
         """SELECT-only snapshot on the caller's already fenced transaction."""
         from models import StrategySetupLifecycle, TradeSubmissionAttempt, ForexExecutionSnapshot, RecoveryCheckpointHead
+        from models import RecoveryNewsStrategyCompatibility, StrategyStudioLiveState
+        from startup_recovery.news_strategy_compatibility import documents_from_rows
         from models import IndicatorStreamGeneration, IndicatorStreamHead, IndicatorEventLifecycle
         from services.strategy_studio_models import SavedStrategy, StrategyStudioSelection
         from startup_recovery.store import scope_key
@@ -92,8 +94,13 @@ class DatabaseReader:
                 submissions=rows(connection, TradeSubmissionAttempt, (TradeSubmissionAttempt.account_id == scope.account_id) & (TradeSubmissionAttempt.mode == 'LIVE')),
                 legacy_executions=rows(connection, ForexExecutionSnapshot, (ForexExecutionSnapshot.account_id == scope.account_id) & (ForexExecutionSnapshot.broker_environment == scope.environment)),
                 checkpoint_heads=rows(connection, RecoveryCheckpointHead, RecoveryCheckpointHead.scope_key == scope_key(scope)),
+                news_strategy_compatibility=documents_from_rows(rows(connection,
+                    RecoveryNewsStrategyCompatibility,
+                    RecoveryNewsStrategyCompatibility.scope_key == scope_key(scope)),scope_key(scope)),
                 settings_revision=digest(settings), settings=settings,
                 runtime_owners=list(owners),
+                studio_live_state=rows(connection, StrategyStudioLiveState,
+                    StrategyStudioLiveState.owner_id.in_(owners)),
                 stream_generations=generations,
                 stream_heads=rows(connection, IndicatorStreamHead, IndicatorStreamHead.root_key.in_([row['root_key'] for row in generations])),
                 event_lifecycles=rows(connection, IndicatorEventLifecycle,

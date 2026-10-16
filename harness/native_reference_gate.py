@@ -46,6 +46,19 @@ def check(evidence):
     # Preserve every old relative ordering and exact parameter order. Insert only
     # the reviewed new modules at pytest's ordinary alphabetical module positions.
     expected_order=sorted([n for n in old_order if n not in freshness_order]+NODES+freshness_order,key=lambda node:node.split('::')[0])
+    matrix_raw=(Path(__file__).parent/'news-compatibility-order.json').read_bytes()
+    added_raw=(Path(__file__).parent/'news-compatibility-cases.json').read_bytes()
+    require(hashlib.sha256(matrix_raw).hexdigest()=='c8d17a6fe7ffc6d06e8709e85e7f618cdd7d4cd1e799a8a89bc78828b1dd8430','NEWS_MATRIX_PIN')
+    require(hashlib.sha256(added_raw).hexdigest()=='85b2c77397d53b5b43d123f85b0b9c4615e72d0c5fba22f7770d06ce6b4e3ed0','NEWS_ADDITIVE_PIN')
+    matrix=json.loads(matrix_raw); news_added=json.loads(added_raw)
+    require(len(matrix)==len(set(matrix))==329,'NEWS_MATRIX_COUNT')
+    require(len(news_added)==len(set(news_added))==213,'NEWS_ADDITIVE_COUNT')
+    require(not set(expected_order).intersection(news_added),'NEWS_ALREADY_EXISTING')
+    require([n for n in matrix if n not in expected_order]==news_added,'NEWS_ADDITIVE_DRIFT')
+    modules={n.split('::')[0] for n in matrix}
+    require([n for n in matrix if n in expected_order]==[n for n in expected_order if n.split('::')[0] in modules],'NEWS_EXISTING_ORDER_DRIFT')
+    expected_order=sorted([n for n in expected_order if n.split('::')[0] not in modules]+matrix,key=lambda node:node.split('::')[0])
+    additive+=news_added
     require(read('collection-order.json')==expected_order,'DIAGNOSTIC_COLLECTION_DRIFT')
     new_cases=[]
     for case in ET.parse(evidence/'broad.xml').iter('testcase'):
@@ -75,7 +88,7 @@ def check(evidence):
         historical_equivalence_claimed=False,reference_run=38270359938,
         current_raw_fingerprint=actual['fingerprint_sha256'],reference_raw_fingerprint=previous['fingerprint_sha256'],
         lossless_field_proofs=proofs,source_after=read('source-after.json'))
-    result['reviewed_additive_tests']=dict(tests=90,failures=0,errors=0,skipped=0)
+    result['reviewed_additive_tests']=dict(tests=len(additive),failures=0,errors=0,skipped=0)
     # Existing downstream consumer expects 'pass': only the comparison gate.
     result['pass']=True
     result.update(new=[],missing=[],changed=[])

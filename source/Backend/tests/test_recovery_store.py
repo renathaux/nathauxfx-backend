@@ -185,8 +185,8 @@ def test_migration_creates_empty_fail_closed_tables(store_api, db):
     with db.begin() as s:
         connection = s.connection()
         # Test only the additive migration against otherwise-existing baseline tables.
-        from models import RecoveryLegacyAdoption
-        for model in (RecoveryLegacyAdoption, RecoveryCheckpointHead, RecoveryMutation, RecoveryAttempt, RecoveryAccount):
+        from models import RecoveryLegacyAdoption, RecoveryNewsStrategyCompatibility
+        for model in (RecoveryNewsStrategyCompatibility, RecoveryLegacyAdoption, RecoveryCheckpointHead, RecoveryMutation, RecoveryAttempt, RecoveryAccount):
             model.__table__.drop(connection)
         schema = connection.get_execution_options()['schema_translate_map'][None]
         connection.execute(text('SET LOCAL search_path TO ' + schema))

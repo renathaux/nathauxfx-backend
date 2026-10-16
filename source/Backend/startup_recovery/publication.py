@@ -22,6 +22,13 @@ def execution_checkpoint_identity(payload):
 
 def validate_produced_checkpoint(kind, payload, database):
     """Corroborate new state; never fill its missing identity from current rows."""
+    if kind == 'news_trading_state' and 'news_strategy_compatibility' in database:
+        from startup_recovery.news_strategy_compatibility import validate_retained_events
+        receipts = database['news_strategy_compatibility']
+        if not isinstance(receipts, list) or len(receipts) > 1:
+            raise RecoveryError('NEWS_STRATEGY_COMPATIBILITY_INVALID')
+        for receipt in receipts:
+            validate_retained_events(receipt, database, payload)
     if kind == 'paper_backup':
         from strategies.shared import stage_admitted_paper_payload
         stage_admitted_paper_payload(payload)

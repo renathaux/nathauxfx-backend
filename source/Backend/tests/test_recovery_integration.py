@@ -191,7 +191,7 @@ def test_real_coordinator_publication_to_existing_manager_preserves_intent(
         schema = db.kw['bind'].get_execution_options()['schema_translate_map'][None]
         quoted = db.kw['bind'].dialect.identifier_preparer.quote(schema)
         session.execute(text('CREATE TABLE ' + quoted + '.alembic_version (version_num VARCHAR(32) PRIMARY KEY)'))
-        session.execute(text('INSERT INTO ' + quoted + '.alembic_version VALUES (:v)'), {'v': '20261010_0031'})
+        session.execute(text('INSERT INTO ' + quoted + '.alembic_version VALUES (:v)'), {'v': '20261016_0032'})
         from services.submission_reservation import install_reservation_guard
         install_reservation_guard(session.connection())
     prepare_cutover(store_api, db)
