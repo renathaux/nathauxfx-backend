@@ -85,7 +85,8 @@ class DatabaseConfigurationTests(unittest.TestCase):
             "indicator_stream_heads",
             "strategy_setup_generations",
         }
-        self.assertEqual(set(Base.metadata.tables), expected | RECOVERY_TABLES | {'recovery_legacy_adoptions'})
+        self.assertEqual(set(Base.metadata.tables), expected | RECOVERY_TABLES |
+                         {'recovery_legacy_adoptions', 'recovery_news_strategy_compatibility'})
         legacy_tables = expected - {
             "broker_integration_test_submissions",
             "ctrader_oauth_tokens",
@@ -180,7 +181,8 @@ class DatabaseConfigurationTests(unittest.TestCase):
                 setting_value='unchanged', updated_by='test', updated_at=datetime.now(timezone.utc)))
             session.flush()
             connection = session.connection()
-            for name in ('recovery_legacy_adoptions', 'recovery_checkpoint_heads', 'recovery_mutations',
+            for name in ('recovery_news_strategy_compatibility', 'recovery_legacy_adoptions',
+                         'recovery_checkpoint_heads', 'recovery_mutations',
                          'recovery_attempts', 'recovery_accounts'):
                 Base.metadata.tables[name].drop(connection)
             schema = connection.get_execution_options()['schema_translate_map'][None]
@@ -248,7 +250,8 @@ class DatabaseConfigurationTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertTrue(RECOVERY_TABLES.isdisjoint(tables))
-        source_tables = set(Base.metadata.tables) - RECOVERY_TABLES - {'recovery_legacy_adoptions'} - {
+        source_tables = set(Base.metadata.tables) - RECOVERY_TABLES - {
+            'recovery_legacy_adoptions', 'recovery_news_strategy_compatibility'} - {
             "broker_integration_test_submissions",
             "ctrader_oauth_tokens",
             "strategy_cycle_diagnostics",

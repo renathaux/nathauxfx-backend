@@ -49,7 +49,7 @@ if __name__=='__main__':
     result['backend_migration']=migration
     result['source_after_cleanup']=json.loads((backend/'source-after.json').read_text())
     assert result['source_after_cleanup']['source_files']==398
-    assert result['source_after_cleanup']['manifest_sha256']=='dfca22d3652a11dee9a3ea9b4783e6908deb72b6137590f54f691e7c469c19c0'
+    assert result['source_after_cleanup']['manifest_sha256']=='4481dd529ea440046c0663c6957ca1dc42b8e9aa9a339c7ddbab78bdbc7068f0'
     result['origins']={'application':'c8c82ece5856c2e040b75070bad7888beedd2f60',
         'maintenance':'d223082822bd209858ce4c699e5fa907e654dc29',
         'composite':'63b42795ca26bdecb1be6d7758c8ae757eee90d4',
